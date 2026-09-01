@@ -1,9 +1,20 @@
+import { randomUUID } from 'node:crypto';
 import { McpServer, type CallToolResult, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
   TerminalProtocolError,
   executionProfileSchema,
   terminalListAgentsOutputSchema,
+  codeCancelOutputSchema,
+  codeExecuteOutputSchema,
+  lspRequestOutputSchema,
+  lspStartOutputSchema,
+  lspStopOutputSchema,
+  terminalCancelCodeToolSchema,
+  terminalExecuteCodeBlockToolSchema,
+  terminalLspRequestSchema,
+  terminalLspStartSchema,
+  terminalLspStopSchema,
   terminalMutationOutputSchema,
   terminalReadInputSchema,
   terminalReadOutputSchema,
@@ -386,6 +397,80 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
+  );
+
+  server.registerTool(
+    'terminal_execute_code_block',
+    {
+      title: 'Execute code block',
+      description: 'Execute code through a strict runtime allowlist on a selected local agent. Execution is confined to configured workspace roots and requires a non-read-only profile.',
+      inputSchema: terminalExecuteCodeBlockToolSchema,
+      outputSchema: codeExecuteOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const identity = identityFromContext(ctx);
+      const executionId = input.execution_id ?? randomUUID();
+      const executeInput = { ...input, execution_id: executionId };
+      if (ctx.mcpReq.signal.aborted) throw new TerminalProtocolError('REQUEST_CANCELLED', 'Code execution request was cancelled.');
+      const onAbort = (): void => {
+        void deps.service.cancelCode(identity, { agent_id: input.agent_id, execution_id: executionId }).catch(() => undefined);
+      };
+      ctx.mcpReq.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        return await deps.service.executeCode(identity, executeInput);
+      } finally {
+        ctx.mcpReq.signal.removeEventListener('abort', onAbort);
+      }
+    }),
+  );
+
+  server.registerTool(
+    'terminal_cancel_code',
+    {
+      title: 'Cancel code execution',
+      description: 'Cancel a bounded code execution owned by the authenticated user on the selected local agent.',
+      inputSchema: terminalCancelCodeToolSchema,
+      outputSchema: codeCancelOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.cancelCode(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_lsp_start',
+    {
+      title: 'Start configured LSP server',
+      description: 'Start an administrator-configured language server on a selected local agent within an allowed workspace root.',
+      inputSchema: terminalLspStartSchema,
+      outputSchema: lspStartOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.startLsp(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_lsp_request',
+    {
+      title: 'Send LSP request',
+      description: 'Send one bounded JSON-RPC request to an owned LSP process on the selected local agent.',
+      inputSchema: terminalLspRequestSchema,
+      outputSchema: lspRequestOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.requestLsp(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_lsp_stop',
+    {
+      title: 'Stop LSP server',
+      description: 'Stop an owned LSP process on the selected local agent.',
+      inputSchema: terminalLspStopSchema,
+      outputSchema: lspStopOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.stopLsp(identityFromContext(ctx), input)),
   );
 
   return server;

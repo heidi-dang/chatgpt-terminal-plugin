@@ -31,6 +31,11 @@ function fakeGateway() {
     searchFiles: vi.fn(),
     getSessionMetrics: vi.fn(),
     getTranscript: vi.fn(),
+    executeCode: vi.fn(),
+    cancelCode: vi.fn(),
+    startLsp: vi.fn(),
+    requestLsp: vi.fn(),
+    stopLsp: vi.fn(),
   };
 }
 
@@ -79,10 +84,31 @@ describe('server execution-profile authorization', () => {
       session_id: 'session-a', path: 'blocked.txt', content: 'blocked', create_directories: false,
     })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
 
+    await expect(service.executeCode(readOnlyIdentity, {
+      agent_id: 'agent-a', runtime: 'node', code: 'process.stdout.write("blocked")',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.cancelCode(readOnlyIdentity, {
+      agent_id: 'agent-a', execution_id: '00000000-0000-4000-8000-000000000001',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.startLsp(readOnlyIdentity, {
+      agent_id: 'agent-a', server_id: 'typescript', root: '/workspace',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.requestLsp(readOnlyIdentity, {
+      agent_id: 'agent-a', lsp_id: '00000000-0000-4000-8000-000000000002', method: 'textDocument/hover',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.stopLsp(readOnlyIdentity, {
+      agent_id: 'agent-a', lsp_id: '00000000-0000-4000-8000-000000000002',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+
     expect(gateway.write).not.toHaveBeenCalled();
     expect(gateway.resize).not.toHaveBeenCalled();
     expect(gateway.interrupt).not.toHaveBeenCalled();
     expect(gateway.close).not.toHaveBeenCalled();
     expect(gateway.writeFile).not.toHaveBeenCalled();
+    expect(gateway.executeCode).not.toHaveBeenCalled();
+    expect(gateway.cancelCode).not.toHaveBeenCalled();
+    expect(gateway.startLsp).not.toHaveBeenCalled();
+    expect(gateway.requestLsp).not.toHaveBeenCalled();
+    expect(gateway.stopLsp).not.toHaveBeenCalled();
   });
 });

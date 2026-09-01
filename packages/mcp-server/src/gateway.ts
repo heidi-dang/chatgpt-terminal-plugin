@@ -10,14 +10,28 @@ import {
   gatewayAuthProofSchema,
   gatewayChallengePayload,
   gatewayMessageSchema,
+  codeCancelOutputSchema,
+  codeExecuteOutputSchema,
+  lspRequestOutputSchema,
+  lspStartOutputSchema,
+  lspStopOutputSchema,
   terminalListFilesOutputSchema,
   terminalReadFileOutputSchema,
   terminalReadOutputSchema,
   terminalSearchFilesOutputSchema,
   terminalWriteFileOutputSchema,
   type Agent,
+  type CodeCancelOutput,
+  type CodeExecuteOutput,
   type AgentCommand,
   type ExecutionProfile,
+  type LspRequestOutput,
+  type LspStartOutput,
+  type LspStopOutput,
+  type TerminalExecuteCodeBlockToolArgs,
+  type TerminalLspRequestArgs,
+  type TerminalLspStartArgs,
+  type TerminalLspStopArgs,
   type AgentSessionSnapshot,
   type TerminalEvent,
   type TerminalListFilesOutput,
@@ -294,6 +308,56 @@ export class AgentGateway {
     }, (raw) => terminalSearchFilesOutputSchema.parse(raw));
   }
 
+  async executeCode(userId: string, input: TerminalExecuteCodeBlockToolArgs, executionProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    const executionId = input.execution_id ?? randomUUID();
+    const agentInput = {
+      execution_id: executionId,
+      runtime: input.runtime,
+      code: input.code,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      ...(input.timeout_ms === undefined ? {} : { timeout_ms: input.timeout_ms }),
+    };
+    const timeoutMs = Math.max(this.options.requestTimeoutMs, Math.min(input.timeout_ms ?? 10_000, 120_000) + 2_000);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'code.execute', user_id: userId,
+      execution_profile: executionProfile, input: agentInput,
+    }, (raw) => codeExecuteOutputSchema.parse(raw), timeoutMs);
+  }
+
+  async cancelCode(userId: string, agentId: string, executionId: string, executionProfile: ExecutionProfile): Promise<CodeCancelOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'code.cancel', user_id: userId,
+      execution_profile: executionProfile, input: { execution_id: executionId },
+    }, (raw) => codeCancelOutputSchema.parse(raw));
+  }
+
+  async startLsp(userId: string, input: TerminalLspStartArgs, executionProfile: ExecutionProfile): Promise<LspStartOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'lsp.start', user_id: userId,
+      execution_profile: executionProfile, input: { server_id: input.server_id, root: input.root },
+    }, (raw) => lspStartOutputSchema.parse(raw));
+  }
+
+  async requestLsp(userId: string, input: TerminalLspRequestArgs, executionProfile: ExecutionProfile): Promise<LspRequestOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    const agentInput = { lsp_id: input.lsp_id, method: input.method, ...(input.params === undefined ? {} : { params: input.params }) };
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'lsp.request', user_id: userId,
+      execution_profile: executionProfile, input: agentInput,
+    }, (raw) => lspRequestOutputSchema.parse(raw));
+  }
+
+  async stopLsp(userId: string, input: TerminalLspStopArgs, executionProfile: ExecutionProfile): Promise<LspStopOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'lsp.stop', user_id: userId,
+      execution_profile: executionProfile, input: { lsp_id: input.lsp_id },
+    }, (raw) => lspStopOutputSchema.parse(raw));
+  }
+
   async read(userId: string, sessionId: string, after: number, maxBytes: number, waitMs = 0): Promise<TerminalReadOutput> {
     const record = this.requireSession(userId, sessionId);
     this.assertCursor(record, after);
@@ -556,7 +620,12 @@ export class AgentGateway {
     return this.withServerCursor(snapshot);
   }
 
-  private request<T = AgentSessionSnapshot>(connection: AgentConnection, command: AgentCommand, parseResult?: (raw: unknown) => T): Promise<T> {
+  private request<T = AgentSessionSnapshot>(
+    connection: AgentConnection,
+    command: AgentCommand,
+    parseResult?: (raw: unknown) => T,
+    timeoutMs = this.options.requestTimeoutMs,
+  ): Promise<T> {
     if (connection.socket.readyState !== WebSocket.OPEN) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
     }
@@ -565,7 +634,7 @@ export class AgentGateway {
       const timer = setTimeout(() => {
         this.pending.delete(command.request_id);
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
-      }, this.options.requestTimeoutMs);
+      }, timeoutMs);
       timer.unref();
       this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
       connection.socket.send(JSON.stringify(command), (error) => {

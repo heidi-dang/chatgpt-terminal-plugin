@@ -43,7 +43,6 @@ export class AgentGatewayClient {
     private readonly agent: TerminalAgentApi,
     private readonly options: GatewayClientOptions,
   ) {}
-
   async start(): Promise<void> {
     this.stopped = false;
     this.unsubscribeEvent ??= this.agent.onEvent((event) => {
@@ -180,6 +179,7 @@ export class AgentGatewayClient {
       socket.once('close', () => {
         this.authenticated = false;
         this.clearHeartbeat();
+        this.agent.stopProcessFeatures();
         resolve();
       });
     });
@@ -245,6 +245,16 @@ export class AgentGatewayClient {
         return this.agent.writeFile(command.input.session_id, command.input.path, command.input.content, command.input.create_directories);
       case 'file.search':
         return this.agent.searchFiles(command.input.session_id, command.input.pattern, command.input.path, command.input.include, command.input.max_results, command.input.context_lines);
+      case 'code.execute':
+        return this.agent.executeCode(command.user_id, command.input, command.execution_profile);
+      case 'code.cancel':
+        return this.agent.cancelCode(command.user_id, command.input.execution_id, command.execution_profile);
+      case 'lsp.start':
+        return this.agent.startLsp(command.user_id, command.input, command.execution_profile);
+      case 'lsp.request':
+        return this.agent.requestLsp(command.user_id, command.input, command.execution_profile);
+      case 'lsp.stop':
+        return this.agent.stopLsp(command.user_id, command.input.lsp_id, command.execution_profile);
     }
   }
 

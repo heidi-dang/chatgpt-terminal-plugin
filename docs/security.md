@@ -98,6 +98,14 @@ Workspace roots are configured on the local agent, not trusted from the MCP clie
 
 An empty developer root list means terminal creation is denied rather than unrestricted.
 
+## Structured code and LSP execution
+
+Structured code execution is not a second shell escape hatch. The MCP server requires authenticated non-read-only identity and an explicit owned `agent_id`; the local agent then re-applies the effective execution profile, canonical workspace containment, sanitized execution environment, strict runtime allowlist, timeout/output ceilings, process-group termination and temporary-file cleanup. Unknown runtime identifiers are rejected instead of falling back to a shell. Code/LSP subprocesses are also stopped when the authenticated gateway disconnects.
+
+LSP callers cannot supply executable paths or arbitrary command arguments. They may select only administrator-defined IDs from `TERMINAL_LSP_SERVERS_JSON`, which defaults to an empty map. Each LSP process is bound to its authenticated user and selected agent, starts in a canonical allowed workspace root, is subject to a concurrent-process ceiling, and uses bounded Content-Length framing, receive/header/message/stderr limits and request deadlines. Timed-out LSP requests emit `$/cancelRequest`; malformed framing, process failure, disconnect and shutdown reject outstanding requests and clean up the child process.
+
+Control-plane credentials are removed from both PTY and structured-process environments. These controls constrain the plugin execution surface but do not replace host OS isolation; run the local agent under a dedicated least-privilege account when stronger containment is required.
+
 ## Rate, size and lifecycle limits
 
 Configured controls include:

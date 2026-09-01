@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
-import { executionProfileSchema } from '@terminal/protocol';
+import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
 
 function csv(value: string | undefined): string[] {
   return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
@@ -27,6 +27,9 @@ if (parsedGatewayUrl.protocol !== 'ws:' && parsedGatewayUrl.protocol !== 'wss:')
 const roots = csv(process.env.ALLOWED_WORKSPACE_ROOTS);
 const shells = csv(process.env.AGENT_SHELLS);
 const profile = executionProfileSchema.parse(process.env.EXECUTION_PROFILE ?? 'developer');
+const lspServers = lspServerDefinitionsSchema.parse(
+  process.env.TERMINAL_LSP_SERVERS_JSON ? JSON.parse(process.env.TERMINAL_LSP_SERVERS_JSON) : {},
+);
 if (profile === 'developer' && roots.length === 0) {
   throw new Error('ALLOWED_WORKSPACE_ROOTS is required when EXECUTION_PROFILE=developer.');
 }
@@ -53,6 +56,7 @@ const agent = new LocalTerminalAgent({
   ...(process.env.AGENT_DISPLAY_NAME ? { displayName: process.env.AGENT_DISPLAY_NAME } : {}),
   allowedWorkspaceRoots: roots,
   executionProfile: profile,
+  lspServers,
   ...(shells.length > 0 ? { shells } : {}),
   bufferHighWaterBytes: intEnv('TERMINAL_BUFFER_HIGH_WATER_BYTES', 1024 * 1024),
   maxEventBytes: intEnv('TERMINAL_MAX_EVENT_BYTES', 64 * 1024),
