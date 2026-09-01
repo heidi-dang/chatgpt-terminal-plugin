@@ -203,7 +203,10 @@ export function TerminalApp(): React.JSX.Element {
   function scheduleStreamReconnect(): void {
     const current = viewStateRef.current;
     if (!current || isFinalStatus(current.status) || reconnectTimerRef.current !== undefined) return;
-    const delayMs = Math.min(1000 * 2 ** reconnectAttemptRef.current, 15_000);
+    // Exponential backoff with ±25% jitter to avoid synchronized reconnect storms
+    const base = Math.min(1000 * 2 ** reconnectAttemptRef.current, 15_000);
+    const jitter = base * 0.25 * (2 * Math.random() - 1);
+    const delayMs = Math.max(500, Math.round(base + jitter));
     reconnectAttemptRef.current += 1;
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = undefined;
