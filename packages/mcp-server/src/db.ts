@@ -50,13 +50,13 @@ CREATE TABLE IF NOT EXISTS devices (
   revoked_at TEXT
 );
 
--- Primary lookup is PK (device_id). listByOwner uses owner_id + ORDER BY enrolled_at:
--- composite avoids a TEMP B-TREE sort (see EXPLAIN QUERY PLAN).
+-- listByOwner (all statuses): ordered by enrolled_at without TEMP B-TREE.
 CREATE INDEX IF NOT EXISTS idx_devices_owner_enrolled ON devices(owner_id, enrolled_at);
--- Optional filter path for active-only listings.
-CREATE INDEX IF NOT EXISTS idx_devices_owner_status ON devices(owner_id, status);
-CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
--- Low-cardinality status-only index is intentionally omitted (active|revoked).
+-- listByOwnerActive / status-filtered lists.
+CREATE INDEX IF NOT EXISTS idx_devices_owner_status_enrolled ON devices(owner_id, status, enrolled_at);
+-- Partial index: active devices only (skips large revoked history on common lookups).
+CREATE INDEX IF NOT EXISTS idx_devices_active_owner_enrolled ON devices(owner_id, enrolled_at) WHERE status = 'active';
+-- agent_id index omitted: no hot-path query by agent_id (reduces enroll/revoke write cost).
 `;
 
 export function resolveSqlitePath(registryPath: string): string {
@@ -92,8 +92,28 @@ export function openTerminalDatabase(dbPath: string): TerminalDatabase {
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('schema_version', '1');
   }
 
+  // Refresh planner stats after schema/index changes (cheap on small registries).
+  try {
+    db.exec('ANALYZE');
+  } catch {
+    // optional
+  }
+
   hardenFileModes(dbPath);
   return db;
+}
+
+/** Offline / ops full integrity scan (not used on every open — prefer quick_check there). */
+export function runFullIntegrityCheck(db: TerminalDatabase): string {
+  const rows = db.prepare('PRAGMA integrity_check').all() as Array<Record<string, unknown>>;
+  if (rows.length === 0) return 'ok';
+  const messages = rows.map((row) => String(Object.values(row)[0] ?? '')).filter(Boolean);
+  return messages.join('; ') || 'ok';
+}
+
+/** Refresh query planner statistics after bulk import/migration. */
+export function analyzeDatabase(db: TerminalDatabase): void {
+  db.exec('ANALYZE');
 }
 
 export function checkpointAndClose(db: TerminalDatabase | undefined, dbPath?: string): void {

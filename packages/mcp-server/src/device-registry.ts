@@ -4,9 +4,11 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import { TerminalProtocolError, deviceEnrollmentRequestSchema, type DeviceEnrollmentRequest } from '@terminal/protocol';
 import {
+  analyzeDatabase,
   checkpointAndClose,
   openTerminalDatabase,
   resolveSqlitePath,
+  runFullIntegrityCheck,
   runImmediateTransaction,
   type TerminalDatabase,
 } from './db.js';
@@ -99,6 +101,23 @@ export class DeviceRegistry {
     }
     const rows = this.stmts.listByOwner.all(ownerId) as DeviceRow[];
     return rows.map(rowToRecord);
+  }
+
+  /** Active devices only — uses partial / status composite indexes when present. */
+  listByOwnerActive(ownerId: string): DeviceRecord[] {
+    if (!this.db || !this.stmts) {
+      return [...this.memory.values()]
+        .filter((r) => r.owner_id === ownerId && r.status === 'active')
+        .map((r) => ({ ...r }));
+    }
+    const rows = this.stmts.listByOwnerActive.all(ownerId) as DeviceRow[];
+    return rows.map(rowToRecord);
+  }
+
+  /** Offline full integrity check (ops); not invoked on the request path. */
+  checkIntegrity(): string {
+    if (!this.db) return 'ok';
+    return runFullIntegrityCheck(this.db);
   }
 
   async enroll(raw: DeviceEnrollmentRequest, presentedToken: string | undefined): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
@@ -278,10 +297,13 @@ export class DeviceRegistry {
       }
     });
 
+    // Planner stats after bulk import.
+    analyzeDatabase(this.db);
+
     // Rewrite legacy JSON to version 2 for operators that still inspect the file,
     // then keep SQLite as the source of truth going forward.
     if (jsonPath.endsWith('.json')) {
-      const devices = (this.db.prepare('SELECT * FROM devices').all() as DeviceRow[]).map(rowToRecord);
+      const devices = (this.db.prepare(DEVICE_SELECT_SQL).all() as DeviceRow[]).map(rowToRecord);
       const payload = registrySchema.parse({ version: 2, devices });
       const temporary = `${jsonPath}.tmp`;
       await writeFileAsync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -319,17 +341,31 @@ function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
 }
 
+/** Explicit projection (avoid SELECT *) so column set stays intentional as the table evolves. */
+const DEVICE_COLUMNS = `
+  device_id, agent_id, owner_id, public_key, display_name, status, key_version,
+  enrolled_at, updated_at, last_seen_at, revoked_at
+`.trim();
+const DEVICE_SELECT_SQL = `SELECT ${DEVICE_COLUMNS} FROM devices`;
+
 type PreparedDeviceStatements = {
   getById: { get: (deviceId: string) => unknown };
   listByOwner: { all: (ownerId: string) => unknown[] };
+  listByOwnerActive: { all: (ownerId: string) => unknown[] };
   upsert: { run: (...args: unknown[]) => unknown };
   markSeen: { run: (lastSeen: string, updated: string, deviceId: string) => unknown };
 };
 
 function prepareStatements(db: TerminalDatabase): PreparedDeviceStatements {
   return {
-    getById: db.prepare('SELECT * FROM devices WHERE device_id = ?'),
-    listByOwner: db.prepare('SELECT * FROM devices WHERE owner_id = ? ORDER BY enrolled_at ASC'),
+    getById: db.prepare(`${DEVICE_SELECT_SQL} WHERE device_id = ?`),
+    listByOwner: db.prepare(
+      `${DEVICE_SELECT_SQL} WHERE owner_id = ? ORDER BY enrolled_at ASC`,
+    ),
+    // Partial idx_devices_active_owner_enrolled + status filter for revoked-heavy owners.
+    listByOwnerActive: db.prepare(
+      `${DEVICE_SELECT_SQL} WHERE owner_id = ? AND status = 'active' ORDER BY enrolled_at ASC`,
+    ),
     upsert: db.prepare(`
       INSERT INTO devices (
         device_id, agent_id, owner_id, public_key, display_name, status, key_version,
