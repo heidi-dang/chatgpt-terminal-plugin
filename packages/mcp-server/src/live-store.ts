@@ -296,12 +296,43 @@ export class RedisLiveStore implements LiveStore {
     this.sub.on?.('error', (err) => {
       console.error(JSON.stringify({ level: 'error', event: 'redis.sub_error', error: String(err) }));
     });
+    // After reconnect, node-redis restores subscriptions for channels registered via subscribe();
+    // re-assert the command channel explicitly so HA command routing recovers.
+    this.sub.on?.('ready', () => {
+      if (this.closed) return;
+      void this.resubscribeCommandChannel();
+    });
     await this.client.connect();
     await this.sub.connect();
-    await this.sub.subscribe(cmdChannel(this.instanceId), (message) => {
-      void this.handleIncomingCommand(message);
-    });
+    await this.resubscribeCommandChannel();
     this.started = true;
+  }
+
+  private async resubscribeCommandChannel(): Promise<void> {
+    try {
+      await this.sub.subscribe(cmdChannel(this.instanceId), (message) => {
+        void this.handleIncomingCommand(message);
+      });
+      // Restore active session/request channels after reconnect.
+      for (const [channel, handler] of this.channelHandlers) {
+        try {
+          await this.sub.subscribe(channel, handler);
+        } catch (error) {
+          console.error(JSON.stringify({
+            level: 'error',
+            event: 'redis.resubscribe_failed',
+            channel,
+            error: String(error),
+          }));
+        }
+      }
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'redis.cmd_resubscribe_failed',
+        error: String(error),
+      }));
+    }
   }
 
   async getSession(sessionId: string): Promise<SharedSessionRecord | undefined> {
@@ -364,12 +395,30 @@ export class RedisLiveStore implements LiveStore {
   }
 
   async setAgentPresence(agentId: string, presence: AgentPresence): Promise<void> {
+    const key = agentKey(agentId);
+    const payload = JSON.stringify(presence);
+    const ttl = String(this.ttlSeconds);
+    if (typeof this.client.eval === 'function') {
+      const previous = await this.getAgentPresence(agentId);
+      const result = await this.client.eval(SET_PRESENCE_LUA, {
+        keys: [key],
+        arguments: [payload, ttl, String(presence.lastSeenMs)],
+      });
+      // result is 0 when rejected as stale, 1 when written
+      if (result === 0 || result === '0') return;
+      if (previous && previous.ownerId !== presence.ownerId) {
+        await this.client.sRem(ownerAgentsKey(previous.ownerId), agentId);
+      }
+      await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
+      await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
+      return;
+    }
     const previous = await this.getAgentPresence(agentId);
     if (previous && previous.lastSeenMs > presence.lastSeenMs) return;
     if (previous && previous.ownerId !== presence.ownerId) {
       await this.client.sRem(ownerAgentsKey(previous.ownerId), agentId);
     }
-    await this.client.set(agentKey(agentId), JSON.stringify(presence), { EX: this.ttlSeconds });
+    await this.client.set(key, payload, { EX: this.ttlSeconds });
     await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
     await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
   }
@@ -607,6 +656,23 @@ if onlyInstance ~= '' then
 end
 redis.call('DEL', key)
 redis.call('SREM', ownerKey, agentId)
+return 1
+`;
+
+/** Lua: write presence only if lastSeenMs is >= current (or key missing). */
+const SET_PRESENCE_LUA = `
+local key = KEYS[1]
+local incoming = ARGV[1]
+local ttl = tonumber(ARGV[2])
+local lastSeen = tonumber(ARGV[3]) or 0
+local current = redis.call('GET', key)
+if current then
+  local curSeen = tonumber(string.match(current, '"lastSeenMs":(%d+)')) or 0
+  if lastSeen < curSeen then
+    return 0
+  end
+end
+redis.call('SET', key, incoming, 'EX', ttl)
 return 1
 `;
 

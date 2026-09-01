@@ -95,7 +95,14 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     res.status(200).json({
       status: 'ok',
       timestamp: new Date().toISOString(),
-      ...(config.nodeEnv === 'production' ? {} : { active_agents: gateway.activeAgentCount(), mcp_sessions: sessions.size }),
+      ...(config.nodeEnv === 'production'
+        ? {}
+        : {
+            active_agents: gateway.activeAgentCount(),
+            mcp_sessions: sessions.size,
+            live_store: liveStore.backend,
+            instance_id: liveStore.instanceId,
+          }),
     });
   });
 
@@ -256,79 +263,85 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   app.delete('/mcp', authMiddleware, (req, res) => void mcpHandler(req, res));
 
   app.get('/terminal/:sessionId/events', (req, res) => {
-    const sessionId = req.params.sessionId;
-    const token = typeof req.query.token === 'string' ? req.query.token : undefined;
-    if (!token) {
-      res.status(401).json({ error: 'STREAM_TOKEN_EXPIRED' });
-      return;
-    }
-
-    try {
-      const payload = streamTokens.verify(token, sessionId);
-      const record = gateway.getSessionForUser(payload.sub, sessionId);
-      const headerCursor = req.get('last-event-id');
-      const queryCursor = typeof req.query.after === 'string' ? req.query.after : undefined;
-      const parsedCursor = Number.parseInt(headerCursor ?? queryCursor ?? '0', 10);
-      const cursor = Number.isFinite(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
-      if (cursor < record.earliestSequence - 1 || cursor > record.latestSequence) {
-        throw new TerminalProtocolError('INVALID_CURSOR', 'SSE cursor is outside the retained terminal event range.');
-      }
-
-      res.status(200);
-      res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-      res.setHeader('access-control-allow-origin', '*');
-      res.setHeader('cross-origin-resource-policy', 'cross-origin');
-      res.setHeader('cache-control', 'no-cache, no-store');
-      res.setHeader('connection', 'keep-alive');
-      res.setHeader('x-accel-buffering', 'no');
-      res.flushHeaders();
-
-      let lastSequence = cursor;
-      let replaying = true;
-      const pendingLive: typeof record.events = [];
-      const sendEvent = (event: (typeof record.events)[number]) => {
-        if (event.sequence <= lastSequence || res.writableEnded || res.destroyed) return;
-        writeSse(res, event.sequence, event);
-        lastSequence = event.sequence;
-      };
-      const unsubscribe = gateway.subscribe(sessionId, (event) => {
-        if (event.sequence <= lastSequence) return;
-        if (replaying) {
-          pendingLive.push(event);
-          return;
-        }
-        sendEvent(event);
-      });
-
-      const replay = record.events.filter((event) => event.sequence > cursor);
-      for (const event of replay) sendEvent(event);
-      replaying = false;
-      pendingLive.sort((left, right) => left.sequence - right.sequence);
-      for (const event of pendingLive) sendEvent(event);
-
-      const keepAlive = setInterval(() => {
-        if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
-      }, 15_000);
-      keepAlive.unref();
-      const expiryTimer = setTimeout(() => res.end(), Math.max(1, payload.exp * 1000 - Date.now()));
-      expiryTimer.unref();
-      let cleaned = false;
-      const cleanup = () => {
-        if (cleaned) return;
-        cleaned = true;
-        clearInterval(keepAlive);
-        clearTimeout(expiryTimer);
-        unsubscribe();
-      };
-      res.once('close', cleanup);
-      res.once('error', cleanup);
-    } catch (error) {
-      if (error instanceof TerminalProtocolError) {
-        res.status(error.code === 'STREAM_TOKEN_EXPIRED' ? 401 : error.code === 'PERMISSION_DENIED' ? 403 : 409).json(error.toPayload());
+    void (async () => {
+      const sessionId = req.params.sessionId;
+      const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+      if (!token) {
+        res.status(401).json({ error: 'STREAM_TOKEN_EXPIRED' });
         return;
       }
-      res.status(500).json({ error: 'internal_server_error' });
-    }
+
+      try {
+        const payload = streamTokens.verify(token, sessionId);
+        // Must await: loads shared Redis/SQLite-backed session state across instances.
+        const record = await gateway.getSessionForUser(payload.sub, sessionId);
+        const headerCursor = req.get('last-event-id');
+        const queryCursor = typeof req.query.after === 'string' ? req.query.after : undefined;
+        const parsedCursor = Number.parseInt(headerCursor ?? queryCursor ?? '0', 10);
+        const cursor = Number.isFinite(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
+        if (cursor < record.earliestSequence - 1 || cursor > record.latestSequence) {
+          throw new TerminalProtocolError('INVALID_CURSOR', 'SSE cursor is outside the retained terminal event range.');
+        }
+
+        res.status(200);
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('access-control-allow-origin', '*');
+        res.setHeader('cross-origin-resource-policy', 'cross-origin');
+        res.setHeader('cache-control', 'no-cache, no-store');
+        res.setHeader('connection', 'keep-alive');
+        res.setHeader('x-accel-buffering', 'no');
+        res.flushHeaders();
+
+        let lastSequence = cursor;
+        let replaying = true;
+        const pendingLive: typeof record.events = [];
+        const sendEvent = (event: (typeof record.events)[number]) => {
+          if (event.sequence <= lastSequence || res.writableEnded || res.destroyed) return;
+          writeSse(res, event.sequence, event);
+          lastSequence = event.sequence;
+        };
+        const unsubscribe = gateway.subscribe(sessionId, (event) => {
+          if (event.sequence <= lastSequence) return;
+          if (replaying) {
+            pendingLive.push(event);
+            return;
+          }
+          sendEvent(event);
+        });
+
+        const replay = record.events.filter((event) => event.sequence > cursor);
+        for (const event of replay) sendEvent(event);
+        replaying = false;
+        pendingLive.sort((left, right) => left.sequence - right.sequence);
+        for (const event of pendingLive) sendEvent(event);
+
+        const keepAlive = setInterval(() => {
+          if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
+        }, 15_000);
+        keepAlive.unref();
+        const expiryTimer = setTimeout(() => res.end(), Math.max(1, payload.exp * 1000 - Date.now()));
+        expiryTimer.unref();
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          clearInterval(keepAlive);
+          clearTimeout(expiryTimer);
+          unsubscribe();
+        };
+        res.once('close', cleanup);
+        res.once('error', cleanup);
+      } catch (error) {
+        if (error instanceof TerminalProtocolError) {
+          if (!res.headersSent) {
+            res.status(error.code === 'STREAM_TOKEN_EXPIRED' ? 401 : error.code === 'PERMISSION_DENIED' ? 403 : 409).json(error.toPayload());
+          }
+          return;
+        }
+        console.error(JSON.stringify({ level: 'error', event: 'terminal.sse_failed', error: errorMessage(error) }));
+        if (!res.headersSent) res.status(500).json({ error: 'internal_server_error' });
+      }
+    })();
   });
 
   const httpServer = createServer(app);

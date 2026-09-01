@@ -400,51 +400,61 @@ export class AgentGateway {
         }
         if (message.type === 'agent.resume') {
           if (message.agent_id !== registeredAgentId) throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent resume identity mismatch.');
-          const sequences: Record<string, number> = {};
-          for (const snapshot of message.sessions) {
-            const session = snapshot.session;
-            if (session.user_id !== ownerId || session.agent_id !== registeredAgentId) {
-              throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session identity mismatch.');
+          void (async () => {
+            try {
+              const sequences: Record<string, number> = {};
+              for (const snapshot of message.sessions) {
+                const session = snapshot.session;
+                if (session.user_id !== ownerId || session.agent_id !== registeredAgentId) {
+                  throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session identity mismatch.');
+                }
+                if (!isProfileAtMost(session.execution_profile, connection.agent.execution_profile)) {
+                  throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session exceeds the agent execution profile.');
+                }
+                if (this.isFinalSessionRetentionExpired(session, Date.now())) {
+                  sequences[session.session_id] = snapshot.cursor;
+                  this.sessions.delete(session.session_id);
+                  this.eventEmitter.removeAllListeners(`session:${session.session_id}`);
+                  await this.liveStore.deleteSession(session.session_id);
+                  continue;
+                }
+                // Prefer shared store so resume is correct after failover / multi-instance.
+                const existing = await this.loadSession(session.session_id);
+                if (existing?.ownerId && existing.ownerId !== ownerId) {
+                  throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session owner mismatch.');
+                }
+                if (existing && existing.latestSequence > snapshot.cursor) {
+                  throw new TerminalProtocolError('INVALID_CURSOR', 'Server terminal cursor is ahead of the resumed agent session.');
+                }
+                const baseCursor = existing?.latestSequence ?? snapshot.earliestCursor;
+                const record = existing ?? {
+                  ownerId,
+                  agentId: registeredAgentId,
+                  events: [],
+                  latestSequence: baseCursor,
+                  earliestSequence: baseCursor + 1,
+                  retainedBytes: 0,
+                };
+                if (record.latestSequence < snapshot.earliestCursor) {
+                  record.events = [];
+                  record.retainedBytes = 0;
+                  record.latestSequence = snapshot.earliestCursor;
+                  record.earliestSequence = snapshot.earliestCursor + 1;
+                }
+                this.sessions.set(session.session_id, record);
+                sequences[session.session_id] = record.latestSequence;
+                const resumed = { ...session };
+                if (resumed.status === 'disconnected') resumed.status = 'running';
+                await this.upsertSnapshot({ ...snapshot, session: resumed }, ownerId);
+              }
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'agent.resume.ack', sequences }));
+              }
+            } catch (error) {
+              console.error(JSON.stringify({ level: 'error', event: 'gateway.resume_failed', error: errorMessage(error) }));
+              if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'invalid agent resume');
             }
-            if (!isProfileAtMost(session.execution_profile, connection.agent.execution_profile)) {
-              throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session exceeds the agent execution profile.');
-            }
-            if (this.isFinalSessionRetentionExpired(session, Date.now())) {
-              sequences[session.session_id] = snapshot.cursor;
-              this.sessions.delete(session.session_id);
-              this.eventEmitter.removeAllListeners(`session:${session.session_id}`);
-              void this.liveStore.deleteSession(session.session_id);
-              continue;
-            }
-            const existing = this.sessions.get(session.session_id);
-            if (existing?.ownerId && existing.ownerId !== ownerId) {
-              throw new TerminalProtocolError('PERMISSION_DENIED', 'Resumed terminal session owner mismatch.');
-            }
-            if (existing && existing.latestSequence > snapshot.cursor) {
-              throw new TerminalProtocolError('INVALID_CURSOR', 'Server terminal cursor is ahead of the resumed agent session.');
-            }
-            const baseCursor = existing?.latestSequence ?? snapshot.earliestCursor;
-            const record = existing ?? {
-              ownerId,
-              agentId: registeredAgentId,
-              events: [],
-              latestSequence: baseCursor,
-              earliestSequence: baseCursor + 1,
-              retainedBytes: 0,
-            };
-            if (record.latestSequence < snapshot.earliestCursor) {
-              record.events = [];
-              record.retainedBytes = 0;
-              record.latestSequence = snapshot.earliestCursor;
-              record.earliestSequence = snapshot.earliestCursor + 1;
-            }
-            this.sessions.set(session.session_id, record);
-            sequences[session.session_id] = record.latestSequence;
-            const resumed = { ...session };
-            if (resumed.status === 'disconnected') resumed.status = 'running';
-            void this.upsertSnapshot({ ...snapshot, session: resumed }, ownerId);
-          }
-          socket.send(JSON.stringify({ type: 'agent.resume.ack', sequences }));
+          })();
           return;
         }
         if (message.type === 'response') this.resolveResponse(registeredAgentId, message);
