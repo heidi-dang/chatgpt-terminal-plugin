@@ -239,6 +239,175 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-output')?.textContent).toContain('recovered\n');
   });
 
+  it('ignores a stale stream refresh after a same-surface PTY replacement', async () => {
+    const app = createFakeApp();
+    const surfaceId = '44444444-4444-4444-8444-444444444444';
+    let resolveOldRefresh: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh' && args.session_id === 'session-1') {
+        return new Promise<CallToolResult>((resolve) => { resolveOldRefresh = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const initial = initialResult();
+    app.ontoolresult?.({
+      ...initial,
+      structuredContent: {
+        ...initial.structuredContent,
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+      },
+    });
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveOldRefresh).toBeTypeOf('function'));
+
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-2',
+        status: 'running',
+        cursor: 2,
+        initial_output: 'replacement\r\n',
+        cwd: '/replacement',
+        shell: 'bash',
+      },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=replacement-race',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    const replacement = terminalSource('replacement-race');
+
+    resolveOldRefresh?.({
+      structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=stale-refresh',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(replacement.close).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances.some((candidate) => candidate.url.includes('token=stale-refresh'))).toBe(false);
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+    viewer.destroy();
+  });
+
+  it('does not let stale cursor resynchronization restore a replaced PTY', async () => {
+    const app = createFakeApp();
+    const surfaceId = '55555555-5555-4555-8555-555555555555';
+    let resolveOldStatus: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh' && args.session_id === 'session-1') {
+        return Promise.resolve({ isError: true, _meta: { terminal_error: { code: 'INVALID_CURSOR' } } });
+      }
+      if (name === 'terminal_status' && args.session_id === 'session-1') {
+        return new Promise<CallToolResult>((resolve) => { resolveOldStatus = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const initial = initialResult();
+    app.ontoolresult?.({
+      ...initial,
+      structuredContent: {
+        ...initial.structuredContent,
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+      },
+    });
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveOldStatus).toBeTypeOf('function'));
+
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-2',
+        status: 'running',
+        cursor: 2,
+        initial_output: 'replacement\r\n',
+        cwd: '/replacement',
+        shell: 'bash',
+      },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=replacement-resync',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+
+    resolveOldStatus?.({
+      structuredContent: {
+        session_id: 'session-1',
+        status: 'running',
+        cursor: 8,
+        cwd: '/stale-session',
+        shell: 'bash',
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('Live output gap');
+    viewer.destroy();
+  });
+
+  it('does not recreate a terminal stream when refresh completes after viewer destruction', async () => {
+    const app = createFakeApp();
+    let resolveRefresh: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh') {
+        return new Promise<CallToolResult>((resolve) => { resolveRefresh = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'));
+
+    const sourcesBeforeDestroy = FakeEventSource.instances.length;
+    viewer.destroy();
+    resolveRefresh?.({
+      structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=late-refresh',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(FakeEventSource.instances).toHaveLength(sourcesBeforeDestroy);
+  });
+
   it('falls back to bounded MCP terminal reads when direct SSE cannot connect', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
@@ -541,6 +710,44 @@ describe('terminal MCP App UI', () => {
 
     expect(source.close).toHaveBeenCalledTimes(1);
     expect(app.callServerTool).not.toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+  });
+
+  it('ignores an in-flight surface heartbeat after viewer destruction', async () => {
+    const app = createFakeApp();
+    const surfaceId = '66666666-6666-4666-8666-666666666666';
+    let resolveSurface: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_surface_status') {
+        return new Promise<CallToolResult>((resolve) => { resolveSurface = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.({ structuredContent: { surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null } });
+    viewer.markBridgeReady();
+    await vi.waitFor(() => expect(resolveSurface).toBeTypeOf('function'));
+    viewer.destroy();
+
+    resolveSurface?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-late',
+        status: 'running',
+        cursor: 1,
+        initial_output: 'late-output\r\n',
+        cwd: '/late',
+        shell: 'bash',
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.getElementById('terminal-path')?.textContent).not.toBe('/late');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('late-output');
   });
 
   it('hot reloads CSS without replacing the document or terminal SSE source', async () => {

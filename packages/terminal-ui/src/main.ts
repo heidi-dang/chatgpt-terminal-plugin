@@ -492,7 +492,8 @@ export class TerminalViewer {
   private eventSource: EventSource | undefined;
   private styleSource: EventSource | undefined;
   private lastSequence = 0;
-  private refreshInFlight = false;
+  private refreshId = 0;
+  private refreshing = false;
   private reconnectAttempt = 0;
   private reconnectTimer: number | undefined;
   private refreshTimer: number | undefined;
@@ -587,6 +588,8 @@ export class TerminalViewer {
       if (!canSwitch) return;
       this.viewState = mergeViewState(this.viewState, next);
       if (previousSession !== next.session_id) {
+        this.refreshId += 1;
+        this.refreshing = false;
         this.eventSource?.close();
         this.eventSource = undefined;
         this.clearReconnectTimer();
@@ -609,13 +612,10 @@ export class TerminalViewer {
 
   destroy(): void {
     this.stopSurfaceSync();
-    this.eventSource?.close();
+    this.finishStream();
     this.styleSource?.close();
-    this.eventSource = undefined;
     this.styleSource = undefined;
-    this.clearReconnectTimer();
-    this.clearRefreshTimer();
-    this.stopReadFallback();
+    this.surfaceId = undefined;
     this.flushOutput();
   }
 
@@ -747,6 +747,8 @@ export class TerminalViewer {
   }
 
   private finishStream(): void {
+    this.refreshId += 1;
+    this.refreshing = false;
     this.eventSource?.close();
     this.eventSource = undefined;
     this.clearReconnectTimer();
@@ -840,6 +842,7 @@ export class TerminalViewer {
 
   private async resynchronizeCursor(sessionId: string): Promise<void> {
     const statusResult = await this.callTool('terminal_status', { session_id: sessionId });
+    if (this.viewState?.session_id !== sessionId) return;
     const status = parseViewState(statusResult);
     if (statusResult.isError || !status) throw new Error('Unable to resynchronize terminal cursor.');
     if (status.cursor > this.lastSequence) this.queueOutput('\n[Live output gap: older terminal output was no longer retained]\n');
@@ -862,30 +865,37 @@ export class TerminalViewer {
 
   private refreshStream(retryOnFailure: boolean): void {
     const current = this.viewState;
-    if (!current || isFinalStatus(current.status) || this.refreshInFlight) return;
+    if (!current || isFinalStatus(current.status) || this.refreshing) return;
+    const sessionId = current.session_id;
+    const refreshId = ++this.refreshId;
+    const stale = () => refreshId !== this.refreshId;
     this.clearReconnectTimer();
-    this.refreshInFlight = true;
+    this.refreshing = true;
     if (!this.readFallbackActive) {
       this.transportMode = 'sse';
       this.streamState = 'reconnecting';
       this.renderState();
     }
     void this.callTool('terminal_stream_refresh', {
-      session_id: current.session_id,
+      session_id: sessionId,
       after: this.lastSequence,
     }).then(async (result) => {
+      if (stale()) return;
       if (result.isError && terminalErrorCode(result) === 'INVALID_CURSOR') {
-        await this.resynchronizeCursor(current.session_id);
+        await this.resynchronizeCursor(sessionId);
+        if (stale()) return;
         result = await this.callTool('terminal_stream_refresh', {
-          session_id: current.session_id,
+          session_id: sessionId,
           after: this.lastSequence,
         });
+        if (stale()) return;
       }
       if (result.isError) throw new Error(`Terminal stream refresh failed: ${terminalErrorCode(result) ?? 'unknown error'}`);
       const refreshed = parseStreamMeta(result);
       if (!refreshed) throw new Error('Terminal stream refresh returned no stream capability.');
       this.useStream(refreshed);
     }).catch((error) => {
+      if (stale()) return;
       console.error('[terminal-app] stream refresh failed', error);
       this.startReadFallback();
       if (!this.readFallbackActive) {
@@ -895,7 +905,7 @@ export class TerminalViewer {
       }
       if (retryOnFailure) this.scheduleStreamReconnect();
     }).finally(() => {
-      this.refreshInFlight = false;
+      if (!stale()) this.refreshing = false;
     });
   }
 
