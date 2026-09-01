@@ -511,7 +511,7 @@ export function TerminalApp(): React.JSX.Element {
       <footer className="terminal-footer">
         <span>{viewState?.shell ?? 'shell'}</span>
         <span>SSE {streamState.toUpperCase()}</span>
-        {viewState?.exit_code != null ? <span className="terminal-exit">EXIT {viewState.exit_code}</span> : null}
+        {viewState?.exit_code != null ? <span className="terminal-exit" data-success={viewState.exit_code === 0 ? 'true' : 'false'}>EXIT {viewState.exit_code}</span> : null}
       </footer>
     </main>
   );

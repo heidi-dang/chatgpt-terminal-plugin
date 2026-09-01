@@ -175,6 +175,8 @@ body { background: transparent; color: #f0f6fc; }
 }
 .terminal-footer span:nth-child(2) { color: #3fb950; }
 .terminal-exit { margin-left: auto; }
+.terminal-exit[data-success="true"] { color: #56d364; }
+.terminal-exit[data-success="false"] { color: #ff7b72; }
 
 .terminal-error {
   padding: 14px;
@@ -200,6 +202,12 @@ body { background: transparent; color: #f0f6fc; }
   .terminal-frame { min-height: 430px; padding: 9px 0 6px 8px; }
   .terminal-host { min-height: 420px; }
   .terminal-footer { gap: 8px; min-height: 28px; padding-inline: 10px; font-size: 8px; }
+}
+
+/* Respect user preference for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .state-dot { animation: none !important; }
+  .terminal-status { transition: none !important; }
 }
 
 @media (max-width: 390px) {
