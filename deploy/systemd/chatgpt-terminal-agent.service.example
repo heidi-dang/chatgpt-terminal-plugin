@@ -1,0 +1,28 @@
+# Install as a user service for the OS account whose workspaces/tools ChatGPT may access.
+# Suggested repository install path: ~/.local/share/chatgpt-terminal-plugin
+# Suggested environment path: ~/.config/chatgpt-terminal-plugin/agent.env
+[Unit]
+Description=ChatGPT Terminal local agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin
+EnvironmentFile=%h/.config/chatgpt-terminal-plugin/agent.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pnpm --filter @terminal/local-agent start
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Do not add aggressive filesystem sandboxing here without considering the intended
+# terminal access. The agent deliberately runs commands with this user's normal OS
+# permissions; use a dedicated OS account/container if stronger containment is needed.
+
+[Install]
+WantedBy=default.target

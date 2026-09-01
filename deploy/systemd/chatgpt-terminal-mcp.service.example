@@ -1,0 +1,36 @@
+[Unit]
+Description=ChatGPT Terminal MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chatgpt-terminal
+Group=chatgpt-terminal
+WorkingDirectory=/opt/chatgpt-terminal-plugin
+EnvironmentFile=/etc/chatgpt-terminal/mcp.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env pnpm --filter @terminal/mcp-server start
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/chatgpt-terminal /var/log/chatgpt-terminal
+
+[Install]
+WantedBy=multi-user.target

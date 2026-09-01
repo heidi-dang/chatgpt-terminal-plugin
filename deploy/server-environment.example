@@ -1,0 +1,56 @@
+# Production MCP server environment template.
+# Copy to a protected file outside the repository and replace every example value.
+NODE_ENV=production
+MCP_HOST=127.0.0.1
+MCP_PORT=8787
+MCP_PUBLIC_URL=https://terminal.example.com/mcp
+
+AGENT_GATEWAY_PATH=/agent
+AGENT_ENROLLMENT_PATH=/agent/enroll
+AGENT_DEVICE_REGISTRY_PATH=/var/lib/chatgpt-terminal/devices.json
+AGENT_ENROLLMENT_TOKEN=replace-with-a-long-random-bootstrap-secret
+AGENT_AUTH_CHALLENGE_TTL_MS=10000
+
+# Hostnames only, comma-separated. If omitted in production, MCP_PUBLIC_URL hostname is used.
+ALLOWED_HOSTS=terminal.example.com
+# Leave empty unless browser origins outside the MCP App stream endpoint must call Express routes.
+ALLOWED_ORIGINS=
+
+# Modes:
+# - jwt: the origin validates the client's OAuth bearer JWT and advertises OAuth metadata.
+# - cloudflare-access: Cloudflare Access Managed OAuth protects /mcp and the origin validates Cf-Access-Jwt-Assertion.
+MCP_AUTH_MODE=jwt
+MCP_DEFAULT_EXECUTION_PROFILE=developer
+OAUTH_ISSUER=https://auth.example.com
+OAUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
+OAUTH_AUDIENCE=terminal-mcp
+# Required for jwt mode; optional/unused by the origin in cloudflare-access mode.
+OAUTH_AUTHORIZATION_ENDPOINT=https://auth.example.com/authorize
+OAUTH_TOKEN_ENDPOINT=https://auth.example.com/token
+OAUTH_REGISTRATION_ENDPOINT=
+OAUTH_REQUIRED_SCOPES=terminal
+OAUTH_ADVERTISED_SCOPES=terminal,offline_access
+# Set true only for a reviewed provider such as Cloudflare Access whose assertion carries no OAuth scopes.
+OAUTH_ALLOW_SCOPELESS_TOKENS=false
+# Use email only when the provider's validated assertion supplies email and device owner IDs use that value.
+OAUTH_USER_ID_CLAIM=sub
+
+STREAM_TOKEN_SECRET=replace-with-at-least-32-random-bytes
+STREAM_TOKEN_TTL_SECONDS=120
+
+TERMINAL_MAX_READ_BYTES=32768
+TERMINAL_MAX_EVENT_BYTES=65536
+TERMINAL_BUFFER_HIGH_WATER_BYTES=1048576
+TERMINAL_MAX_SESSIONS_PER_USER=4
+TERMINAL_MAX_SESSIONS_PER_AGENT=8
+TERMINAL_IDLE_TIMEOUT_MS=1800000
+TERMINAL_MAX_LIFETIME_MS=28800000
+# Keep final session metadata/events briefly for status, UI reconnect, and post-mortem reads, then release memory.
+TERMINAL_CLOSED_SESSION_RETENTION_MS=900000
+TERMINAL_SWEEP_INTERVAL_MS=30000
+AGENT_REQUEST_TIMEOUT_MS=15000
+REQUESTS_PER_MINUTE=120
+
+AUDIT_LOG_PATH=/var/log/chatgpt-terminal/audit.jsonl
+TRANSCRIPT_LOG_PATH=/var/log/chatgpt-terminal/transcript.jsonl
+TRANSCRIPT_RETENTION_DAYS=7

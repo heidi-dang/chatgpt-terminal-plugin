@@ -1,0 +1,20 @@
+# Set TERMINAL_DOMAIN to the public hostname before loading this Caddyfile.
+# Optional MCP_UPSTREAM defaults to loopback:8787.
+{$TERMINAL_DOMAIN} {
+    encode zstd gzip
+
+    reverse_proxy {$MCP_UPSTREAM:127.0.0.1:8787} {
+        # WebSocket upgrades are automatic. Immediate flushing keeps SSE terminal output live.
+        flush_interval -1
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        -Server
+    }
+
+    # Access logging is intentionally not enabled in this example because terminal
+    # stream capabilities are carried in a short-lived query parameter. If you
+    # enable request logs, configure query-string redaction first.
+}

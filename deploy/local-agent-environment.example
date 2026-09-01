@@ -1,0 +1,27 @@
+# Local terminal-agent environment template.
+# Run the agent as the OS user whose tools/workspaces it is intended to access. Do not run as root.
+AGENT_GATEWAY_URL=wss://terminal.example.com/agent
+AGENT_IDENTITY_PATH=/home/your-user/.config/chatgpt-terminal-plugin/device.json
+AGENT_DISPLAY_NAME=Developer workstation
+
+EXECUTION_PROFILE=developer
+ALLOWED_WORKSPACE_ROOTS=/home/your-user/src,/home/your-user/work
+# Optional comma-separated allowlist. Defaults are platform-specific when omitted.
+AGENT_SHELLS=bash,zsh
+
+AGENT_HEARTBEAT_MS=15000
+AGENT_RECONNECT_MAX_MS=30000
+AGENT_MAX_INFLIGHT_EVENTS=128
+AGENT_CONTROL_QUEUE_LIMIT=256
+TERMINAL_MAX_EVENT_BYTES=65536
+TERMINAL_BUFFER_HIGH_WATER_BYTES=1048576
+TERMINAL_IDLE_TIMEOUT_MS=1800000
+TERMINAL_MAX_LIFETIME_MS=28800000
+TERMINAL_CLOSED_SESSION_RETENTION_MS=900000
+TERMINAL_SWEEP_INTERVAL_MS=30000
+
+# Bootstrap enrollment values. Supply for initial enrollment/key rotation, then remove the token from the persistent service environment.
+# AGENT_ENROLLMENT_URL=https://terminal.example.com/agent/enroll
+# AGENT_OWNER_ID=oauth-subject-for-this-user
+# AGENT_ENROLLMENT_TOKEN=replace-with-bootstrap-administrator-secret
+# AGENT_ROTATE_KEY=0

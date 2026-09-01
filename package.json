@@ -1,0 +1,41 @@
+{
+  "name": "chatgpt-terminal-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --workspace-concurrency=4 build",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:e2e": "vitest run tests/e2e",
+    "start:server": "pnpm --filter @terminal/mcp-server start",
+    "start:agent": "pnpm --filter @terminal/local-agent start",
+    "dev": "concurrently -k -n mcp,agent,ui 'pnpm --filter @terminal/mcp-server dev' 'pnpm --filter @terminal/local-agent dev' 'pnpm --filter @terminal/terminal-ui dev'"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/ws": "^8.18.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.35.0",
+    "jsdom": "^26.1.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.42.0",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
+  }
+}

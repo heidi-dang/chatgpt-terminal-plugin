@@ -1,0 +1,192 @@
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
+
+const cleanup: Array<() => Promise<void> | void> = [];
+afterEach(async () => {
+  while (cleanup.length > 0) await cleanup.pop()?.();
+});
+
+describe('LocalTerminalAgent', () => {
+  it('preserves shell state, streams output, interrupts, and closes cleanly', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-agent-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-test',
+      displayName: 'Test computer',
+      allowedWorkspaceRoots: [root],
+      executionProfile: 'developer',
+      shells: ['bash'],
+      bufferHighWaterBytes: 1024 * 1024,
+      maxEventBytes: 64 * 1024,
+    });
+    const started = agent.start('user-test', {
+      agent_id: 'agent-test',
+      cwd: root,
+      shell: 'bash',
+      cols: 80,
+      rows: 24,
+    }, 'developer');
+    cleanup.push(() => {
+      try { agent.close(started.session.session_id); } catch { /* already closed */ }
+    });
+
+    agent.write(started.session.session_id, "mkdir -p child && cd child && printf '__READY__\\n'\r");
+    const ready = await waitForText(agent, started.session.session_id, started.cursor, '__READY__');
+    expect(ready.output).toContain('__READY__');
+
+    agent.write(started.session.session_id, 'pwd\r');
+    const pwd = await waitForText(agent, started.session.session_id, ready.cursor, '/child');
+    expect(normalizeTerminal(pwd.output)).toContain(`${root}/child`);
+    if (process.platform === 'linux') {
+      await waitUntil(() => agent.status(started.session.session_id).session.cwd === join(root, 'child'));
+      expect(agent.readEvents(started.session.session_id, 0, 256 * 1024).events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ event_type: 'cwd.changed', data: { cwd: join(root, 'child') } })]),
+      );
+    }
+
+    agent.write(started.session.session_id, 'sleep 30\r');
+    const sleeping = await waitForText(agent, started.session.session_id, pwd.cursor, 'sleep 30');
+    agent.interrupt(started.session.session_id);
+    agent.write(started.session.session_id, "printf '__AFTER_INTERRUPT__\\n'\r");
+    const afterInterrupt = await waitForText(agent, started.session.session_id, sleeping.cursor, '__AFTER_INTERRUPT__');
+    expect(afterInterrupt.output).toContain('__AFTER_INTERRUPT__');
+
+    expect(() => agent.readEvents(started.session.session_id, 0, 1)).toThrowError(/requires \d+ bytes.*max_bytes=1/i);
+
+    const closing = agent.close(started.session.session_id);
+    expect(closing.session.status).toBe('closing');
+    expect(() => agent.write(started.session.session_id, 'echo nope\r')).toThrowError(
+      expect.objectContaining({ code: 'SESSION_CLOSED' }),
+    );
+    await waitUntil(() => agent.readEvents(started.session.session_id, 0, 256 * 1024).events.at(-1)?.event_type === 'session.closed');
+    expect(agent.status(started.session.session_id).session.status).toBe('closed');
+    expect(agent.readEvents(started.session.session_id, 0, 256 * 1024).events.at(-1)?.event_type).toBe('session.closed');
+  }, 10_000);
+
+  it('rejects cwd outside configured workspace roots for developer profile', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'terminal-outside-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(outside, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-test',
+      allowedWorkspaceRoots: [root],
+      executionProfile: 'developer',
+      shells: ['bash'],
+    });
+
+    expect(() => agent.start('user-test', {
+      agent_id: 'agent-test',
+      cwd: outside,
+      shell: 'bash',
+      cols: 80,
+      rows: 24,
+    }, 'developer')).toThrowError(/outside the allowed workspace roots/i);
+  });
+
+  it('uses the stricter server-requested profile and rejects symlink escapes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-profile-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'terminal-profile-outside-'));
+    const escape = join(root, 'escape');
+    await symlink(outside, escape, 'dir');
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(outside, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-owner-full',
+      allowedWorkspaceRoots: [root],
+      executionProfile: 'owner-full',
+      shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+
+    const started = agent.start('user-test', {
+      agent_id: 'agent-owner-full', cwd: root, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+    expect(started.session.execution_profile).toBe('developer');
+    agent.close(started.session.session_id);
+
+    expect(() => agent.start('user-test', {
+      agent_id: 'agent-owner-full', cwd: escape, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer')).toThrowError(expect.objectContaining({ code: 'PATH_NOT_ALLOWED' }));
+  });
+
+  it('does not expose agent control-plane secrets to spawned PTYs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-env-root-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const previous = process.env.AGENT_ENROLLMENT_TOKEN;
+    process.env.AGENT_ENROLLMENT_TOKEN = 'must-not-reach-terminal';
+    cleanup.push(() => {
+      if (previous === undefined) delete process.env.AGENT_ENROLLMENT_TOKEN;
+      else process.env.AGENT_ENROLLMENT_TOKEN = previous;
+    });
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-env', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-env', cwd: root, shell: 'bash', cols: 80, rows: 24,
+      command: `printf '__CONTROL_SECRET__%s__\\n' "\${AGENT_ENROLLMENT_TOKEN:-missing}"`,
+    }, 'developer');
+    const output = await waitForText(agent, started.session.session_id, 0, '__CONTROL_SECRET__missing__');
+    expect(output.output).not.toContain('must-not-reach-terminal');
+  });
+});
+
+async function waitForText(
+  agent: LocalTerminalAgent,
+  sessionId: string,
+  after: number,
+  needle: string,
+  timeoutMs = 4000,
+): Promise<{ output: string; cursor: number }> {
+  let cursor = after;
+  let output = '';
+
+  const consume = () => {
+    const read = agent.readEvents(sessionId, cursor, 256 * 1024);
+    for (const event of read.events) {
+      if ((event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') && typeof event.data.text === 'string') {
+        output += event.data.text;
+      }
+    }
+    cursor = read.nextCursor;
+    return output.includes(needle);
+  };
+
+  if (consume()) return { output, cursor };
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(new Error(`Timed out waiting for terminal output: ${needle}\n${normalizeTerminal(output)}`));
+    }, timeoutMs);
+    const unsubscribe = agent.onEvent((event) => {
+      if (event.session_id !== sessionId) return;
+      if (!consume()) return;
+      clearTimeout(timeout);
+      unsubscribe();
+      resolve({ output, cursor });
+    });
+  });
+}
+
+async function waitUntil(check: () => boolean, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for terminal agent condition.');
+}
+
+function normalizeTerminal(value: string): string {
+  const ansiEscape = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
+  return value.replace(ansiEscape, '').replace(/\r/g, '');
+}

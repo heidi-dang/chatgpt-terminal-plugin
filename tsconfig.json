@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/local-agent" },
+    { "path": "./packages/mcp-server" },
+    { "path": "./packages/terminal-ui" }
+  ]
+}
