@@ -21,11 +21,24 @@ Caddy / reverse proxy
 
 The current gateway connection map, MCP sessions and terminal event buffers are process-local. Do not run multiple active replicas behind round-robin load balancing without adding shared session/routing semantics.
 
-## Build
+## Build and verify
+
+The supported release bootstrap is the repository installer:
 
 ```bash
-corepack enable
-COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm install --frozen-lockfile
+./install.sh
+```
+
+It verifies Node.js, resolves the pnpm version declared by `package.json`, installs the frozen lockfile, runs typecheck/lint/unit tests, builds every package including the Terminal UI, enforces the UI bundle budget, and runs the real-PTY E2E suite. Re-run the gate without reinstalling dependencies with:
+
+```bash
+./install.sh --verify
+```
+
+The manual equivalent is:
+
+```bash
+pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm lint
 pnpm test
