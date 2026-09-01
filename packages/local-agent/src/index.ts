@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { basename, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { readlinkSync, realpathSync } from 'node:fs';
+import { mkdir, open, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
 import {
@@ -59,6 +60,9 @@ export interface TerminalAgentApi {
   close(sessionId: string): AgentSessionSnapshot;
   status(sessionId: string): AgentSessionSnapshot;
   readEvents(sessionId: string, after: number, maxBytes: number): { events: TerminalEvent[]; nextCursor: number; hasMore: boolean };
+  readFile(sessionId: string, path: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }>;
+  listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
+  writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
   onEvent(listener: (event: TerminalEvent) => void): () => void;
   shutdown(): void;
 }
@@ -80,6 +84,14 @@ function cleanEnvironment(): Record<string, string> {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'));
+}
+
+function errorMsg(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function restrictiveExecutionProfile(localProfile: ExecutionProfile, requestedProfile: ExecutionProfile): ExecutionProfile {
@@ -125,6 +137,21 @@ export class WorkspacePolicy {
 
     return candidate;
   }
+
+  assertAllowed(path: string): void {
+    if (this.profile === 'owner-full') return;
+    const canonical = canonicalWorkspacePath(path);
+    if (this.roots.length === 0) {
+      throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace roots are configured.');
+    }
+    const allowed = this.roots.some((root) => {
+      const delta = relative(root, canonical);
+      return delta === '' || (!delta.startsWith('..') && !isAbsolute(delta));
+    });
+    if (!allowed) {
+      throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Path is outside the allowed workspace roots.');
+    }
+  }
 }
 
 function canonicalWorkspacePath(path: string): string {
@@ -150,6 +177,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly closedSessionRetentionMs: number;
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly agent: Agent;
+  private readonly workspacePolicy: WorkspacePolicy;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -179,6 +207,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     };
     this.sweepTimer = setInterval(() => this.sweepExpiredSessions(), options.sweepIntervalMs ?? 30_000);
     this.sweepTimer.unref();
+    this.workspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, options.executionProfile);
   }
 
   describe(): Agent {
@@ -355,6 +384,98 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       nextCursor,
       hasMore: nextCursor < managed.sequence,
     };
+  }
+
+  // --- File Operations ---
+  // These operate relative to the session's current working directory,
+  // enforced by the same workspace policy as PTY creation.
+
+  async readFile(sessionId: string, filePath: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }> {
+    const managed = this.requireSession(sessionId);
+    const resolved = this.resolveFilePath(managed, filePath);
+    try {
+      const info = await stat(resolved);
+      if (!info.isFile()) throw new TerminalProtocolError('INVALID_ARGUMENT', 'Path is not a regular file.');
+      if (info.size > maxBytes * 4) throw new TerminalProtocolError('FILE_TOO_LARGE', `File is ${info.size} bytes; max allowed is ${maxBytes * 4}.`);
+      const buffer = Buffer.alloc(Math.min(info.size, maxBytes));
+      const fd = await open(resolved, 'r');
+      try {
+        const { bytesRead } = await fd.read(buffer, 0, buffer.length, 0);
+        return {
+          path: relative(managed.metadata.cwd, resolved) || resolved,
+          content: buffer.subarray(0, bytesRead).toString('utf8'),
+          size: info.size,
+          truncated: info.size > maxBytes,
+        };
+      } finally {
+        await fd.close();
+      }
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `File not found: ${filePath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${errorMsg(error)}`);
+    }
+  }
+
+  async listFiles(sessionId: string, dirPath: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }> {
+    const managed = this.requireSession(sessionId);
+    const resolved = this.resolveFilePath(managed, dirPath);
+    try {
+      const dirents = await readdir(resolved, { withFileTypes: true });
+      const entries: Array<{ name: string; type: string; size: number; modified_at: string }> = [];
+      const truncated = dirents.length > maxEntries;
+      for (const dirent of dirents.slice(0, maxEntries)) {
+        try {
+          const entryPath = resolve(resolved, dirent.name);
+          const info = await stat(entryPath).catch(() => null);
+          entries.push({
+            name: dirent.name,
+            type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : dirent.isFile() ? 'file' : 'other',
+            size: info?.size ?? 0,
+            modified_at: info ? new Date(info.mtimeMs).toISOString() : new Date().toISOString(),
+          });
+        } catch {
+          // Skip entries we can't stat (permission denied, etc.)
+        }
+      }
+      return {
+        path: relative(managed.metadata.cwd, resolved) || resolved,
+        entries,
+        truncated,
+      };
+    } catch (error) {
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Directory not found: ${dirPath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot list directory: ${errorMsg(error)}`);
+    }
+  }
+
+  async writeFile(sessionId: string, filePath: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File writes are not permitted under the read-only execution profile.');
+    }
+    const resolved = this.resolveFilePath(managed, filePath);
+    try {
+      if (createDirectories) await mkdir(dirname(resolved), { recursive: true });
+      const buffer = Buffer.from(content, 'utf8');
+      await writeFile(resolved, buffer, { mode: 0o644 });
+      return {
+        path: relative(managed.metadata.cwd, resolved) || resolved,
+        bytes_written: buffer.length,
+      };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Parent directory not found: ${filePath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot write file: ${errorMsg(error)}`);
+    }
+  }
+
+  private resolveFilePath(managed: ManagedSession, filePath: string): string {
+    // Resolve relative to the session's current working directory
+    const absolute = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
+    // Enforce workspace roots (same policy as PTY creation)
+    this.workspacePolicy.assertAllowed(absolute);
+    return absolute;
   }
 
   onEvent(listener: (event: TerminalEvent) => void): () => void {

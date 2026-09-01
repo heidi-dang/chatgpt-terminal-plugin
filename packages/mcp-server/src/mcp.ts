@@ -15,6 +15,12 @@ import {
   terminalStreamRefreshInputSchema,
   terminalStreamRefreshOutputSchema,
   terminalWriteInputSchema,
+  terminalReadFileInputSchema,
+  terminalReadFileOutputSchema,
+  terminalListFilesInputSchema,
+  terminalListFilesOutputSchema,
+  terminalWriteFileInputSchema,
+  terminalWriteFileOutputSchema,
 } from '@terminal/protocol';
 import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
@@ -226,6 +232,53 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(() => deps.service.close(identityFromContext(ctx), input.session_id)),
+  );
+
+  // --- File operation tools ---
+
+  server.registerTool(
+    'terminal_read_file',
+    {
+      title: 'Read a file',
+      description: 'Read the contents of a file within the workspace of an active terminal session. The file path is resolved relative to the session current working directory. Paths outside configured workspace roots are rejected.',
+      inputSchema: terminalReadFileInputSchema,
+      outputSchema: terminalReadFileOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.readFile(identityFromContext(ctx), input);
+      return terminalReadFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_list_files',
+    {
+      title: 'List directory contents',
+      description: 'List files and directories at a path within the workspace of an active terminal session. Returns name, type (file/directory/symlink), size, and modification timestamp for each entry.',
+      inputSchema: terminalListFilesInputSchema,
+      outputSchema: terminalListFilesOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.listFiles(identityFromContext(ctx), input);
+      return terminalListFilesOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_write_file',
+    {
+      title: 'Write a file',
+      description: 'Write content to a file within the workspace of an active terminal session. The file path is resolved relative to the session current working directory. Requires a non-read-only execution profile. Optionally creates parent directories.',
+      inputSchema: terminalWriteFileInputSchema,
+      outputSchema: terminalWriteFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.writeFile(identityFromContext(ctx), input);
+      return terminalWriteFileOutputSchema.parse(result);
+    }),
   );
 
   return server;

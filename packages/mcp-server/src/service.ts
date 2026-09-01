@@ -178,6 +178,42 @@ export class TerminalService {
     return terminalMutationOutputSchema.parse({ session_id: input.session_id, status: snapshot.session.status, cursor: snapshot.cursor });
   }
 
+  // --- File operations ---
+
+  async readFile(identity: RequestIdentity, input: { session_id: string; path: string; max_bytes: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_read',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.readFile(identity.userId, input.session_id, input.path, input.max_bytes);
+  }
+
+  async listFiles(identity: RequestIdentity, input: { session_id: string; path: string; max_entries: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_list',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.listFiles(identity.userId, input.session_id, input.path, input.max_entries);
+  }
+
+  async writeFile(identity: RequestIdentity, input: { session_id: string; path: string; content: string; create_directories: boolean }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_write', { path: input.path });
+    await this.audit.record({
+      action: 'file_write',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path, bytes: Buffer.byteLength(input.content) },
+    });
+    return this.gateway.writeFile(identity.userId, input.session_id, input.path, input.content, input.create_directories);
+  }
+
   private async assertMutationAllowed(identity: RequestIdentity, action: string, input?: unknown): Promise<void> {
     if (identity.executionProfile !== 'read-only') return;
     await this.denied(identity, action, 'PERMISSION_DENIED', input);

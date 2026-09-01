@@ -32,9 +32,10 @@ interface AgentConnection {
 
 interface PendingRequest {
   agentId: string;
-  resolve: (snapshot: AgentSessionSnapshot) => void;
+  resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  parseResult?: ((raw: unknown) => unknown) | undefined;
 }
 
 export interface SessionRecord {
@@ -169,6 +170,39 @@ export class AgentGateway {
       action: 'terminal.status',
       input: { session_id: sessionId },
     });
+  }
+
+  // --- File operations ---
+  // These dispatch file commands to the agent and return generic results.
+
+  async readFile(userId: string, sessionId: string, path: string, maxBytes: number): Promise<unknown> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.read',
+      input: { session_id: sessionId, path, max_bytes: maxBytes },
+    }, (raw) => raw);
+  }
+
+  async listFiles(userId: string, sessionId: string, path: string, maxEntries: number): Promise<unknown> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.list',
+      input: { session_id: sessionId, path, max_entries: maxEntries },
+    }, (raw) => raw);
+  }
+
+  async writeFile(userId: string, sessionId: string, path: string, content: string, createDirectories: boolean): Promise<unknown> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.write',
+      input: { session_id: sessionId, path, content, create_directories: createDirectories },
+    }, (raw) => raw);
   }
 
   async read(userId: string, sessionId: string, after: number, maxBytes: number, waitMs = 0): Promise<TerminalReadOutput> {
@@ -430,7 +464,7 @@ export class AgentGateway {
     return this.withServerCursor(snapshot);
   }
 
-  private request(connection: AgentConnection, command: AgentCommand): Promise<AgentSessionSnapshot> {
+  private request<T = AgentSessionSnapshot>(connection: AgentConnection, command: AgentCommand, parseResult?: (raw: unknown) => T): Promise<T> {
     if (connection.socket.readyState !== WebSocket.OPEN) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
     }
@@ -441,7 +475,7 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
       }, this.options.requestTimeoutMs);
       timer.unref();
-      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve, reject, timer });
+      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
       connection.socket.send(JSON.stringify(command), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -468,7 +502,8 @@ export class AgentGateway {
       return;
     }
 
-    pending.resolve(agentSessionSnapshotSchema.parse(response.result));
+    const parsed = pending.parseResult ? pending.parseResult(response.result) : agentSessionSnapshotSchema.parse(response.result);
+    pending.resolve(parsed);
   }
 
   private requireAgent(userId: string, agentId: string): AgentConnection {

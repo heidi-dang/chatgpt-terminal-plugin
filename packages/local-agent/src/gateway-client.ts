@@ -9,7 +9,7 @@ import {
   type GatewayMessage,
   type TerminalEvent,
 } from '@terminal/protocol';
-import type { AgentSessionSnapshot, TerminalAgentApi } from './index.js';
+import type { TerminalAgentApi } from './index.js';
 import type { DeviceIdentity } from './device-identity.js';
 
 export interface GatewayClientOptions {
@@ -207,21 +207,23 @@ export class AgentGatewayClient {
     if (message.type !== 'request') return;
     const command = agentCommandSchema.parse(message);
 
-    try {
-      const result = this.execute(command);
-      this.send({ type: 'response', request_id: command.request_id, ok: true, result });
-    } catch (error) {
-      const protocolError = normalizeProtocolError(error);
-      this.send({
-        type: 'response',
-        request_id: command.request_id,
-        ok: false,
-        error: protocolError.toPayload(),
-      });
-    }
+    void (async () => {
+      try {
+        const result = await this.execute(command);
+        this.send({ type: 'response', request_id: command.request_id, ok: true, result });
+      } catch (error) {
+        const protocolError = normalizeProtocolError(error);
+        this.send({
+          type: 'response',
+          request_id: command.request_id,
+          ok: false,
+          error: protocolError.toPayload(),
+        });
+      }
+    })();
   }
 
-  private execute(command: AgentCommand): AgentSessionSnapshot {
+  private async execute(command: AgentCommand): Promise<unknown> {
     switch (command.action) {
       case 'terminal.start':
         return this.agent.start(command.user_id, command.input, command.execution_profile);
@@ -235,6 +237,12 @@ export class AgentGatewayClient {
         return this.agent.close(command.input.session_id);
       case 'terminal.status':
         return this.agent.status(command.input.session_id);
+      case 'file.read':
+        return this.agent.readFile(command.input.session_id, command.input.path, command.input.max_bytes);
+      case 'file.list':
+        return this.agent.listFiles(command.input.session_id, command.input.path, command.input.max_entries);
+      case 'file.write':
+        return this.agent.writeFile(command.input.session_id, command.input.path, command.input.content, command.input.create_directories);
     }
   }
 
