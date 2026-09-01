@@ -1,133 +1,384 @@
-# ChatGPT Terminal Plugin
+# ⚡ ChatGPT Terminal Plugin
 
-Production-oriented MCP terminal bridge that lets an authenticated MCP client select an enrolled local computer, open a persistent PTY, execute multiple commands while preserving shell state, read bounded output through MCP cursors, and render a live xterm.js terminal through an MCP App resource.
+<div align="center">
 
-## Architecture
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.0.0-green.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![MCP Specification](https://img.shields.io/badge/MCP-v2.0-purple.svg)](https://modelcontextprotocol.io/)
+[![pnpm](https://img.shields.io/badge/pnpm-10.15.0-orange.svg?logo=pnpm&logoColor=white)](https://pnpm.io/)
+[![Vitest](https://img.shields.io/badge/tested%20with-vitest-yellow.svg?logo=vitest&logoColor=white)](https://vitest.dev/)
+[![React 19](https://img.shields.io/badge/UI-React%2019%20%2B%20xterm.js-61DAFB.svg?logo=react&logoColor=black)](https://react.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+**Turn ChatGPT into an interactive terminal for your local development machines — with real persistent shells, secure zero-inbound tunnels, and a live xterm.js UI.**
+
+[Quickstart](#-quickstart) • [How It Works](#-how-it-works) • [Installation](#-step-by-step-setup-guide) • [Usage Guide](#-usage-guide) • [Tools Reference](#-mcp-tools-reference) • [Deployment](#-production-deployment) • [Contributing](#-contributing)
+
+</div>
+
+---
+
+## 🌟 Overview
+
+**ChatGPT Terminal Plugin** connects ChatGPT (or any Model Context Protocol client) to your local workstations, servers, or cloud VMs.
+
+Unlike simple "run command and return text" wrappers, this plugin gives ChatGPT a **genuine persistent pseudo-terminal (PTY)**:
+- 🔄 **Preserves Shell State**: Working directories (`cd`), environment variables, virtualenvs, shell history, and background jobs persist across conversational turns.
+- 🔒 **Zero Inbound Ports**: Your computer connects *outward* to the MCP server via an encrypted WebSocket tunnel. No open firewall ports, SSH exposure, or public IPs needed on your machine.
+- 🖥️ **Live Interactive UI**: Includes a built-in **MCP App** widget powered by `xterm.js` that renders real-time terminal output in ChatGPT with dark/light theme syncing and smooth streaming.
+- 🛡️ **Zero-Trust Security**: End-to-end device authorization using Ed25519 challenge-response signatures, granular workspace launch policies, and capability-isolated SSE streams.
+- ⚡ **Seamless Reconnection**: Bounded monotonic event buffers let you resume seamlessly across network hiccups without losing cursors or duplicating output.
+
+---
+
+## 🏗️ Architecture
 
 ```text
-ChatGPT / MCP client
-        |
-        | OAuth bearer + MCP Streamable HTTP
-        v
-Public MCP server  <---->  MCP App terminal UI
-        |                    ^
-        |                    | short-lived read-only SSE capability
-        |                    |
-        +---- terminal event store / audit / transcript
-        |
-        | authenticated WebSocket, Ed25519 challenge-response
-        v
-Local terminal agent
-        |
-        v
-     node-pty
-        |
-        v
-bash / zsh / PowerShell / configured WSL shell
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           ChatGPT Web / Client                          │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │ OAuth 2.1 / JWT Bearer
+                                     │ MCP Streamable HTTP (/mcp)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Public MCP Server / Gateway                     │
+│  ┌─────────────────────────┐   ┌─────────────────────────────────────┐  │
+│  │   MCP Tool Handlers     │   │   Device Registry (SQLite / WAL)    │  │
+│  │  - terminal_start       │   ├─────────────────────────────────────┤  │
+│  │  - terminal_write       │   │   Live Session & Event Store        │  │
+│  │  - terminal_read        │   │   (In-Memory or Shared Redis)       │  │
+│  └────────────┬────────────┘   └──────────────────┬──────────────────┘  │
+│               │                                   │                     │
+│               │ Issue short-lived SSE stream capability                 │
+│               ▼                                   │                     │
+│  ┌─────────────────────────┐                      │                     │
+│  │   MCP App Terminal UI   │◄─────────────────────┘                     │
+│  │   (xterm.js in iframe)  │  Watch-only SSE Stream                     │
+│  └─────────────────────────┘                                            │
+└────────────────────────────────────▲────────────────────────────────────┘
+                                     │
+                                     │ Outbound WebSocket (/agent)
+                                     │ Ed25519 Challenge-Response Auth
+                                     │ (Zero inbound firewall ports on agent)
+                                     │
+┌────────────────────────────────────┴────────────────────────────────────┐
+│                       Local Terminal Agent Machine                      │
+│                                                                         │
+│  ┌────────────────────────┐         ┌────────────────────────────────┐  │
+│  │ Ed25519 Key Identity   │         │ Launch Root Workspace Policy   │  │
+│  └───────────┬────────────┘         └───────────────┬────────────────┘  │
+│              │                                      │                   │
+│              ▼                                      ▼                   │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │                       node-pty Shell Engine                       │  │
+│  │              (bash  /  zsh  /  PowerShell  /  WSL)                │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-The model-visible and UI-visible output paths are deliberately separate:
+### Model vs. UI Stream Separation
 
-- `terminal_read` is authoritative for model context. It is bounded by `max_bytes` and monotonic cursors.
-- The MCP App uses a short-lived, session-bound stream capability and SSE for live display. It enforces contiguous sequence delivery, ignores duplicate events, and refreshes the capability on expiry/error/gap. The user's MCP OAuth bearer token is never sent to the browser widget.
+To ensure rock-solid stability and prevent context pollution:
+1. **Model Context (`terminal_read`)**: Authoritative, strictly bounded by byte limits (`max_bytes`), and driven by monotonic cursors so ChatGPT receives exactly what it needs to reason.
+2. **Human Viewer (MCP App Widget)**: Direct high-frequency SSE stream using an isolated, short-lived token. The browser widget never sees or stores your MCP OAuth credentials.
 
-## Packages
+---
 
-- `packages/protocol` — shared Zod schemas, events, errors, cursors, gateway messages.
-- `packages/local-agent` — device identity, outbound gateway connection, PTY lifecycle, workspace enforcement.
-- `packages/mcp-server` — OAuth/JWT verification, MCP tools, device registry, gateway, SSE, audit and transcript handling.
-- `packages/terminal-ui` — React/xterm.js MCP App, responsive theme-aware terminal UI.
-- `tests/unit` — PTY, device security, authorization, lifecycle, redaction and UI tests.
-- `tests/e2e` — actual MCP v2 client → server → signed agent → real PTY acceptance test.
+## 📦 Monorepo Packages
 
-## Requirements
+| Package | Path | Description |
+|---|---|---|
+| **`@terminal/protocol`** | [`packages/protocol`](packages/protocol) | Shared Zod schemas, event models, monotonic cursors, and gateway wire protocol. |
+| **`@terminal/local-agent`** | [`packages/local-agent`](packages/local-agent) | Agent daemon: Ed25519 identity, outbound gateway connection, PTY lifecycle, workspace root enforcement. |
+| **`@terminal/mcp-server`** | [`packages/mcp-server`](packages/mcp-server) | MCP HTTP server, OAuth/JWT verification, device registry, SSE streaming, audit logs, and transcript redaction. |
+| **`@terminal/terminal-ui`** | [`packages/terminal-ui`](packages/terminal-ui) | React 19 + xterm.js terminal widget bundled as a single-file MCP App resource (`ui://terminal/v3.html`). |
 
-- Node.js 22 or newer.
-- pnpm 10.15.0 through Corepack.
-- A supported local shell. Linux/macOS commonly use `bash`/`zsh`; Windows agents may configure PowerShell or WSL.
-- For production: HTTPS/WSS termination and an OAuth 2.1-compatible authorization server whose access tokens can be validated using JWKS.
+---
 
-`node-pty` is a native dependency. pnpm is configured to permit only the required native build scripts for `node-pty` and `esbuild`.
+## 🚀 Quickstart
 
-## Install and verify
+Get up and running locally in under 3 minutes!
+
+### Prerequisites
+
+- **Node.js**: `v22.0.0` or newer
+- **pnpm**: `v10.15.0` (managed automatically via Corepack)
+- **Shell**: `bash` / `zsh` on Linux/macOS, or `PowerShell` / `WSL` on Windows
+
+### 1. Clone and Install
 
 ```bash
+git clone https://github.com/heidi-dang/chatgpt-terminal-plugin.git
+cd chatgpt-terminal-plugin
+
+# Enable Corepack and install dependencies
 corepack enable
-COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm install
+pnpm install
+```
+
+### 2. Verify Your Environment
+
+Run the full verification suite (typecheck, lint, unit tests, and build):
+
+```bash
 pnpm typecheck
 pnpm lint
 pnpm test
 pnpm build
-pnpm test:e2e
 ```
 
-## Local development
+### 3. Run Everything in Development Mode
 
-Use `deploy/server-environment.example` and `deploy/local-agent-environment.example` as environment-specific templates, store real secrets outside Git with owner-only permissions, and replace every example value.
-
-Start the development processes with:
+Run the MCP server, local agent, and UI dev server concurrently with one command:
 
 ```bash
 pnpm dev
 ```
 
-For the server, configure at minimum a public MCP URL and development bearer token. For the agent, configure the gateway URL, an allowed workspace root, and enrollment values for the first device enrollment.
+---
 
-The local agent creates a persistent Ed25519 identity on first run. Its private key is stored owner-only. Device enrollment sends only the public key to the server registry. Subsequent gateway connections use an expiring one-time challenge signed by that private key.
+## 🛠️ Step-by-Step Setup Guide
 
-## MCP tools
+Follow this guide to set up the plugin for real-world use with ChatGPT.
 
-| Tool | Purpose |
-| --- | --- |
-| `terminal_list_agents` | List enrolled online computers visible to the authenticated user. |
-| `terminal_start` | Start a persistent PTY and return the initial cursor/output. |
-| `terminal_read` | Read bounded terminal events after a cursor. |
-| `terminal_write` | Write terminal input/commands. |
-| `terminal_resize` | Resize the PTY. |
-| `terminal_interrupt` | Send Ctrl+C/SIGINT. |
-| `terminal_status` | Return session and agent connection state. |
-| `terminal_stream_refresh` | Issue a new short-lived UI stream capability. |
-| `terminal_close` | Terminate and dispose the PTY. |
+### Step 1: Configure the MCP Server
 
-## Execution profiles
+Create your server environment file from the provided template:
 
-The server and agent enforce profiles independently.
+```bash
+cp deploy/server-environment.example .env.server
+```
 
-- `read-only` — MCP discovery/read/status operations only; PTY creation and mutations are rejected server-side. The agent also rejects terminal creation under this profile.
-- `developer` — PTY creation is allowed only when the requested launch directory canonically resolves under a configured workspace root. This is a launch-path boundary, not a kernel/filesystem sandbox; commands subsequently run with the agent OS user's normal permissions.
-- `owner-full` — terminal execution is allowed without the launch-root restriction on the agent. OS-level elevation remains subject to the local operating system and shell configuration.
+Key configuration options in `.env.server`:
 
-JWT access tokens may carry an `execution_profile` claim. If absent, the server uses `MCP_DEFAULT_EXECUTION_PROFILE`. The effective session profile is the more restrictive of the authenticated server profile and local agent profile.
+```env
+NODE_ENV=production
+MCP_HOST=127.0.0.1
+MCP_PORT=8787
+MCP_PUBLIC_URL=https://terminal.example.com/mcp
 
-## Device enrollment and rotation
+# Durable SQLite device registry
+AGENT_DEVICE_REGISTRY_PATH=/var/lib/chatgpt-terminal/devices.sqlite
 
-Each computer has its own stable `device_id`, stable `agent_id`, and Ed25519 key pair. Enrollment binds the device ID, agent ID, owner, and public key; key rotation cannot silently rebind the device to a different owner or agent. Do not share one permanent agent secret across machines.
+# One-time bootstrap secret used for initial device enrollment
+AGENT_ENROLLMENT_TOKEN=generate-a-strong-random-token-here
 
-Initial enrollment and administrative rotation use the configured enrollment endpoint and bootstrap enrollment token. The public key is persisted server-side; the private key never leaves the machine.
+# Secret used to sign short-lived UI SSE stream capabilities (min 32 bytes)
+STREAM_TOKEN_SECRET=generate-a-32-byte-random-secret-here
 
-Set `AGENT_ROTATE_KEY=1` for one agent launch while also supplying enrollment settings. The stable device ID is retained while the key pair changes and the server increments its key version. Revoke a device through the administrative revocation endpoint described in `docs/security.md`.
+# Authentication mode ('jwt' or 'cloudflare-access')
+MCP_AUTH_MODE=jwt
+OAUTH_ISSUER=https://auth.example.com
+OAUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
+OAUTH_AUDIENCE=terminal-mcp
+```
 
-## Production deployment
+### Step 2: Configure the Local Agent
 
-Read `docs/deployment.md` before production use. Important constraints:
+On each computer you wish to control, create the agent environment file:
 
-- `MCP_PUBLIC_URL` must be HTTPS in production.
-- Production MCP authentication must use JWT/JWKS mode.
-- The current gateway/session/event state is process-local. File-backed device registry and transcript/audit storage are durable, but no distributed live-state backend is implemented.
-- Therefore run one active MCP/gateway process per deployment unless you add shared routing/state semantics. Multi-replica HA is not claimed by this version.
+```bash
+cp deploy/local-agent-environment.example .env.agent
+```
 
-Reverse-proxy and systemd examples are under `deploy/`.
+Configure `.env.agent`:
 
-## Documentation
+```env
+# URL pointing to your MCP server gateway
+AGENT_GATEWAY_URL=wss://terminal.example.com/agent
+AGENT_IDENTITY_PATH=/home/user/.config/chatgpt-terminal/device.json
+AGENT_DISPLAY_NAME=MacBook Pro - Workstation
 
-- `docs/architecture.md`
-- `docs/protocol.md`
-- `docs/security.md`
-- `docs/deployment.md`
-- `docs/chatgpt-integration.md`
+# Execution boundary: developer mode restricts PTY launch to these folders
+EXECUTION_PROFILE=developer
+ALLOWED_WORKSPACE_ROOTS=/home/user/projects,/home/user/work
 
-## Acceptance test
+# Initial enrollment settings (remove AGENT_ENROLLMENT_TOKEN after first run)
+AGENT_ENROLLMENT_URL=https://terminal.example.com/agent/enroll
+AGENT_OWNER_ID=your-oauth-user-id
+AGENT_ENROLLMENT_TOKEN=generate-a-strong-random-token-here
+```
 
-`tests/e2e/terminal.e2e.test.ts` uses the actual MCP v2 client transport, real HTTP authentication, device enrollment, Ed25519 gateway authentication, a real `node-pty` shell, bounded MCP reads, shell-state preservation, interrupt, stream-token refresh, an actual HTTP SSE connection receiving live `terminal.stdout` bytes, cleanup and transcript verification.
+### Step 3: First-Time Agent Enrollment
 
-The repository can validate the MCP App bundle and bridge behavior locally. Rendering inside the official ChatGPT host still requires connection from ChatGPT web to a remote HTTPS endpoint (or a supported Secure MCP Tunnel deployment); that host-level check cannot be simulated by the local test suite. See `docs/chatgpt-integration.md`.
+Start the agent once to enroll its cryptographic identity:
+
+```bash
+pnpm start:agent
+```
+
+On first startup:
+1. The agent automatically generates an **Ed25519 keypair** and stores the private key securely in `AGENT_IDENTITY_PATH` (with `0600` permissions).
+2. It sends its public key, `device_id`, and `agent_id` to the server using the `AGENT_ENROLLMENT_TOKEN`.
+3. The server registers the device in SQLite.
+4. **Security Best Practice**: Once enrolled, remove `AGENT_ENROLLMENT_TOKEN` from your agent's `.env.agent`. All subsequent connections authenticate using Ed25519 challenge-response signatures!
+
+### Step 4: Connect to ChatGPT
+
+1. In **ChatGPT Web**, go to **Settings** (or **Workspace Settings** on Business/Enterprise/Edu) → **Apps** → **Create**.
+2. Set the MCP Endpoint URL (e.g., `https://terminal.example.com/mcp`).
+3. Select **OAuth Authentication** and click **Scan Tools**.
+4. Authorize via your OAuth provider.
+5. Review the discovered tools and click **Create**.
+6. Open a new chat with your Terminal App enabled! 🎉
+
+---
+
+## 💻 Usage Guide
+
+### Human-Friendly Example Prompts
+
+Once connected, you can converse naturally with ChatGPT:
+
+| What you want to do | Example prompt |
+|---|---|
+| **Check available machines** | *"Which of my computers are currently online?"* |
+| **Open a workspace** | *"Open a terminal in `/home/user/projects/web-app` on my workstation."* |
+| **Run a build & test** | *"Run `pnpm test` and tell me if anything fails."* |
+| **Navigate and edit** | *"Check git status, switch to the `feature-login` branch, and pull the latest changes."* |
+| **Interrupt long jobs** | *"Stop the running process with Ctrl+C."* |
+| **Clean up** | *"Close the active terminal session."* |
+
+---
+
+## 🔧 MCP Tools Reference
+
+The server exposes 9 dedicated tools designed for precision model interaction:
+
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `terminal_list_agents` | *None* | Lists all enrolled online computers belonging to your authenticated account. |
+| `terminal_start` | `agent_id`, `cwd?`, `shell?`, `command?`, `cols?`, `rows?` | Spawns a new persistent PTY session and returns the initial output and interactive UI widget. |
+| `terminal_read` | `session_id`, `after`, `max_bytes?`, `wait_ms?` | Reads bounded terminal events starting after a sequence cursor. |
+| `terminal_write` | `session_id`, `input` | Writes text/commands into the active PTY (preserving shell state). |
+| `terminal_resize` | `session_id`, `cols`, `rows` | Adjusts the terminal window dimensions for responsive rendering. |
+| `terminal_interrupt` | `session_id` | Sends `SIGINT` (Ctrl+C) to interrupt foreground commands. |
+| `terminal_status` | `session_id` | Checks session status, agent connection health, and current cursor. |
+| `terminal_stream_refresh` | `session_id`, `after` | Issues a new short-lived SSE capability token for the UI. |
+| `terminal_close` | `session_id` | Terminates the PTY process and releases session resources. |
+
+---
+
+## 🛡️ Security & Execution Profiles
+
+Security is built into every layer of the design.
+
+### Execution Profiles
+
+| Profile | Behavior | Best Used For |
+|---|---|---|
+| **`read-only`** | Allows listing devices and reading status. Rejects all PTY creation and write mutations. | Monitoring & auditing. |
+| **`developer`** *(Default)* | Allows terminal operations, but strictly requires the initial working directory to resolve inside `ALLOWED_WORKSPACE_ROOTS` (with symlink traversal protection). | Standard daily engineering. |
+| **`owner-full`** | Unrestricted launch paths on the agent machine (subject to normal OS user permissions). | Full system administration. |
+
+> ℹ️ **Note**: The effective profile is always the **more restrictive** between what your server token permits and what the agent daemon is configured with.
+
+### Security Highlights
+
+- 🔑 **Ed25519 Gateway Auth**: Outbound agent connections authenticate against an expiring, single-use cryptographic challenge.
+- 🪟 **Iframe & Token Isolation**: The browser widget receives an HMAC-signed token valid only for its specific session and SSE endpoint. It never touches your OAuth access token.
+- 🧹 **Audit & Transcript Redaction**: Automatic pattern-based redaction filters out API keys, bearer tokens, and passwords from persistent logs.
+- ⏰ **Automatic Cleanup**: Unused sessions are reclaimed after idle timeouts, and closed session records are pruned automatically.
+
+---
+
+## 🌐 Production Deployment
+
+### 1. Reverse Proxy (Caddy Example)
+
+Use Caddy to handle automatic HTTPS and WebSocket proxying:
+
+```caddy
+terminal.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        # Disable response buffering so SSE events stream instantly
+        flush_interval -1
+    }
+}
+```
+
+### 2. Systemd Service
+
+Example systemd unit files are provided in [`deploy/systemd/`](deploy/systemd):
+- `chatgpt-terminal-mcp.service.example` — Server daemon
+- `chatgpt-terminal-agent.service.example` — Local agent daemon
+
+### 3. Multi-Node Scaling (Redis)
+
+By default, the server runs in-memory. For horizontal scaling across multiple instances, set:
+```env
+REDIS_URL=redis://127.0.0.1:6379
+```
+This enables distributed session tracking, agent presence synchronization, and cross-node command routing.
+
+---
+
+## 🧪 Testing & Quality Assurance
+
+We maintain high test coverage across unit, protocol, and end-to-end flows.
+
+```bash
+# Run unit & integration tests
+pnpm test
+
+# Run End-to-End test (Spawns a real MCP v2 client, server, agent & node-pty)
+pnpm test:e2e
+
+# Run linter
+pnpm lint
+
+# Run TypeScript type check
+pnpm typecheck
+```
+
+---
+
+## 🤝 Contributing
+
+We love contributions! Whether you're fixing bugs, adding new shell integrations, improving the UI, or polishing docs, here's how to jump in:
+
+### Development Workflow
+
+1. **Fork the Repository** on GitHub.
+2. **Clone your fork** and install dependencies:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/chatgpt-terminal-plugin.git
+   cd chatgpt-terminal-plugin
+   corepack enable
+   pnpm install
+   ```
+3. **Create a Feature Branch**:
+   ```bash
+   git checkout -b feature/amazing-idea
+   ```
+4. **Make your changes** and verify tests pass:
+   ```bash
+   pnpm typecheck
+   pnpm lint
+   pnpm test
+   pnpm test:e2e
+   ```
+5. **Commit with clear commit messages** and push to your fork.
+6. **Open a Pull Request** describing what you built and why!
+
+### 💡 Ideas & Good First Issues
+
+- 🎨 **UI Customization**: Add new xterm.js color schemes and font configuration options.
+- 🪟 **Windows Enhancements**: Improve PowerShell / WSL auto-detection and profile handling.
+- 📊 **Telemetry & Metrics**: Add optional Prometheus metrics for gateway latency and event counts.
+- 📑 **Session History Tab**: Enhance the MCP App with a tabbed interface for multiple active terminals.
+
+---
+
+## 📄 License
+
+This project is open-source software licensed under the **[MIT License](LICENSE)**.
+
+---
+
+<div align="center">
+Built with ❤️ for the open-source and AI developer community. If you find this project useful, please star ⭐ the repo!
+</div>

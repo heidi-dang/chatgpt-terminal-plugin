@@ -19,7 +19,7 @@ Caddy / reverse proxy
                            enrolled local agents
 ```
 
-The current gateway connection map, MCP sessions and terminal event buffers are process-local. Do not run multiple active replicas behind round-robin load balancing without adding shared session/routing semantics.
+With `REDIS_URL` unset, gateway sockets and in-memory live state are single-process. Set `REDIS_URL` (e.g. `redis://127.0.0.1:6379`) so sessions, agent presence, and cross-node command routing are shared; agent WebSockets still attach to one process, and other replicas forward commands via Redis. Prefer sticky WebSocket routing when possible.
 
 ## Build
 
@@ -179,6 +179,6 @@ The repository's `pnpm test:e2e` performs the same core terminal sequence locall
 
 ## Rollback
 
-Keep release artifacts/versioned checkouts so the systemd service can be repointed to a previously verified build. The file-backed device registry format is versioned. This release writes version 2 with an explicit immutable `agent_id` binding and migrates version-1 records on load. Back it up before deploying a release that changes its schema.
+Keep release artifacts/versioned checkouts so the systemd service can be repointed to a previously verified build. The device registry is SQLite (`AGENT_DEVICE_REGISTRY_PATH`, typically `devices.sqlite`) with WAL journaling. A legacy `devices.json` path is still accepted: on first open the server migrates records into SQLite and rewrites the JSON as version 2 for inspection. Back up the `.sqlite` file (and any `-wal`/`-shm` sidecars after a clean shutdown) before deploying a release that changes its schema.
 
 Do not roll back by replacing the current registry with an older copy unless you understand that doing so can resurrect revoked keys/devices.

@@ -45,12 +45,15 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   }, 6 * 60 * 60_000);
   transcriptRetentionTimer.unref();
   const deviceRegistry = await DeviceRegistry.load(config.deviceRegistryPath, config.agentEnrollmentToken);
+  const { createLiveStore } = await import('./live-store.js');
+  const liveStore = await createLiveStore({ redisUrl: config.redisUrl });
   const gateway = new AgentGateway({
     requestTimeoutMs: config.agentRequestTimeoutMs,
     maxRetainedBytesPerSession: config.bufferHighWaterBytes,
     closedSessionRetentionMs: config.closedSessionRetentionMs,
     sessionSweepIntervalMs: config.terminalSweepIntervalMs,
     deviceRegistry,
+    liveStore,
     authChallengeTtlMs: config.agentAuthChallengeTtlMs,
     onTerminalEvent: (ownerId, agentId, event) => audit.transcript({
       user_id: ownerId,
@@ -354,6 +357,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       gateway.closeAll();
       for (const session of sessions.values()) await session.server.close();
       sessions.clear();
+      deviceRegistry.close();
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => error ? reject(error) : resolve());
       });

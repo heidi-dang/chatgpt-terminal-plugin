@@ -37,7 +37,7 @@ export class TerminalService {
   ) {}
 
   async listAgents(identity: RequestIdentity): Promise<TerminalListAgentsOutput> {
-    const output = terminalListAgentsOutputSchema.parse({ agents: this.gateway.listAgents(identity.userId) });
+    const output = terminalListAgentsOutputSchema.parse({ agents: await this.gateway.listAgents(identity.userId) });
     await this.audit.record({
       action: 'terminal_list_agents',
       ...auditIdentity(identity),
@@ -50,7 +50,7 @@ export class TerminalService {
   async start(identity: RequestIdentity, rawInput: TerminalStartInput): Promise<TerminalStartOutput> {
     const input = terminalStartInputSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_start', { agent_id: input.agent_id, cwd: input.cwd, shell: input.shell });
-    const active = this.gateway.listSessions(identity.userId).filter((session) => isActive(session.status));
+    const active = (await this.gateway.listSessions(identity.userId)).filter((session) => isActive(session.status));
     if (active.length >= this.config.maxSessionsPerUser) {
       await this.denied(identity, 'terminal_start', 'SESSION_LIMIT_REACHED', { agent_id: input.agent_id });
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'User terminal session quota has been reached.');
@@ -147,7 +147,7 @@ export class TerminalService {
   async status(identity: RequestIdentity, sessionId: string): Promise<TerminalStatusOutput> {
     const input = terminalSessionIdInputSchema.parse({ session_id: sessionId });
     const snapshot = await this.gateway.status(identity.userId, input.session_id);
-    const agentOnline = this.gateway.listAgents(identity.userId).some((agent) => agent.agent_id === snapshot.session.agent_id && agent.online);
+    const agentOnline = (await this.gateway.listAgents(identity.userId)).some((agent) => agent.agent_id === snapshot.session.agent_id && agent.online);
     const output = terminalStatusOutputSchema.parse({ ...snapshot.session, agent_online: agentOnline, cursor: snapshot.cursor });
     await this.audit.record({
       action: 'terminal_status',

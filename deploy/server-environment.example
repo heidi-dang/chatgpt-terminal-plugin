@@ -7,7 +7,8 @@ MCP_PUBLIC_URL=https://terminal.example.com/mcp
 
 AGENT_GATEWAY_PATH=/agent
 AGENT_ENROLLMENT_PATH=/agent/enroll
-AGENT_DEVICE_REGISTRY_PATH=/var/lib/chatgpt-terminal/devices.json
+# SQLite is the durable registry (devices.sqlite). A legacy devices.json path is still accepted and auto-migrated.
+AGENT_DEVICE_REGISTRY_PATH=/var/lib/chatgpt-terminal/devices.sqlite
 AGENT_ENROLLMENT_TOKEN=replace-with-a-long-random-bootstrap-secret
 AGENT_AUTH_CHALLENGE_TTL_MS=10000
 
@@ -54,3 +55,7 @@ REQUESTS_PER_MINUTE=120
 AUDIT_LOG_PATH=/var/log/chatgpt-terminal/audit.jsonl
 TRANSCRIPT_LOG_PATH=/var/log/chatgpt-terminal/transcript.jsonl
 TRANSCRIPT_RETENTION_DAYS=7
+
+# Optional multi-instance live state (sessions, agent presence, cross-node command routing).
+# Leave unset for single-process memory backend.
+# REDIS_URL=redis://127.0.0.1:6379

@@ -21,6 +21,8 @@ import {
   type TerminalStartInput,
 } from '@terminal/protocol';
 import type { DeviceRegistry } from './device-registry.js';
+import type { LiveStore, SharedSessionRecord } from './live-store.js';
+import { MemoryLiveStore } from './live-store.js';
 
 interface AgentConnection {
   agent: Agent;
@@ -54,6 +56,8 @@ export interface AgentGatewayOptions {
   sessionSweepIntervalMs: number;
   deviceRegistry: DeviceRegistry;
   authChallengeTtlMs: number;
+  /** Shared live-state backend (memory default, Redis when REDIS_URL is set). */
+  liveStore?: LiveStore;
   onTerminalEvent?: (ownerId: string, agentId: string, event: TerminalEvent) => void | Promise<void>;
 }
 
@@ -65,11 +69,20 @@ export class AgentGateway {
   private readonly eventEmitter = new EventEmitter();
   private readonly usedAuthNonces = new Map<string, number>();
   private readonly sessionSweepTimer: NodeJS.Timeout;
+  private readonly liveStore: LiveStore;
 
   constructor(private readonly options: AgentGatewayOptions) {
+    this.liveStore = options.liveStore ?? new MemoryLiveStore();
     this.webSocketServer.on('connection', (socket, request) => this.accept(socket, request));
-    this.sessionSweepTimer = setInterval(() => this.sweepRetainedSessions(), options.sessionSweepIntervalMs);
+    this.sessionSweepTimer = setInterval(() => void this.sweepRetainedSessions(), options.sessionSweepIntervalMs);
     this.sessionSweepTimer.unref();
+    this.liveStore.onLocalAgentCommand(async (agentId, requestId, command) => {
+      const connection = this.agents.get(agentId);
+      if (!connection || connection.socket.readyState !== WebSocket.OPEN) {
+        throw new TerminalProtocolError('AGENT_OFFLINE', 'Requested local computer is offline on this instance.', true);
+      }
+      return this.request(connection, command as AgentCommand);
+    });
   }
 
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -78,20 +91,41 @@ export class AgentGateway {
     });
   }
 
-  listAgents(userId: string): Agent[] {
-    return [...this.agents.values()]
-      .filter((entry) => entry.ownerId === userId)
-      .map((entry) => ({
+  async listAgents(userId: string): Promise<Agent[]> {
+    const presence = await this.liveStore.listAgentPresenceByOwner(userId);
+    const byId = new Map<string, Agent>();
+    for (const entry of presence) {
+      const local = this.agents.get(entry.agent.agent_id);
+      const online = local
+        ? local.socket.readyState === WebSocket.OPEN
+        : entry.online && entry.instanceId !== this.liveStore.instanceId
+          ? entry.online
+          : false;
+      byId.set(entry.agent.agent_id, {
         ...entry.agent,
-        online: entry.socket.readyState === WebSocket.OPEN,
-        last_seen: new Date(entry.lastSeenMs).toISOString(),
-      }));
+        online,
+        last_seen: new Date(local?.lastSeenMs ?? entry.lastSeenMs).toISOString(),
+      });
+    }
+    for (const local of this.agents.values()) {
+      if (local.ownerId !== userId) continue;
+      byId.set(local.agent.agent_id, {
+        ...local.agent,
+        online: local.socket.readyState === WebSocket.OPEN,
+        last_seen: new Date(local.lastSeenMs).toISOString(),
+      });
+    }
+    return [...byId.values()];
   }
 
-  listSessions(userId: string): TerminalSession[] {
-    return [...this.sessions.values()]
-      .filter((record) => record.ownerId === userId && record.session)
-      .map((record) => ({ ...record.session! }));
+  async listSessions(userId: string): Promise<TerminalSession[]> {
+    const ids = await this.liveStore.listSessionIdsByOwner(userId);
+    const sessions: TerminalSession[] = [];
+    for (const id of ids) {
+      const record = await this.loadSession(id);
+      if (record?.ownerId === userId && record.session) sessions.push({ ...record.session });
+    }
+    return sessions;
   }
 
   activeAgentCount(): number {
@@ -105,8 +139,7 @@ export class AgentGateway {
   }
 
   async start(userId: string, input: TerminalStartInput, executionProfile: ExecutionProfile): Promise<AgentSessionSnapshot> {
-    const connection = this.requireAgent(userId, input.agent_id);
-    const snapshot = await this.request(connection, {
+    const snapshot = await this.dispatchAgentCommand(userId, input.agent_id, {
       type: 'request',
       request_id: randomUUID(),
       action: 'terminal.start',
@@ -114,11 +147,13 @@ export class AgentGateway {
       execution_profile: executionProfile,
       input,
     });
-    this.assertSnapshotIdentity(connection, snapshot, userId);
+    if (snapshot.session.user_id !== userId || snapshot.session.agent_id !== input.agent_id) {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent returned terminal session metadata for a different identity.');
+    }
     if (!isProfileAtMost(snapshot.session.execution_profile, executionProfile)) {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent returned a terminal session with a more privileged execution profile than requested.');
     }
-    this.upsertSnapshot(snapshot, userId);
+    await this.upsertSnapshot(snapshot, userId);
     return this.withServerCursor(snapshot);
   }
 
@@ -168,14 +203,14 @@ export class AgentGateway {
   }
 
   async read(userId: string, sessionId: string, after: number, maxBytes: number, waitMs = 0): Promise<TerminalReadOutput> {
-    const record = this.requireSession(userId, sessionId);
+    const record = await this.requireSession(userId, sessionId);
     this.assertCursor(record, after);
 
     if (after === record.latestSequence && waitMs > 0 && this.isSessionActive(record.session)) {
       await this.waitForEvent(sessionId, after, waitMs);
     }
 
-    const refreshed = this.requireSession(userId, sessionId);
+    const refreshed = await this.requireSession(userId, sessionId);
     this.assertCursor(refreshed, after);
     const events: TerminalEvent[] = [];
     let bytes = 0;
@@ -207,7 +242,7 @@ export class AgentGateway {
     });
   }
 
-  getSessionForUser(userId: string, sessionId: string): SessionRecord {
+  async getSessionForUser(userId: string, sessionId: string): Promise<SessionRecord> {
     return this.requireSession(userId, sessionId);
   }
 
@@ -224,11 +259,15 @@ export class AgentGateway {
       pending.reject(new TerminalProtocolError('AGENT_OFFLINE', 'Gateway is shutting down.', true));
     }
     this.pending.clear();
-    for (const connection of this.agents.values()) connection.socket.close(1001, 'gateway shutting down');
+    for (const connection of this.agents.values()) {
+      void this.liveStore.clearAgentPresence(connection.agent.agent_id, this.liveStore.instanceId);
+      connection.socket.close(1001, 'gateway shutting down');
+    }
     this.agents.clear();
     this.sessions.clear();
     this.eventEmitter.removeAllListeners();
     this.webSocketServer.close();
+    void this.liveStore.close();
   }
 
   private accept(socket: WebSocket, request: IncomingMessage): void {
@@ -300,12 +339,22 @@ export class AgentGateway {
           registeredAgentId = message.agent.agent_id;
           const previous = this.agents.get(message.agent.agent_id);
           if (previous && previous.socket !== socket) previous.socket.close(1000, 'agent reconnected');
+          const nowMs = Date.now();
+          const agent = { ...message.agent, online: true, last_seen: new Date(nowMs).toISOString() };
           this.agents.set(message.agent.agent_id, {
-            agent: { ...message.agent, online: true, last_seen: new Date().toISOString() },
+            agent,
             deviceId,
             ownerId,
             socket,
-            lastSeenMs: Date.now(),
+            lastSeenMs: nowMs,
+          });
+          void this.liveStore.setAgentPresence(message.agent.agent_id, {
+            agent,
+            deviceId,
+            ownerId,
+            online: true,
+            lastSeenMs: nowMs,
+            instanceId: this.liveStore.instanceId,
           });
           return;
         }
@@ -347,6 +396,7 @@ export class AgentGateway {
               sequences[session.session_id] = snapshot.cursor;
               this.sessions.delete(session.session_id);
               this.eventEmitter.removeAllListeners(`session:${session.session_id}`);
+              void this.liveStore.deleteSession(session.session_id);
               continue;
             }
             const existing = this.sessions.get(session.session_id);
@@ -375,7 +425,7 @@ export class AgentGateway {
             sequences[session.session_id] = record.latestSequence;
             const resumed = { ...session };
             if (resumed.status === 'disconnected') resumed.status = 'running';
-            this.upsertSnapshot({ ...snapshot, session: resumed }, ownerId);
+            void this.upsertSnapshot({ ...snapshot, session: resumed }, ownerId);
           }
           socket.send(JSON.stringify({ type: 'agent.resume.ack', sequences }));
           return;
@@ -393,9 +443,18 @@ export class AgentGateway {
       if (current?.socket === socket) {
         current.agent.online = false;
         current.lastSeenMs = Date.now();
+        void this.liveStore.setAgentPresence(registeredAgentId, {
+          agent: { ...current.agent, online: false, last_seen: new Date(current.lastSeenMs).toISOString() },
+          deviceId: current.deviceId,
+          ownerId: current.ownerId,
+          online: false,
+          lastSeenMs: current.lastSeenMs,
+          instanceId: this.liveStore.instanceId,
+        });
         for (const record of this.sessions.values()) {
           if (record.agentId === registeredAgentId && record.session && this.isSessionActive(record.session)) {
             record.session.status = 'disconnected';
+            void this.persistSession(record.session.session_id, record);
           }
         }
       }
@@ -410,13 +469,53 @@ export class AgentGateway {
   }
 
   private async sessionRequest(userId: string, sessionId: string, command: AgentCommand): Promise<AgentSessionSnapshot> {
-    const record = this.requireSession(userId, sessionId);
+    const record = await this.requireSession(userId, sessionId);
     if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
-    const connection = this.requireAgent(userId, record.agentId);
-    const snapshot = await this.request(connection, command);
-    this.assertSnapshotIdentity(connection, snapshot, userId, sessionId);
-    this.upsertSnapshot(snapshot, userId);
+    const snapshot = await this.dispatchAgentCommand(userId, record.agentId, command);
+    if (snapshot.session.user_id !== userId || snapshot.session.agent_id !== record.agentId) {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent returned terminal session metadata for a different identity.');
+    }
+    if (snapshot.session.session_id !== sessionId) {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent returned metadata for a different terminal session.');
+    }
+    await this.upsertSnapshot(snapshot, userId);
     return this.withServerCursor(snapshot);
+  }
+
+  private async dispatchAgentCommand(userId: string, agentId: string, command: AgentCommand): Promise<AgentSessionSnapshot> {
+    const local = this.agents.get(agentId);
+    if (local && local.socket.readyState === WebSocket.OPEN) {
+      if (local.ownerId !== userId) {
+        throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent is not owned by the authenticated user.');
+      }
+      return this.request(local, command);
+    }
+
+    const presence = await this.liveStore.getAgentPresence(agentId);
+    if (!presence || presence.ownerId !== userId) {
+      throw new TerminalProtocolError('AGENT_OFFLINE', 'Requested local computer is offline.', true);
+    }
+    if (!presence.online) {
+      throw new TerminalProtocolError('AGENT_OFFLINE', 'Requested local computer is offline.', true);
+    }
+
+    try {
+      const result = await this.liveStore.requestAgentCommand(
+        agentId,
+        command.request_id,
+        command,
+        this.options.requestTimeoutMs,
+      );
+      return agentSessionSnapshotSchema.parse(result);
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error) {
+        const code = String((error as { code: string }).code);
+        if (code === 'AGENT_OFFLINE' || code === 'AGENT_TIMEOUT') {
+          throw new TerminalProtocolError(code as 'AGENT_OFFLINE' | 'AGENT_TIMEOUT', error instanceof Error ? error.message : String(error), true);
+        }
+      }
+      throw error;
+    }
   }
 
   private request(connection: AgentConnection, command: AgentCommand): Promise<AgentSessionSnapshot> {
@@ -471,8 +570,8 @@ export class AgentGateway {
     return connection;
   }
 
-  private requireSession(userId: string, sessionId: string): SessionRecord {
-    const record = this.sessions.get(sessionId);
+  private async requireSession(userId: string, sessionId: string): Promise<SessionRecord> {
+    const record = await this.loadSession(sessionId);
     if (!record || !record.session) {
       throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session was not found.');
     }
@@ -482,9 +581,40 @@ export class AgentGateway {
     return record;
   }
 
-  private upsertSnapshot(snapshot: AgentSessionSnapshot, ownerId?: string): void {
+  private async loadSession(sessionId: string): Promise<SessionRecord | undefined> {
+    const cached = this.sessions.get(sessionId);
+    if (cached) return cached;
+    const shared = await this.liveStore.getSession(sessionId);
+    if (!shared) return undefined;
+    const record: SessionRecord = {
+      ownerId: shared.ownerId,
+      agentId: shared.agentId,
+      session: shared.session ? { ...shared.session } : undefined,
+      events: shared.events.map((e) => ({ ...e, data: { ...e.data } })),
+      latestSequence: shared.latestSequence,
+      earliestSequence: shared.earliestSequence,
+      retainedBytes: shared.retainedBytes,
+    };
+    this.sessions.set(sessionId, record);
+    return record;
+  }
+
+  private async persistSession(sessionId: string, record: SessionRecord): Promise<void> {
+    const shared: SharedSessionRecord = {
+      ownerId: record.ownerId,
+      agentId: record.agentId,
+      session: record.session ? { ...record.session } : undefined,
+      events: record.events.map((e) => ({ ...e, data: { ...e.data } })),
+      latestSequence: record.latestSequence,
+      earliestSequence: record.earliestSequence,
+      retainedBytes: record.retainedBytes,
+    };
+    await this.liveStore.putSession(sessionId, shared);
+  }
+
+  private async upsertSnapshot(snapshot: AgentSessionSnapshot, ownerId?: string): Promise<void> {
     const sessionId = snapshot.session.session_id;
-    const record = this.sessions.get(sessionId) ?? {
+    const record = (await this.loadSession(sessionId)) ?? {
       events: [],
       latestSequence: 0,
       earliestSequence: 1,
@@ -494,6 +624,7 @@ export class AgentGateway {
     record.agentId = snapshot.session.agent_id;
     record.session = { ...snapshot.session };
     this.sessions.set(sessionId, record);
+    await this.persistSession(sessionId, record);
   }
 
   private withServerCursor(snapshot: AgentSessionSnapshot): AgentSessionSnapshot {
@@ -562,7 +693,9 @@ export class AgentGateway {
     }
 
     this.sessions.set(event.session_id, record);
+    void this.persistSession(event.session_id, record);
     this.eventEmitter.emit(`session:${event.session_id}`, event);
+    void this.liveStore.publishSessionEvent(event.session_id, event);
   }
 
   private assertSnapshotIdentity(connection: AgentConnection, snapshot: AgentSessionSnapshot, userId: string, expectedSessionId?: string): void {
@@ -593,12 +726,13 @@ export class AgentGateway {
     return Number.isFinite(activityMs) && now - activityMs >= this.options.closedSessionRetentionMs;
   }
 
-  private sweepRetainedSessions(): void {
+  private async sweepRetainedSessions(): Promise<void> {
     const now = Date.now();
     for (const [sessionId, record] of this.sessions) {
       if (!record.session || !this.isFinalSessionRetentionExpired(record.session, now)) continue;
       this.sessions.delete(sessionId);
       this.eventEmitter.removeAllListeners(`session:${sessionId}`);
+      await this.liveStore.deleteSession(sessionId);
     }
   }
 
@@ -615,9 +749,11 @@ export class AgentGateway {
         resolve();
       }, waitMs);
       timer.unref();
+      const unsubStore = this.liveStore.subscribeSessionEvents(sessionId, listener);
       const cleanup = () => {
         clearTimeout(timer);
         this.eventEmitter.off(key, listener);
+        unsubStore();
       };
       this.eventEmitter.on(key, listener);
     });

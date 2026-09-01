@@ -37,7 +37,8 @@ describe('device identity and enrollment', () => {
     }, enrollmentToken);
     expect(enrolled.status).toBe('enrolled');
     expect(enrolled.record.key_version).toBe(1);
-    expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+    expect(registry.databasePath).toBe(join(root, 'server', 'devices.sqlite'));
+    expect((await stat(registry.databasePath!)).mode & 0o777).toBe(0o600);
 
     const challenge = {
       type: 'auth.challenge' as const,
@@ -182,7 +183,8 @@ describe('device identity and enrollment', () => {
     });
     expect(enrolled.status).toBe('enrolled');
     expect(enrolled.record.owner_id).toBe('owner-a');
-    expect((await stat(registryPath)).mode & 0o777).toBe(0o600);
+    expect(registry.databasePath).toBe(join(root, 'devices.sqlite'));
+    expect((await stat(registry.databasePath!)).mode & 0o777).toBe(0o600);
 
     await expect(registry.enrollLocalAdmin({
       device_id: identity.deviceId,
@@ -216,6 +218,38 @@ describe('device identity and enrollment', () => {
     const persisted = JSON.parse(await readFile(registryPath, 'utf8')) as { version: number; devices: Array<{ agent_id?: string }> };
     expect(persisted.version).toBe(2);
     expect(persisted.devices[0]?.agent_id).toBe(identity.agentId);
+
+    // SQLite is source of truth after migration; re-open must not depend on JSON alone.
+    registry.close();
+    const reloaded = await DeviceRegistry.load(registryPath, 'migration-token');
+    expect(reloaded.requireActive(identity.deviceId).agent_id).toBe(identity.agentId);
+    expect(reloaded.databasePath).toMatch(/devices\.sqlite$/);
+    reloaded.close();
+  });
+
+  it('persists enrollment across process reloads via SQLite', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-sqlite-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registryPath = join(root, 'devices.sqlite');
+    const token = 'sqlite-token';
+
+    const registry = await DeviceRegistry.load(registryPath, token);
+    await registry.enroll({
+      device_id: identity.deviceId,
+      agent_id: identity.agentId,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+      display_name: 'SQLite box',
+    }, token);
+    registry.close();
+
+    const again = await DeviceRegistry.load(registryPath, token);
+    const record = again.requireActive(identity.deviceId);
+    expect(record.owner_id).toBe('owner-a');
+    expect(record.display_name).toBe('SQLite box');
+    expect(record.key_version).toBe(1);
+    again.close();
   });
 });
 

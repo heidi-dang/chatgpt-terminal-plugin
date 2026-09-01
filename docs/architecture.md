@@ -58,13 +58,13 @@ The widget tracks the most recent accepted event sequence and accepts only the n
 
 - PTY process and shell state: local agent.
 - Device private key: local machine only.
-- Device public identity and immutable device→agent→owner binding: server device registry.
+- Device public identity and immutable device→agent→owner binding: durable SQLite device registry on the server (legacy JSON auto-migrated).
 - Live agent connections and terminal routing: server process memory.
 - Bounded terminal event history: agent and server process memory. Final session metadata/history remains available only for `TERMINAL_CLOSED_SESSION_RETENTION_MS`, then both sides release it.
 - Audit metadata/transcript: optional append-only local files with redaction and transcript retention pruning.
 - Authenticated user identity: either origin-validated OAuth JWT, or a Cloudflare Access assertion produced after Managed OAuth; both are signature/issuer/audience validated at the MCP origin.
 
-No distributed live-state backend is implemented or configured in this version. Multi-replica gateway HA therefore requires future shared-state/event-bus work or explicit sticky/single-owner routing.
+Optional Redis live-state (`REDIS_URL`) shares session records, agent presence, event fan-out, and cross-instance agent command routing. WebSocket agent connections remain process-local; the owning instance is recorded in presence and remote MCP nodes forward commands over Redis pub/sub. Without `REDIS_URL`, the in-memory backend is used (single process).
 
 ## Session lifecycle
 

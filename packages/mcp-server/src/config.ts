@@ -74,6 +74,8 @@ const configSchema = z.object({
   AUDIT_LOG_PATH: optionalString,
   TRANSCRIPT_LOG_PATH: optionalString,
   TRANSCRIPT_RETENTION_DAYS: positiveInt(7, 3650),
+  /** Optional Redis URL for multi-instance live session/agent state (e.g. redis://127.0.0.1:6379). */
+  REDIS_URL: optionalString,
 });
 
 export type ServerConfig = ReturnType<typeof loadConfig>;
@@ -173,5 +175,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     auditLogPath: parsed.AUDIT_LOG_PATH,
     transcriptLogPath: parsed.TRANSCRIPT_LOG_PATH,
     transcriptRetentionDays: parsed.TRANSCRIPT_RETENTION_DAYS,
+    redisUrl: parsed.REDIS_URL,
   } as const;
 }

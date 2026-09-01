@@ -17,7 +17,7 @@ If `execution_profile` is absent, `MCP_DEFAULT_EXECUTION_PROFILE` is used. Inval
 
 ### Device authentication
 
-Enrollment is a bootstrap administrative operation. Each machine creates a local Ed25519 key pair, stable device ID, and stable agent ID. Enrollment binds the device ID, agent ID, owner association, and public key on the server. The private key remains in an owner-only local identity file.
+Enrollment is a bootstrap administrative operation. Each machine creates a local Ed25519 key pair, stable device ID, and stable agent ID. Enrollment binds the device ID, agent ID, owner association, and public key on the server in a durable SQLite registry (WAL mode). Legacy JSON registry paths are accepted and migrated once into SQLite. The private key remains in an owner-only local identity file.
 
 Every gateway connection requires a new expiring challenge. The signed challenge includes the device ID, random nonce and issue time. Nonces are one-time and replay is rejected. The test suite verifies that replaying an accepted proof causes a policy close.
 
