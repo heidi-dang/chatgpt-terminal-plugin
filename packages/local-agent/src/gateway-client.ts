@@ -11,6 +11,8 @@ import {
 } from '@terminal/protocol';
 import type { AgentSessionSnapshot, TerminalAgentApi } from './index.js';
 import type { DeviceIdentity } from './device-identity.js';
+import { LspManager } from './lsp-manager.js';
+import { CodeBlockExecutor } from './code-block-executor.js';
 
 export interface GatewayClientOptions {
   url: string;
@@ -28,6 +30,7 @@ interface QueuedMessage {
 
 export class AgentGatewayClient {
   private socket?: WebSocket;
+  private lspManager = new LspManager();
   private stopped = false;
   private authenticated = false;
   private reconnectAttempt = 0;
@@ -42,7 +45,15 @@ export class AgentGatewayClient {
   constructor(
     private readonly agent: TerminalAgentApi,
     private readonly options: GatewayClientOptions,
-  ) {}
+  ) {
+    this.lspManager.on('event', (evt: any) => {
+      try {
+        this.send({ type: 'lsp_event', ...evt } as any);
+      } catch (err) {
+        // Ignore send errors if disconnected
+      }
+    });
+  }
 
   async start(): Promise<void> {
     this.stopped = false;
@@ -200,6 +211,40 @@ export class AgentGatewayClient {
       }
       return;
     }
+    if (message.type === 'execute_code_block') {
+      const reqId = (message as any).request_id || (message as any).requestId;
+      void CodeBlockExecutor.execute((message as any).code, (message as any).language, (message as any).cwd).then((result: any) => {
+        this.send({ type: 'execute_code_block_response', request_id: reqId, ...result } as any);
+      }).catch((error: any) => {
+        this.send({ type: 'execute_code_block_response', request_id: reqId, error: normalizeProtocolError(error).toPayload() } as any);
+      });
+      return;
+    }
+    if (message.type === 'lsp_start_request' || message.type === 'lsp_rpc_request' || message.type === 'lsp_stop_request') {
+      const reqId = (message as any).request_id || (message as any).requestId;
+      
+      const processLsp = async () => {
+        if (message.type === 'lsp_start_request') {
+           const lspId = this.lspManager.start((message as any).command, (message as any).args);
+           return { type: 'lsp_start_response', lspId };
+        } else if (message.type === 'lsp_rpc_request') {
+           const result = await this.lspManager.request((message as any).lspId, (message as any).method, (message as any).params);
+           return { type: 'lsp_rpc_response', result };
+        } else if (message.type === 'lsp_stop_request') {
+           const success = this.lspManager.stop((message as any).lspId);
+           return { type: 'lsp_stop_response', success };
+        }
+      };
+
+      processLsp().then((result: any) => {
+        this.send({ ...result, requestId: reqId } as any);
+      }).catch((error: any) => {
+        const errPayload = error instanceof Error ? { message: error.message } : error;
+        this.send({ type: message.type.replace('request', 'response'), requestId: reqId, error: errPayload } as any);
+      });
+      return;
+    }
+
     if (message.type !== 'request') return;
     const command = agentCommandSchema.parse(message);
 

@@ -276,7 +276,28 @@ export const gatewayResumeAckSchema = z.object({
 });
 export type GatewayResumeAck = z.infer<typeof gatewayResumeAckSchema>;
 
+import { gatewayExecuteCodeBlockRequestSchema, gatewayExecuteCodeBlockResponseSchema } from './code-block.js';
+
+import {
+  GatewayLspStartRequestSchema,
+  GatewayLspStartResponseSchema,
+  GatewayLspRpcRequestSchema,
+  GatewayLspRpcResponseSchema,
+  GatewayLspEventSchema,
+  GatewayLspStopRequestSchema,
+  GatewayLspStopResponseSchema,
+} from './lsp.js';
+
 export const gatewayMessageSchema = z.union([
+  GatewayLspStartRequestSchema,
+  GatewayLspStartResponseSchema,
+  GatewayLspRpcRequestSchema,
+  GatewayLspRpcResponseSchema,
+  GatewayLspEventSchema,
+  GatewayLspStopRequestSchema,
+  GatewayLspStopResponseSchema,
+  gatewayExecuteCodeBlockRequestSchema,
+  gatewayExecuteCodeBlockResponseSchema,
   gatewayAuthChallengeSchema,
   gatewayAuthProofSchema,
   z.object({ type: z.literal('auth.accepted'), server_time: z.string().datetime() }),
@@ -290,6 +311,8 @@ export const gatewayMessageSchema = z.union([
   agentResponseSchema,
 ]);
 export type GatewayMessage = z.infer<typeof gatewayMessageSchema>;
+export * from './code-block.js';
+export * from './lsp.js';
 
 export const deviceEnrollmentRequestSchema = z.object({
   device_id: z.string().min(1),

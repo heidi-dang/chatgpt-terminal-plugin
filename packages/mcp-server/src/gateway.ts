@@ -390,6 +390,7 @@ export class AgentGateway {
           return;
         }
         if (message.type === 'response') this.resolveResponse(registeredAgentId, message);
+        else if (message.type && message.type.endsWith('_response')) this.resolveCustomResponse(registeredAgentId, message);
       } catch (error) {
         console.error(JSON.stringify({ level: 'error', event: 'gateway.invalid_agent_message', error: errorMessage(error) }));
         socket.close(1008, 'invalid gateway message');
@@ -447,6 +448,43 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_OFFLINE', `Failed to send command to agent: ${error.message}`, true));
       });
     });
+  }
+
+  private resolveCustomResponse(agentId: string, message: any): void {
+    const reqId = message.request_id || message.requestId;
+    if (!reqId) return;
+    const pending = this.pending.get(reqId);
+    if (!pending || pending.agentId !== agentId) return;
+    this.pending.delete(reqId);
+    clearTimeout(pending.timer);
+    if (message.error) pending.reject(new Error(JSON.stringify(message.error)));
+    else pending.resolve(message);
+  }
+
+  public async requestCustom(userId: string, agentId: string, command: any): Promise<any> {
+    const connection = this.requireAgent(userId, agentId);
+    if (connection.socket.readyState !== WebSocket.OPEN) {
+      throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
+    }
+    return new Promise((resolve, reject) => {
+      const reqId = command.request_id || command.requestId;
+      const timer = setTimeout(() => {
+        this.pending.delete(reqId);
+        reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
+      }, this.options.requestTimeoutMs);
+      timer.unref();
+      this.pending.set(reqId, { agentId: connection.agent.agent_id, resolve, reject, timer });
+      connection.socket.send(JSON.stringify(command), (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.pending.delete(reqId);
+        reject(new TerminalProtocolError('AGENT_OFFLINE', `Failed to send command to agent: ${error.message}`, true));
+      });
+    });
+  }
+
+  public async sendLspMessage(userId: string, agentId: string, message: any): Promise<any> {
+    return this.requestCustom(userId, agentId, message);
   }
 
   private resolveResponse(agentId: string, raw: unknown): void {

@@ -21,6 +21,8 @@ import type { AgentGateway } from './gateway.js';
 import type { TerminalService, RequestIdentity } from './service.js';
 import type { StreamTokenService } from './stream-token.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
+import { registerLspTools } from './lsp-tools.js';
+import { registerCodeBlockTool } from './code-block-tools.js';
 
 export const TERMINAL_UI_URI = 'ui://terminal/v3.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
@@ -42,6 +44,20 @@ export interface McpServerDependencies {
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
   const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.3.0' });
+
+  const getIdentity = (ctx: ServerContext): any => {
+    // Basic mock of identity retrieval. 
+    // In production, mcp-server populates the context from auth.
+    // Here we just extract it if available, or fall back to a known identity if test.
+    const meta = ctx as any;
+    return {
+      userId: meta?.userId || meta?.session?.user_id || 'test-user',
+      agentId: meta?.agentId || meta?.session?.agent_id || 'test-agent'
+    };
+  };
+
+  registerLspTools(server, deps.gateway, getIdentity);
+  registerCodeBlockTool(server, deps.gateway, getIdentity);
 
   server.registerResource(
     'Live terminal',

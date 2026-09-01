@@ -115,7 +115,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     }
   });
 
-  app.get('/terminal-ui/reload', (_req, res) => {
+  app.get('/terminal-ui/reload', (req, res) => {
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
