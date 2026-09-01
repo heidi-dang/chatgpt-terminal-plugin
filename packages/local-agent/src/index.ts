@@ -39,6 +39,8 @@ interface ManagedSession {
   pty: pty.IPty;
   metadata: TerminalSession;
   events: TerminalEvent[];
+  eventSizes: number[];
+  eventHead: number;
   sequence: number;
   retainedBytes: number;
   earliestSequence: number;
@@ -241,6 +243,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       pty: terminal,
       metadata,
       events: [],
+      eventSizes: [],
+      eventHead: 0,
       sequence: 0,
       retainedBytes: 0,
       earliestSequence: 1,
@@ -329,9 +333,11 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
     const events: TerminalEvent[] = [];
     let bytes = 0;
-    for (const event of managed.events) {
-      if (event.sequence <= after) continue;
-      const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    const startIndex = managed.eventHead + Math.max(0, after - managed.earliestSequence + 1);
+    for (let index = startIndex; index < managed.events.length; index += 1) {
+      const event = managed.events[index];
+      const eventBytes = managed.eventSizes[index];
+      if (!event || eventBytes === undefined) break;
       if (events.length > 0 && bytes + eventBytes > maxBytes) break;
       if (eventBytes > maxBytes && events.length === 0) {
         throw new TerminalProtocolError(
@@ -466,14 +472,22 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     };
     const eventBytes = Buffer.byteLength(JSON.stringify(event));
     managed.events.push(event);
+    managed.eventSizes.push(eventBytes);
     managed.retainedBytes += eventBytes;
     managed.metadata.last_activity_at = now;
 
-    while (managed.retainedBytes > this.bufferHighWaterBytes && managed.events.length > 1) {
-      const removed = managed.events.shift();
-      if (!removed) break;
-      managed.retainedBytes -= Buffer.byteLength(JSON.stringify(removed));
+    while (managed.retainedBytes > this.bufferHighWaterBytes && managed.events.length - managed.eventHead > 1) {
+      const removed = managed.events[managed.eventHead];
+      const removedBytes = managed.eventSizes[managed.eventHead];
+      if (!removed || removedBytes === undefined) break;
+      managed.eventHead += 1;
+      managed.retainedBytes -= removedBytes;
       managed.earliestSequence = removed.sequence + 1;
+    }
+    if (managed.eventHead >= 1024 && managed.eventHead * 2 >= managed.events.length) {
+      managed.events = managed.events.slice(managed.eventHead);
+      managed.eventSizes = managed.eventSizes.slice(managed.eventHead);
+      managed.eventHead = 0;
     }
 
     this.eventEmitter.emit('terminal-event', event);

@@ -51,17 +51,18 @@ export class TerminalService {
     const input = terminalStartInputSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_start', { agent_id: input.agent_id, cwd: input.cwd, shell: input.shell });
     const active = this.gateway.listSessions(identity.userId).filter((session) => isActive(session.status));
-    if (active.length >= this.config.maxSessionsPerUser) {
+    if (this.config.maxSessionsPerUser > 0 && active.length >= this.config.maxSessionsPerUser) {
       await this.denied(identity, 'terminal_start', 'SESSION_LIMIT_REACHED', { agent_id: input.agent_id });
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'User terminal session quota has been reached.');
     }
-    if (active.filter((session) => session.agent_id === input.agent_id).length >= this.config.maxSessionsPerAgent) {
+    if (this.config.maxSessionsPerAgent > 0 && active.filter((session) => session.agent_id === input.agent_id).length >= this.config.maxSessionsPerAgent) {
       await this.denied(identity, 'terminal_start', 'SESSION_LIMIT_REACHED', { agent_id: input.agent_id });
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Agent terminal session quota has been reached.');
     }
 
     const snapshot = await this.gateway.start(identity.userId, input, identity.executionProfile);
-    const initial = await this.gateway.read(identity.userId, snapshot.session.session_id, 0, this.config.maxReadBytes, 200);
+    // Do not long-poll during creation: terminal_start must return the stream capability immediately.
+    const initial = await this.gateway.read(identity.userId, snapshot.session.session_id, 0, this.config.maxReadBytes, 0);
     const output = terminalStartOutputSchema.parse({
       session_id: snapshot.session.session_id,
       status: initial.status,

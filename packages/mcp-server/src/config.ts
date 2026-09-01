@@ -6,6 +6,12 @@ const positiveInt = (fallback: number, max = Number.MAX_SAFE_INTEGER) =>
     z.number().int().positive().max(max),
   );
 
+const nonNegativeInt = (fallback: number, max = Number.MAX_SAFE_INTEGER) =>
+  z.preprocess(
+    (value) => (value === undefined || value === '' ? fallback : Number(value)),
+    z.number().int().min(0).max(max),
+  );
+
 const csv = (fallback: string[] = []) =>
   z.preprocess(
     (value) => typeof value === 'string' ? value.split(',').map((item) => item.trim()).filter(Boolean) : fallback,
@@ -63,8 +69,9 @@ const configSchema = z.object({
   TERMINAL_MAX_READ_BYTES: positiveInt(32_768, 262_144),
   TERMINAL_MAX_EVENT_BYTES: positiveInt(65_536, 1024 * 1024),
   TERMINAL_BUFFER_HIGH_WATER_BYTES: positiveInt(1024 * 1024, 64 * 1024 * 1024),
-  TERMINAL_MAX_SESSIONS_PER_USER: positiveInt(4, 100),
-  TERMINAL_MAX_SESSIONS_PER_AGENT: positiveInt(8, 100),
+  // 0 disables the quota. This keeps session creation unbounded by policy while OS resources remain the real ceiling.
+  TERMINAL_MAX_SESSIONS_PER_USER: nonNegativeInt(0, 100_000),
+  TERMINAL_MAX_SESSIONS_PER_AGENT: nonNegativeInt(0, 100_000),
   TERMINAL_IDLE_TIMEOUT_MS: positiveInt(30 * 60_000, 7 * 24 * 60 * 60_000),
   TERMINAL_MAX_LIFETIME_MS: positiveInt(8 * 60 * 60_000, 30 * 24 * 60 * 60_000),
   TERMINAL_CLOSED_SESSION_RETENTION_MS: positiveInt(15 * 60_000, 7 * 24 * 60 * 60_000),

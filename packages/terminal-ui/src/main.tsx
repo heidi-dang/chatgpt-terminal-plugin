@@ -131,6 +131,7 @@ export function TerminalApp(): React.JSX.Element {
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const reconnectAttemptRef = useRef(0);
   const resizeTimerRef = useRef<number | undefined>(undefined);
+  const fitFrameRef = useRef<number | undefined>(undefined);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
   const viewStateRef = useRef<TerminalViewState | null>(viewState);
   const streamMetaRef = useRef<TerminalStreamMeta | null>(streamOverride);
@@ -159,6 +160,7 @@ export function TerminalApp(): React.JSX.Element {
         hotReloadSourceRef.current?.close();
         clearReconnectTimer();
         if (resizeTimerRef.current !== undefined) window.clearTimeout(resizeTimerRef.current);
+        if (fitFrameRef.current !== undefined) window.cancelAnimationFrame(fitFrameRef.current);
         flushTerminalOutput();
         terminalRef.current?.dispose();
         return Promise.resolve({});
@@ -290,10 +292,17 @@ export function TerminalApp(): React.JSX.Element {
     terminal.open(host);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
-    queueMicrotask(() => fitAddon.fit());
+    const scheduleFit = () => {
+      if (fitFrameRef.current !== undefined) return;
+      fitFrameRef.current = window.requestAnimationFrame(() => {
+        fitFrameRef.current = undefined;
+        fitAddon.fit();
+      });
+    };
+    queueMicrotask(scheduleFit);
 
     const observer = new ResizeObserver(() => {
-      fitAddon.fit();
+      scheduleFit();
       if (resizeTimerRef.current !== undefined) window.clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = window.setTimeout(() => {
         resizeTimerRef.current = undefined;
@@ -315,6 +324,8 @@ export function TerminalApp(): React.JSX.Element {
       observer.disconnect();
       if (resizeTimerRef.current !== undefined) window.clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = undefined;
+      if (fitFrameRef.current !== undefined) window.cancelAnimationFrame(fitFrameRef.current);
+      fitFrameRef.current = undefined;
       flushTerminalOutput();
       terminal.dispose();
       terminalRef.current = undefined;

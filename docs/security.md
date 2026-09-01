@@ -103,8 +103,8 @@ An empty developer root list means terminal creation is denied rather than unres
 Configured controls include:
 
 - MCP HTTP requests per minute
-- maximum sessions per user
-- maximum sessions per agent
+- optional maximum sessions per user (`0` = unlimited)
+- optional maximum sessions per agent (`0` = unlimited)
 - model-visible read byte cap
 - terminal input/event size limits
 - retained terminal-buffer high-water mark

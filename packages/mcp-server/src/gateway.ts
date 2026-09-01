@@ -42,6 +42,8 @@ export interface SessionRecord {
   agentId?: string;
   session?: TerminalSession;
   events: TerminalEvent[];
+  eventSizes: number[];
+  eventHead: number;
   latestSequence: number;
   earliestSequence: number;
   retainedBytes: number;
@@ -178,24 +180,27 @@ export class AgentGateway {
     const refreshed = this.requireSession(userId, sessionId);
     this.assertCursor(refreshed, after);
     const events: TerminalEvent[] = [];
+    const outputChunks: string[] = [];
     let bytes = 0;
+    const startIndex = refreshed.eventHead + Math.max(0, after - refreshed.earliestSequence + 1);
 
-    for (const event of refreshed.events) {
-      if (event.sequence <= after) continue;
-      const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    for (let index = startIndex; index < refreshed.events.length; index += 1) {
+      const event = refreshed.events[index];
+      const eventBytes = refreshed.eventSizes[index];
+      if (!event || eventBytes === undefined) break;
       if (events.length > 0 && bytes + eventBytes > maxBytes) break;
       if (events.length === 0 && eventBytes > maxBytes) {
         throw new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'A terminal event exceeds the requested MCP read limit.');
       }
       events.push(event);
+      if ((event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') && typeof event.data.text === 'string') {
+        outputChunks.push(event.data.text);
+      }
       bytes += eventBytes;
     }
 
     const nextCursor = events.at(-1)?.sequence ?? after;
-    const output = events
-      .filter((event) => event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr')
-      .map((event) => (typeof event.data.text === 'string' ? event.data.text : ''))
-      .join('');
+    const output = outputChunks.join('');
 
     return terminalReadOutputSchema.parse({
       output,
@@ -361,12 +366,16 @@ export class AgentGateway {
               ownerId,
               agentId: registeredAgentId,
               events: [],
+              eventSizes: [],
+              eventHead: 0,
               latestSequence: baseCursor,
               earliestSequence: baseCursor + 1,
               retainedBytes: 0,
             };
             if (record.latestSequence < snapshot.earliestCursor) {
               record.events = [];
+              record.eventSizes = [];
+              record.eventHead = 0;
               record.retainedBytes = 0;
               record.latestSequence = snapshot.earliestCursor;
               record.earliestSequence = snapshot.earliestCursor + 1;
@@ -486,6 +495,8 @@ export class AgentGateway {
     const sessionId = snapshot.session.session_id;
     const record = this.sessions.get(sessionId) ?? {
       events: [],
+      eventSizes: [],
+      eventHead: 0,
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
@@ -510,6 +521,8 @@ export class AgentGateway {
       agentId,
       ownerId,
       events: [],
+      eventSizes: [],
+      eventHead: 0,
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
@@ -522,14 +535,15 @@ export class AgentGateway {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Terminal event agent mismatch.');
     }
     if (event.sequence <= record.latestSequence) {
-      const duplicate = record.events.find((item) => item.sequence === event.sequence);
-      if (duplicate) {
+      if (event.sequence < record.earliestSequence) return;
+      const duplicateIndex = record.eventHead + event.sequence - record.earliestSequence;
+      const duplicate = record.events[duplicateIndex];
+      if (duplicate?.sequence === event.sequence) {
         if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event sequence was replayed with different content.');
         }
         return;
       }
-      if (event.sequence < record.earliestSequence) return;
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event stream contains an inconsistent historical sequence.');
     }
     if (event.sequence !== record.latestSequence + 1) {
@@ -537,9 +551,11 @@ export class AgentGateway {
     }
     record.ownerId = ownerId;
     record.agentId = agentId;
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
     record.events.push(event);
+    record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;
-    record.retainedBytes += Buffer.byteLength(JSON.stringify(event));
+    record.retainedBytes += eventBytes;
 
     if (record.session) {
       record.session.last_activity_at = event.timestamp;
@@ -554,11 +570,18 @@ export class AgentGateway {
       }
     }
 
-    while (record.retainedBytes > this.options.maxRetainedBytesPerSession && record.events.length > 1) {
-      const removed = record.events.shift();
-      if (!removed) break;
-      record.retainedBytes -= Buffer.byteLength(JSON.stringify(removed));
+    while (record.retainedBytes > this.options.maxRetainedBytesPerSession && record.events.length - record.eventHead > 1) {
+      const removed = record.events[record.eventHead];
+      const removedBytes = record.eventSizes[record.eventHead];
+      if (!removed || removedBytes === undefined) break;
+      record.eventHead += 1;
+      record.retainedBytes -= removedBytes;
       record.earliestSequence = removed.sequence + 1;
+    }
+    if (record.eventHead >= 1024 && record.eventHead * 2 >= record.events.length) {
+      record.events = record.events.slice(record.eventHead);
+      record.eventSizes = record.eventSizes.slice(record.eventHead);
+      record.eventHead = 0;
     }
 
     this.sessions.set(event.session_id, record);

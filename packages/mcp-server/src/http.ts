@@ -52,14 +52,18 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     sessionSweepIntervalMs: config.terminalSweepIntervalMs,
     deviceRegistry,
     authChallengeTtlMs: config.agentAuthChallengeTtlMs,
-    onTerminalEvent: (ownerId, agentId, event) => audit.transcript({
-      user_id: ownerId,
-      agent_id: agentId,
-      terminal_session_id: event.session_id,
-      sequence: event.sequence,
-      event_type: event.event_type,
-      data: event.data,
-    }),
+    onTerminalEvent: (ownerId, agentId, event) => {
+      void audit.transcript({
+        user_id: ownerId,
+        agent_id: agentId,
+        terminal_session_id: event.session_id,
+        sequence: event.sequence,
+        event_type: event.event_type,
+        data: event.data,
+      }).catch((error) => {
+        console.error(JSON.stringify({ level: 'error', event: 'transcript.write_failed', error: errorMessage(error) }));
+      });
+    },
   });
   const service = new TerminalService(gateway, config, audit);
   const streamTokens = new StreamTokenService(config.streamTokenSecret, config.streamTokenTtlSeconds);
@@ -297,8 +301,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         sendEvent(event);
       });
 
-      const replay = record.events.filter((event) => event.sequence > cursor);
-      for (const event of replay) sendEvent(event);
+      for (let index = record.eventHead; index < record.events.length; index += 1) {
+        const event = record.events[index];
+        if (event && event.sequence > cursor) sendEvent(event);
+      }
       replaying = false;
       pendingLive.sort((left, right) => left.sequence - right.sequence);
       for (const event of pendingLive) sendEvent(event);
@@ -354,6 +360,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       gateway.closeAll();
       for (const session of sessions.values()) await session.server.close();
       sessions.clear();
+      await audit.flush();
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => error ? reject(error) : resolve());
       });
@@ -411,8 +418,7 @@ function isAllowedUpgradeHost(hostHeader: string | undefined, allowedHosts: read
 }
 
 function writeSse(res: Response, sequence: number, event: unknown): void {
-  res.write(`id: ${sequence}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
+  res.write(`id: ${sequence}\ndata: ${JSON.stringify(event)}\n\n`);
 }
 
 export interface RateLimitBucket {

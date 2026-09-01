@@ -185,7 +185,7 @@ The protocol exposes stable codes including:
 - `AGENT_TIMEOUT`
 - `OUTPUT_LIMIT_REACHED`
 - `STREAM_TOKEN_EXPIRED`
-- `SESSION_LIMIT_REACHED`
+- `SESSION_LIMIT_REACHED` (only when a non-zero session quota is explicitly configured)
 - `INVALID_ARGUMENT`
 
 MCP tool errors return concise model-visible text and a structured terminal error in result metadata without exposing internal stack traces.

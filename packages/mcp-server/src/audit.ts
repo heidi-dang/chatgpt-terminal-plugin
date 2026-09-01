@@ -25,7 +25,8 @@ export interface AuditEvent {
 }
 
 export class AuditLogger {
-  private fileTail: Promise<void> = Promise.resolve();
+  private readonly fileTails = new Map<string, Promise<void>>();
+  private readonly preparedPaths = new Set<string>();
 
   constructor(
     private readonly auditPath?: string,
@@ -38,7 +39,7 @@ export class AuditLogger {
       timestamp: new Date().toISOString(),
       ...redactValue(event),
     };
-    await this.enqueue(() => this.write(this.auditPath, entry));
+    await this.enqueue(this.auditPath, () => this.write(this.auditPath, entry));
   }
 
   async transcript(event: {
@@ -54,13 +55,13 @@ export class AuditLogger {
       timestamp: new Date().toISOString(),
       ...redactValue(event),
     };
-    await this.enqueue(() => this.write(this.transcriptPath, entry));
+    await this.enqueue(this.transcriptPath, () => this.write(this.transcriptPath, entry));
   }
 
   async pruneTranscript(retentionDays: number): Promise<number> {
     if (!this.transcriptPath) return 0;
     let removed = 0;
-    await this.enqueue(async () => {
+    await this.enqueue(this.transcriptPath, async () => {
       let content: string;
       try {
         content = await readFile(this.transcriptPath!, 'utf8');
@@ -92,18 +93,29 @@ export class AuditLogger {
     return removed;
   }
 
-  private enqueue(operation: () => Promise<void>): Promise<void> {
-    const current = this.fileTail.then(operation, operation);
-    this.fileTail = current.then(() => undefined, () => undefined);
+  async flush(): Promise<void> {
+    await Promise.all(this.fileTails.values());
+  }
+
+  private enqueue(path: string | undefined, operation: () => Promise<void>): Promise<void> {
+    const key = path ?? '<stdout>';
+    const tail = this.fileTails.get(key) ?? Promise.resolve();
+    const current = tail.then(operation, operation);
+    this.fileTails.set(key, current.then(() => undefined, () => undefined));
     return current;
   }
 
   private async write(path: string | undefined, entry: unknown): Promise<void> {
     const line = `${JSON.stringify(entry)}\n`;
     if (path) {
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      if (!this.preparedPaths.has(path)) {
+        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+        await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
+        await chmod(path, 0o600);
+        this.preparedPaths.add(path);
+        return;
+      }
       await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
-      await chmod(path, 0o600);
       return;
     }
     process.stdout.write(line);

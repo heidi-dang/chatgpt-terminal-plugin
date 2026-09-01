@@ -293,11 +293,16 @@ export class AgentGatewayClient {
   private flushQueue(): void {
     const socket = this.socket;
     if (!this.authenticated || !socket || socket.readyState !== WebSocket.OPEN) return;
-    while (this.queue.length > 0) {
-      const item = this.queue.shift();
-      if (!item) break;
-      this.queuedBytes -= item.bytes;
-      socket.send(item.payload);
+    let sentCount = 0;
+    try {
+      for (; sentCount < this.queue.length; sentCount += 1) {
+        const item = this.queue[sentCount];
+        if (!item) break;
+        this.queuedBytes -= item.bytes;
+        socket.send(item.payload);
+      }
+    } finally {
+      if (sentCount > 0) this.queue.splice(0, sentCount);
     }
   }
 

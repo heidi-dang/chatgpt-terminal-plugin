@@ -38,7 +38,7 @@ describe('gateway replay integrity', () => {
         cwd: '/workspace', shell: 'bash', cols: 80, rows: 24, status: 'closed',
         created_at: now, last_activity_at: now, exit_code: 0,
       },
-      events: [], latestSequence: 0, earliestSequence: 1, retainedBytes: 0,
+      events: [], eventSizes: [], eventHead: 0, latestSequence: 0, earliestSequence: 1, retainedBytes: 0,
     });
     expect(gateway.listSessions('owner-a')).toHaveLength(1);
     await waitUntil(() => gateway.listSessions('owner-a').length === 0, 2000);

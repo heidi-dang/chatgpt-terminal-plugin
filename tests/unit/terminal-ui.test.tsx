@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     callServerTool: vi.fn(),
   },
   refreshCount: 0,
+  fitCount: 0,
   terminals: [] as Array<{
     options: Record<string, unknown>;
     writes: string[];
@@ -52,7 +53,7 @@ vi.mock('@xterm/xterm', () => ({
 }));
 
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class FakeFitAddon { fit() {} },
+  FitAddon: class FakeFitAddon { fit() { mocks.fitCount += 1; } },
 }));
 
 class FakeResizeObserver {
@@ -87,6 +88,7 @@ beforeEach(() => {
   document.head.querySelector('meta[name="terminal-ui-version"]')?.remove();
   mocks.terminals.length = 0;
   mocks.refreshCount = 0;
+  mocks.fitCount = 0;
   FakeEventSource.instances.length = 0;
   FakeResizeObserver.instances.length = 0;
   frameCallbacks = new Map();
@@ -249,14 +251,19 @@ describe('terminal MCP App UI', () => {
   });
 
   it('debounces iframe resize traffic and stops resize mutations after exit', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
     root = createRoot(document.getElementById('mount')!);
     await act(async () => root?.render(<TerminalApp />));
     await initializeSession();
     const observer = FakeResizeObserver.instances.at(-1)!;
+    await flushFrames();
+    const fitsBeforeResize = mocks.fitCount;
     observer.trigger();
     observer.trigger();
+    observer.trigger();
+    await flushFrames();
+    expect(mocks.fitCount - fitsBeforeResize).toBe(1);
     await act(async () => vi.advanceTimersByTime(120));
     expect(mocks.app.callServerTool.mock.calls.filter(([request]) => request.name === 'terminal_resize')).toHaveLength(1);
 
