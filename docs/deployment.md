@@ -55,6 +55,8 @@ Production requires at minimum:
 
 Set `MCP_DEFAULT_EXECUTION_PROFILE` to the least privilege appropriate for tokens that do not carry an explicit profile claim. `TERMINAL_CLOSED_SESSION_RETENTION_MS` controls how long final session metadata/events remain available for status, UI reconnect, and post-mortem reads before agent/server memory is released. Use `deploy/server-environment.example` as the complete non-secret template; the runtime rejects malformed public URLs, insecure production OAuth endpoints, empty required scopes, and route collisions at startup.
 
+Trusted server extensions are disabled unless `MCP_EXTENSION_ROOT` is set to an absolute administrator-controlled directory. Never point it at a terminal workspace or another user/agent-writable location. `MCP_EXTENSION_MAX_BYTES` defaults to 262144 bytes. See `docs/trusted-extensions.md` for the authorization, containment, reload, and trust model.
+
 ## Authentication modes
 
 ### Origin-managed JWT OAuth
