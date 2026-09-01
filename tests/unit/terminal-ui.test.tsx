@@ -74,6 +74,21 @@ function createFakeApp(): TerminalAppBridge & { callServerTool: ReturnType<typeo
       if (name === 'terminal_status') {
         return { structuredContent: { session_id: 'session-1', status: 'running', cursor: 8, cwd: '/workspace', shell: 'bash' } };
       }
+      if (name === 'terminal_read') {
+        return {
+          structuredContent: {
+            output: 'fallback\r\n',
+            events: [
+              { sequence: 5, event_type: 'terminal.stdout', data: { text: 'fallback\r\n' } },
+              { sequence: 6, event_type: 'process.exit', data: { exit_code: 0 } },
+            ],
+            next_cursor: 6,
+            has_more: false,
+            status: 'exited',
+            exit_code: 0,
+          },
+        };
+      }
       return { structuredContent: {} };
     }),
   };
@@ -220,6 +235,26 @@ describe('terminal MCP App UI', () => {
     await flushFrames();
     expect(document.getElementById('terminal-output')?.textContent).not.toContain('stale-source');
     expect(document.getElementById('terminal-output')?.textContent).toContain('recovered\n');
+  });
+
+  it('falls back to bounded MCP terminal reads when direct SSE cannot connect', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    terminalSource().emitError();
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    await flushFrames();
+
+    expect(document.getElementById('terminal-output')?.textContent).toContain('fallback\n');
+    expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
+    expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
   });
 
   it('hot reloads CSS without replacing the document or terminal SSE source', async () => {

@@ -22,7 +22,7 @@ import type { TerminalService, RequestIdentity } from './service.js';
 import type { StreamTokenService } from './stream-token.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
 
-export const TERMINAL_UI_URI = 'ui://terminal/v6.html';
+export const TERMINAL_UI_URI = 'ui://terminal/v7.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
 const terminalStartViewOutputSchema = terminalStartOutputSchema.extend({
@@ -41,7 +41,7 @@ export interface McpServerDependencies {
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
-  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.6.0' });
+  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.7.0' });
 
   server.registerResource(
     'Live terminal',
@@ -62,6 +62,11 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
             domain: deps.config.publicUrl.origin,
             csp: { connectDomains: [deps.config.publicUrl.origin] },
           },
+          'openai/widgetCSP': {
+            connect_domains: [deps.config.publicUrl.origin],
+            resource_domains: [],
+          },
+          'openai/widgetDomain': deps.config.publicUrl.origin,
         },
       }],
     }),
@@ -127,6 +132,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       inputSchema: terminalReadInputSchema,
       outputSchema: terminalReadOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
     async (input, ctx) => resultFrom(() => deps.service.read(identityFromContext(ctx), input)),
   );
@@ -175,6 +181,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       inputSchema: terminalSessionIdInputSchema,
       outputSchema: terminalStatusOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
     async (input, ctx) => resultFrom(() => deps.service.status(identityFromContext(ctx), input.session_id)),
   );
@@ -187,7 +194,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       inputSchema: terminalStreamRefreshInputSchema,
       outputSchema: terminalStreamRefreshOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: { ui: { visibility: ['app'] } },
+      _meta: { ui: { visibility: ['app'] }, 'openai/widgetAccessible': true },
     },
     (input, ctx) => {
       try {

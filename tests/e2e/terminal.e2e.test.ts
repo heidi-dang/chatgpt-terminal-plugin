@@ -128,17 +128,29 @@ describe('terminal MCP end-to-end', () => {
     const startTool = listed.tools.find((tool) => tool.name === 'terminal_start');
     const startMeta = startTool?._meta as Record<string, unknown> | undefined;
     const startUi = startMeta?.ui as Record<string, unknown> | undefined;
-    expect(startUi?.resourceUri).toBe('ui://terminal/v6.html');
-    expect(startMeta?.['openai/outputTemplate']).toBe('ui://terminal/v6.html');
+    expect(startUi?.resourceUri).toBe('ui://terminal/v7.html');
+    expect(startMeta?.['openai/outputTemplate']).toBe('ui://terminal/v7.html');
     const refreshTool = listed.tools.find((tool) => tool.name === 'terminal_stream_refresh');
-    const refreshUi = (refreshTool?._meta as Record<string, unknown> | undefined)?.ui as Record<string, unknown> | undefined;
+    const refreshMeta = refreshTool?._meta as Record<string, unknown> | undefined;
+    const refreshUi = refreshMeta?.ui as Record<string, unknown> | undefined;
     expect(refreshUi?.visibility).toEqual(['app']);
+    expect(refreshMeta?.['openai/widgetAccessible']).toBe(true);
+    for (const toolName of ['terminal_read', 'terminal_status']) {
+      const toolMeta = listed.tools.find((tool) => tool.name === toolName)?._meta as Record<string, unknown> | undefined;
+      const toolUi = toolMeta?.ui as Record<string, unknown> | undefined;
+      expect(toolUi?.visibility).toEqual(['model', 'app']);
+      expect(toolMeta?.['openai/widgetAccessible']).toBe(true);
+    }
 
-    const resourceResult = await client.readResource({ uri: 'ui://terminal/v6.html' });
+    const resourceResult = await client.readResource({ uri: 'ui://terminal/v7.html' });
     const uiResource = resourceResult.contents[0] as {
       mimeType?: string;
       text?: string;
-      _meta?: { ui?: { csp?: { connectDomains?: string[] }; permissions?: Record<string, unknown> } };
+      _meta?: {
+        ui?: { csp?: { connectDomains?: string[] }; permissions?: Record<string, unknown> };
+        'openai/widgetCSP'?: { connect_domains?: string[]; resource_domains?: string[] };
+        'openai/widgetDomain'?: string;
+      };
     } | undefined;
     expect(uiResource?.mimeType).toBe('text/html;profile=mcp-app');
     expect(uiResource?.text).toContain('data-terminal-static-shell');
@@ -146,6 +158,9 @@ describe('terminal MCP end-to-end', () => {
     expect(uiResource?.text).toContain('Terminal UI ready.');
     expect(uiResource?.text).not.toContain('<div id="root"></div>');
     expect(uiResource?._meta?.ui?.csp?.connectDomains).toEqual([baseUrl]);
+    expect(uiResource?._meta?.['openai/widgetCSP']?.connect_domains).toEqual([baseUrl]);
+    expect(uiResource?._meta?.['openai/widgetCSP']?.resource_domains).toEqual([]);
+    expect(uiResource?._meta?.['openai/widgetDomain']).toBe(baseUrl);
     expect(uiResource?._meta?.ui?.permissions).toBeUndefined();
     expect(uiResource?.text).toMatch(/meta name="terminal-ui-version" content="[^"]+"/);
 

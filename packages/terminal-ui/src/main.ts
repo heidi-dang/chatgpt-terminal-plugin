@@ -30,6 +30,14 @@ interface TerminalEvent {
   data: Record<string, unknown>;
 }
 
+interface TerminalReadResult {
+  events: TerminalEvent[];
+  next_cursor: number;
+  has_more: boolean;
+  status: string;
+  exit_code: number | null;
+}
+
 export interface TerminalAppBridge {
   ontoolresult: ((result: CallToolResult) => void) | undefined;
   onhostcontextchanged: ((context: Record<string, unknown>) => void) | undefined;
@@ -72,7 +80,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.6.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.7.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -298,16 +306,38 @@ export function normalizeTerminalText(input: string): string {
   return output;
 }
 
-function parseTerminalEvent(raw: string): TerminalEvent {
-  const parsed: unknown = JSON.parse(raw);
-  if (!isRecord(parsed)) throw new Error('Terminal SSE event must be an object.');
+function parseTerminalEventValue(parsed: unknown): TerminalEvent {
+  if (!isRecord(parsed)) throw new Error('Terminal event must be an object.');
   const sequence = parsed.sequence;
   const eventType = parsed.event_type;
   const data = parsed.data;
-  if (!Number.isInteger(sequence) || typeof sequence !== 'number' || sequence <= 0) throw new Error('Terminal SSE event has an invalid sequence.');
-  if (typeof eventType !== 'string') throw new Error('Terminal SSE event has an invalid event type.');
-  if (!isRecord(data)) throw new Error('Terminal SSE event has invalid data.');
+  if (!Number.isInteger(sequence) || typeof sequence !== 'number' || sequence <= 0) throw new Error('Terminal event has an invalid sequence.');
+  if (typeof eventType !== 'string') throw new Error('Terminal event has an invalid event type.');
+  if (!isRecord(data)) throw new Error('Terminal event has invalid data.');
   return { sequence, event_type: eventType, data };
+}
+
+function parseTerminalEvent(raw: string): TerminalEvent {
+  return parseTerminalEventValue(JSON.parse(raw));
+}
+
+function parseTerminalReadResult(result: CallToolResult): TerminalReadResult | null {
+  const value = result.structuredContent;
+  if (!isRecord(value) || !Array.isArray(value.events)) return null;
+  const nextCursor = value.next_cursor;
+  const hasMore = value.has_more;
+  const status = value.status;
+  const exitCode = value.exit_code;
+  if (!Number.isInteger(nextCursor) || typeof nextCursor !== 'number' || nextCursor < 0) return null;
+  if (typeof hasMore !== 'boolean' || typeof status !== 'string') return null;
+  if (exitCode !== null && typeof exitCode !== 'number') return null;
+  return {
+    events: value.events.map(parseTerminalEventValue),
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    status,
+    exit_code: exitCode,
+  };
 }
 
 function isFinalStatus(status: string | undefined): boolean {
@@ -330,6 +360,10 @@ export class TerminalViewer {
   private reconnectAttempt = 0;
   private reconnectTimer: number | undefined;
   private refreshTimer: number | undefined;
+  private readRetryTimer: number | undefined;
+  private readFallbackGeneration = 0;
+  private readFallbackActive = false;
+  private transportMode: 'sse' | 'mcp' = 'sse';
   private outputFrame: number | undefined;
   private outputQueue = '';
   private hasLiveOutput = false;
@@ -391,6 +425,8 @@ export class TerminalViewer {
       const previousSession = this.viewState?.session_id;
       this.viewState = mergeViewState(this.viewState, next);
       if (previousSession !== next.session_id) {
+        this.stopReadFallback();
+        this.transportMode = 'sse';
         this.lastSequence = next.cursor;
         this.reconnectAttempt = 0;
         this.hasLiveOutput = false;
@@ -414,6 +450,7 @@ export class TerminalViewer {
     this.styleSource = undefined;
     this.clearReconnectTimer();
     this.clearRefreshTimer();
+    this.stopReadFallback();
     this.flushOutput();
   }
 
@@ -426,13 +463,18 @@ export class TerminalViewer {
   private connectTerminalStream(meta: TerminalStreamMeta): void {
     this.eventSource?.close();
     if (!this.viewState || isFinalStatus(this.viewState.status)) return;
-    this.streamState = 'connecting';
-    this.renderState();
+    if (!this.readFallbackActive) {
+      this.transportMode = 'sse';
+      this.streamState = 'connecting';
+      this.renderState();
+    }
     const source = new EventSource(meta.url);
     this.eventSource = source;
 
     source.onopen = () => {
       if (this.eventSource !== source) return;
+      this.stopReadFallback();
+      this.transportMode = 'sse';
       this.reconnectAttempt = 0;
       this.streamState = 'live';
       this.renderState();
@@ -441,8 +483,11 @@ export class TerminalViewer {
       if (this.eventSource !== source || isFinalStatus(this.viewState?.status)) return;
       source.close();
       this.eventSource = undefined;
-      this.streamState = 'reconnecting';
-      this.renderState();
+      this.startReadFallback();
+      if (!this.readFallbackActive) {
+        this.streamState = 'reconnecting';
+        this.renderState();
+      }
       this.scheduleStreamReconnect();
     };
     source.onmessage = (message) => {
@@ -461,28 +506,30 @@ export class TerminalViewer {
     };
   }
 
-  private acceptEvent(event: TerminalEvent, source: EventSource): void {
+  private acceptEvent(event: TerminalEvent, source?: EventSource): 'accepted' | 'stale' | 'gap' {
     const sequenceState = classifySequence(this.lastSequence, event.sequence);
-    if (sequenceState === 'stale') return;
+    if (sequenceState === 'stale') return 'stale';
     if (sequenceState === 'gap') {
-      console.error('[terminal-app] SSE sequence gap', { expected: this.lastSequence + 1, received: event.sequence });
-      source.close();
-      if (this.eventSource === source) this.eventSource = undefined;
-      this.streamState = 'reconnecting';
-      this.renderState();
-      this.refreshStream(true);
-      return;
+      console.error('[terminal-app] terminal sequence gap', { expected: this.lastSequence + 1, received: event.sequence });
+      if (source) {
+        source.close();
+        if (this.eventSource === source) this.eventSource = undefined;
+        this.streamState = 'reconnecting';
+        this.renderState();
+        this.refreshStream(true);
+      }
+      return 'gap';
     }
     this.lastSequence = event.sequence;
     if (event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') {
       const text = event.data.text;
       if (typeof text === 'string') this.queueOutput(text);
-      return;
+      return 'accepted';
     }
     if (event.event_type === 'cwd.changed' && typeof event.data.cwd === 'string' && this.viewState) {
       this.viewState = { ...this.viewState, cwd: event.data.cwd };
       this.renderState();
-      return;
+      return 'accepted';
     }
     if ((event.event_type === 'process.exit' || event.event_type === 'session.closed') && this.viewState) {
       this.viewState = {
@@ -494,6 +541,7 @@ export class TerminalViewer {
       this.finishStream();
       this.renderState();
     }
+    return 'accepted';
   }
 
   private finishStream(): void {
@@ -501,7 +549,94 @@ export class TerminalViewer {
     this.eventSource = undefined;
     this.clearReconnectTimer();
     this.clearRefreshTimer();
+    this.stopReadFallback();
     this.streamState = 'offline';
+  }
+
+  private startReadFallback(): void {
+    if (this.readFallbackActive || !this.viewState || isFinalStatus(this.viewState.status)) return;
+    this.clearReadRetryTimer();
+    this.readFallbackActive = true;
+    const generation = ++this.readFallbackGeneration;
+    this.transportMode = 'mcp';
+    this.streamState = 'live';
+    this.renderState();
+    void this.runReadFallback(generation);
+  }
+
+  private stopReadFallback(): void {
+    this.readFallbackActive = false;
+    this.readFallbackGeneration += 1;
+    this.clearReadRetryTimer();
+  }
+
+  private async runReadFallback(generation: number): Promise<void> {
+    try {
+      while (this.readFallbackActive && generation === this.readFallbackGeneration) {
+        const current = this.viewState;
+        if (!current || isFinalStatus(current.status)) return;
+        const result = await this.callTool('terminal_read', {
+          session_id: current.session_id,
+          after: this.lastSequence,
+          max_bytes: 32_768,
+          wait_ms: 1_000,
+        });
+        if (!this.readFallbackActive || generation !== this.readFallbackGeneration) return;
+        if (result.isError && terminalErrorCode(result) === 'INVALID_CURSOR') {
+          await this.resynchronizeCursor(current.session_id);
+          continue;
+        }
+        if (result.isError) throw new Error(`Terminal read fallback failed: ${terminalErrorCode(result) ?? 'unknown error'}`);
+        const read = parseTerminalReadResult(result);
+        if (!read) throw new Error('Terminal read fallback returned an invalid result.');
+
+        let sequenceGap = false;
+        for (const event of read.events) {
+          if (this.acceptEvent(event) === 'gap') {
+            sequenceGap = true;
+            break;
+          }
+          if (!this.readFallbackActive || generation !== this.readFallbackGeneration) return;
+        }
+        if (sequenceGap) {
+          await this.resynchronizeCursor(current.session_id);
+          continue;
+        }
+
+        if (this.viewState?.session_id === current.session_id) {
+          this.viewState = { ...this.viewState, status: read.status, exit_code: read.exit_code };
+          if (isFinalStatus(read.status)) {
+            this.flushOutput();
+            this.finishStream();
+            this.renderState();
+            return;
+          }
+          this.renderState();
+        }
+      }
+    } catch (error) {
+      if (!this.readFallbackActive || generation !== this.readFallbackGeneration) return;
+      console.error('[terminal-app] MCP read fallback failed', error);
+      this.readFallbackActive = false;
+      this.readFallbackGeneration += 1;
+      this.transportMode = 'sse';
+      this.streamState = 'reconnecting';
+      this.renderState();
+      this.readRetryTimer = window.setTimeout(() => {
+        this.readRetryTimer = undefined;
+        this.startReadFallback();
+      }, 1_000);
+    }
+  }
+
+  private async resynchronizeCursor(sessionId: string): Promise<void> {
+    const statusResult = await this.callTool('terminal_status', { session_id: sessionId });
+    const status = parseViewState(statusResult);
+    if (statusResult.isError || !status) throw new Error('Unable to resynchronize terminal cursor.');
+    if (status.cursor > this.lastSequence) this.queueOutput('\n[Live output gap: older terminal output was no longer retained]\n');
+    this.lastSequence = status.cursor;
+    this.viewState = mergeViewState(this.viewState, status);
+    this.renderState();
   }
 
   private scheduleStreamReconnect(): void {
@@ -521,20 +656,17 @@ export class TerminalViewer {
     if (!current || isFinalStatus(current.status) || this.refreshInFlight) return;
     this.clearReconnectTimer();
     this.refreshInFlight = true;
-    this.streamState = 'reconnecting';
-    this.renderState();
+    if (!this.readFallbackActive) {
+      this.transportMode = 'sse';
+      this.streamState = 'reconnecting';
+      this.renderState();
+    }
     void this.callTool('terminal_stream_refresh', {
       session_id: current.session_id,
       after: this.lastSequence,
     }).then(async (result) => {
       if (result.isError && terminalErrorCode(result) === 'INVALID_CURSOR') {
-        const statusResult = await this.callTool('terminal_status', { session_id: current.session_id });
-        const status = parseViewState(statusResult);
-        if (statusResult.isError || !status) throw new Error('Unable to resynchronize terminal cursor.');
-        if (status.cursor > this.lastSequence) this.queueOutput('\n[Live output gap: older terminal output was no longer retained]\n');
-        this.lastSequence = status.cursor;
-        this.viewState = mergeViewState(this.viewState, status);
-        this.renderState();
+        await this.resynchronizeCursor(current.session_id);
         result = await this.callTool('terminal_stream_refresh', {
           session_id: current.session_id,
           after: this.lastSequence,
@@ -543,12 +675,14 @@ export class TerminalViewer {
       if (result.isError) throw new Error(`Terminal stream refresh failed: ${terminalErrorCode(result) ?? 'unknown error'}`);
       const refreshed = parseStreamMeta(result);
       if (!refreshed) throw new Error('Terminal stream refresh returned no stream capability.');
-      this.reconnectAttempt = 0;
       this.useStream(refreshed);
     }).catch((error) => {
       console.error('[terminal-app] stream refresh failed', error);
-      this.streamState = 'reconnecting';
-      this.renderState();
+      if (!this.readFallbackActive) {
+        this.transportMode = 'sse';
+        this.streamState = 'reconnecting';
+        this.renderState();
+      }
       if (retryOnFailure) this.scheduleStreamReconnect();
     }).finally(() => {
       this.refreshInFlight = false;
@@ -652,7 +786,7 @@ export class TerminalViewer {
     this.path.textContent = current?.cwd ?? 'Waiting for terminal session…';
     this.path.title = current?.cwd ?? '';
     this.footerShell.textContent = current?.shell ?? 'shell';
-    this.footerStream.textContent = `SSE ${this.streamState.toUpperCase()}`;
+    this.footerStream.textContent = `${this.transportMode.toUpperCase()} ${this.streamState.toUpperCase()}`;
     if (current?.exit_code == null) {
       this.exit.hidden = true;
       this.exit.textContent = '';
@@ -678,6 +812,12 @@ export class TerminalViewer {
     if (this.refreshTimer === undefined) return;
     window.clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
+  }
+
+  private clearReadRetryTimer(): void {
+    if (this.readRetryTimer === undefined) return;
+    window.clearTimeout(this.readRetryTimer);
+    this.readRetryTimer = undefined;
   }
 }
 

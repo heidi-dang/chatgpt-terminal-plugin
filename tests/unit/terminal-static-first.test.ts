@@ -26,9 +26,9 @@ describe('terminal UI static-first contract', () => {
     expect(runtime).toContain('EventSource');
   });
 
-  it('uses a fresh v6 MCP App resource identity', async () => {
+  it('uses a fresh v7 MCP App resource identity', async () => {
     const mcp = await readFile(join(root, 'packages/mcp-server/src/mcp.ts'), 'utf8');
-    expect(mcp).toContain("ui://terminal/v6.html");
-    expect(mcp).toContain("version: '0.6.0'");
+    expect(mcp).toContain("ui://terminal/v7.html");
+    expect(mcp).toContain("version: '0.7.0'");
   });
 });

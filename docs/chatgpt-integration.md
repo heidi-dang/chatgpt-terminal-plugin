@@ -24,7 +24,7 @@ Before creating the ChatGPT draft app:
 5. Enroll at least one local agent for the same owner ID that will authenticate from ChatGPT.
 6. Verify `/health` and the repository release gates.
 
-The browser terminal stream is not the MCP endpoint. ChatGPT connects to `/mcp`; the watch-only MCP App receives a separate short-lived, read-only SSE capability through tool-result metadata. The current bootstrap resource is `ui://terminal/v6.html`. v6 is static-first: the returned HTML contains a visible terminal shell before JavaScript executes, then a minimal MCP Apps JSON-RPC bridge progressively attaches tool results and SSE output. `/terminal-ui/reload` is CSS-only and never replaces the mounted document or PTY stream. Bump the resource URI again when the MCP/UI contract changes in a way that requires hosts to discard the v6 bootstrap contract.
+The browser terminal stream is not the MCP endpoint. ChatGPT connects to `/mcp`; the watch-only MCP App receives a separate short-lived, read-only SSE capability through tool-result metadata. The current bootstrap resource is `ui://terminal/v7.html`. v7 is static-first: the returned HTML contains a visible terminal shell before JavaScript executes, then a minimal MCP Apps JSON-RPC bridge progressively attaches tool results. Direct SSE remains the preferred live transport, with bounded `terminal_read` long-polling through the app bridge as a compatibility fallback when a host WebView cannot establish `EventSource`; SSE recovery continues in the background. `/terminal-ui/reload` is CSS-only and never replaces the mounted document. Bump the resource URI again when the MCP/UI contract changes in a way that requires hosts to discard the v7 bootstrap contract.
 
 ## OAuth and refresh tokens
 
