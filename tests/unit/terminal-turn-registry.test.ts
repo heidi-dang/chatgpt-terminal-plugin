@@ -25,6 +25,65 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('closes every superseded PTY when same-turn activations overlap', async () => {
+    const closed: string[] = [];
+    let releaseFirstClose!: () => void;
+    let markFirstCloseStarted!: () => void;
+    const firstCloseBlocked = new Promise<void>((resolve) => { releaseFirstClose = resolve; });
+    const firstCloseStarted = new Promise<void>((resolve) => { markFirstCloseStarted = resolve; });
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => {
+      closed.push(sessionId);
+      if (sessionId === 'session-1') {
+        markFirstCloseStarted();
+        await firstCloseBlocked;
+      }
+    }, 60_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-1');
+    const second = registry.activate(identity, 'session-2');
+    await firstCloseStarted;
+    const third = registry.activate(identity, 'session-3');
+    releaseFirstClose();
+    await Promise.all([second, third]);
+
+    expect(closed).toEqual(['session-1', 'session-2']);
+    expect(registry.current(identity).session_id).toBe('session-3');
+    registry.dispose();
+  });
+
+  it('closes a newly-created PTY when its surface is replaced during activation', async () => {
+    const closed: string[] = [];
+    let releaseOldClose!: () => void;
+    let markOldCloseStarted!: () => void;
+    const oldCloseBlocked = new Promise<void>((resolve) => { releaseOldClose = resolve; });
+    const oldCloseStarted = new Promise<void>((resolve) => { markOldCloseStarted = resolve; });
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => {
+      closed.push(sessionId);
+      if (sessionId === 'session-old') {
+        markOldCloseStarted();
+        await oldCloseBlocked;
+      }
+    }, 60_000);
+
+    const oldSurface = await registry.begin(identity);
+    await registry.activate(identity, 'session-old');
+    const activation = registry.activate(identity, 'session-new');
+    await oldCloseStarted;
+    const queuedActivation = registry.activate(identity, 'session-queued');
+    const nextTurn = registry.begin(identity);
+    releaseOldClose();
+
+    await expect(activation).rejects.toThrow('Terminal surface closed while replacing its active PTY.');
+    await expect(queuedActivation).rejects.toThrow('Terminal surface changed before PTY activation.');
+    const nextSurface = await nextTurn;
+    expect(closed).toContain('session-new');
+    expect(closed).toContain('session-queued');
+    expect(nextSurface.surface_id).not.toBe(oldSurface.surface_id);
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: nextSurface.surface_id, session_id: null }));
+    registry.dispose();
+  });
+
   it('closes a stale PTY when a fresh assistant turn opens its one terminal surface', async () => {
     const closed: string[] = [];
     const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);

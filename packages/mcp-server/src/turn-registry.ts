@@ -19,6 +19,7 @@ type CloseTerminal = (identity: RequestIdentity, sessionId: string) => Promise<v
 
 export class TerminalTurnRegistry {
   private readonly records = new Map<string, TerminalTurnRecord>();
+  private readonly activationTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly closeTerminal: CloseTerminal,
@@ -43,15 +44,29 @@ export class TerminalTurnRegistry {
 
   async activate(identity: RequestIdentity, sessionId: string): Promise<TerminalTurnState> {
     const key = turnKey(identity);
-    const record = this.records.get(key);
-    if (!record) throw new Error('Terminal surface is not open for this ChatGPT turn.');
-
-    if (record.sessionId && record.sessionId !== sessionId) {
-      await this.safeClose(record.identity, record.sessionId);
+    const expectedRecord = this.records.get(key);
+    if (!expectedRecord) {
+      await this.safeClose(identity, sessionId);
+      throw new Error('Terminal surface is not open for this ChatGPT turn.');
     }
-    record.sessionId = sessionId;
-    this.armLease(key, record);
-    return stateFromRecord(record);
+    return this.withActivationLock(key, async () => {
+      const record = this.records.get(key);
+      if (record !== expectedRecord) {
+        await this.safeClose(identity, sessionId);
+        throw new Error('Terminal surface changed before PTY activation.');
+      }
+
+      if (record.sessionId && record.sessionId !== sessionId) {
+        await this.safeClose(record.identity, record.sessionId);
+        if (this.records.get(key) !== record) {
+          await this.safeClose(identity, sessionId);
+          throw new Error('Terminal surface closed while replacing its active PTY.');
+        }
+      }
+      record.sessionId = sessionId;
+      this.armLease(key, record);
+      return stateFromRecord(record);
+    });
   }
 
   async clearActive(identity: RequestIdentity): Promise<TerminalTurnState> {
@@ -97,6 +112,22 @@ export class TerminalTurnRegistry {
   dispose(): void {
     for (const record of this.records.values()) this.clearLease(record);
     this.records.clear();
+    this.activationTails.clear();
+  }
+
+  private async withActivationLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.activationTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.activationTails.set(key, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.activationTails.get(key) === tail) this.activationTails.delete(key);
+    }
   }
 
   private armLease(key: string, record: TerminalTurnRecord): void {
