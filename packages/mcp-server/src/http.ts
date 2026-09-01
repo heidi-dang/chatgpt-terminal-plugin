@@ -107,6 +107,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('cache-control', 'no-store, max-age=0');
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
+      // Security hardening headers for the served HTML runtime
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.setHeader('referrer-policy', 'no-referrer');
+      res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
       res.status(200).send(uiDoc.html);
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.runtime_html_failed', error: errorMessage(error) }));
@@ -122,6 +126,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('cache-control', 'no-store, max-age=0');
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
+      res.setHeader('x-content-type-options', 'nosniff');
       res.status(200).send(styles.css);
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.styles_failed', error: errorMessage(error) }));
