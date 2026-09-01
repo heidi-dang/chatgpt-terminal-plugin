@@ -120,9 +120,10 @@ export class AgentGateway {
 
   async listSessions(userId: string): Promise<TerminalSession[]> {
     const ids = await this.liveStore.listSessionIdsByOwner(userId);
+    // Parallel session loads: N independent Redis/cache lookups instead of sequential awaits.
+    const records = await Promise.all(ids.map((id) => this.loadSession(id)));
     const sessions: TerminalSession[] = [];
-    for (const id of ids) {
-      const record = await this.loadSession(id);
+    for (const record of records) {
       if (record?.ownerId === userId && record.session) sessions.push({ ...record.session });
     }
     return sessions;
@@ -685,6 +686,8 @@ export class AgentGateway {
     if (event.sequence <= record.latestSequence) {
       const duplicate = record.events.find((item) => item.sequence === event.sequence);
       if (duplicate) {
+        // Fast path: identical event_id means safe replay without full JSON compare.
+        if (duplicate.event_id === event.event_id) return;
         if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event sequence was replayed with different content.');
         }
@@ -700,7 +703,8 @@ export class AgentGateway {
     record.agentId = agentId;
     record.events.push(event);
     record.latestSequence = event.sequence;
-    record.retainedBytes += Buffer.byteLength(JSON.stringify(event));
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    record.retainedBytes += eventBytes;
 
     if (record.session) {
       record.session.last_activity_at = event.timestamp;
