@@ -473,7 +473,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     // Fast-path byte estimation for terminal output events (most frequent):
     // measure only the text payload + fixed structural overhead to avoid full JSON.stringify
     const textPayload = (eventType === 'terminal.stdout' || eventType === 'terminal.stderr') ? data.text : undefined;
-    const eventBytes = typeof textPayload === 'string' ? Buffer.byteLength(textPayload as string) + 150 : Buffer.byteLength(JSON.stringify(event));
+    const eventBytes = typeof textPayload === 'string' ? Buffer.byteLength(textPayload) + 150 : Buffer.byteLength(JSON.stringify(event));
     managed.events.push(event);
     managed.eventSizes.push(eventBytes);
     managed.retainedBytes += eventBytes;
