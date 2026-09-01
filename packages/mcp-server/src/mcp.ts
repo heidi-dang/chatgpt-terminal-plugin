@@ -44,7 +44,7 @@ import type { StreamTokenService } from './stream-token.js';
 import type { TerminalTurnRegistry, TerminalTurnState } from './turn-registry.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
 
-export const TERMINAL_UI_URI = 'ui://terminal/v10.html';
+export const TERMINAL_UI_URI = 'ui://terminal/v11.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
 const terminalSurfaceInputSchema = z.object({});
@@ -82,7 +82,7 @@ export interface McpServerDependencies {
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
-  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.10.0' });
+  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.11.0' });
 
   server.registerResource(
     'Live terminal',
