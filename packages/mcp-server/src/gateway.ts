@@ -552,7 +552,10 @@ export class AgentGateway {
     }
     record.ownerId = ownerId;
     record.agentId = agentId;
-    const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    // Fast-path byte estimation for terminal output events (most common):
+    // measure only the text payload + fixed structural overhead to avoid full JSON.stringify
+    const textPayload = (event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') ? event.data.text : undefined;
+    const eventBytes = typeof textPayload === 'string' ? Buffer.byteLength(textPayload) + 150 : Buffer.byteLength(JSON.stringify(event));
     record.events.push(event);
     record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;
