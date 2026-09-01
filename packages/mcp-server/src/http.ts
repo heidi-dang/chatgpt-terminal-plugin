@@ -424,8 +424,8 @@ function isAllowedUpgradeHost(hostHeader: string | undefined, allowedHosts: read
   return allowedHosts.some((allowed) => allowed.toLowerCase() === hostname);
 }
 
-function writeSse(res: Response, sequence: number, event: unknown): void {
-  res.write(`id: ${sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+function writeSse(res: Response, sequence: number, event: any): void {
+  res.write(`id: ${sequence}\ndata: {"sequence":${sequence},"event_type":${JSON.stringify(event.event_type)},"data":${JSON.stringify(event.data)}}\n\n`);
 }
 
 export interface RateLimitBucket {
