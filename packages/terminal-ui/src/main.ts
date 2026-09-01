@@ -60,6 +60,12 @@ interface PendingRequest {
   timer: number;
 }
 
+interface ChatGptOpenAiCompat {
+  callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  toolOutput?: unknown;
+  theme?: unknown;
+}
+
 type JsonRpcId = number | string;
 type StreamState = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'failed';
 
@@ -80,17 +86,29 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private listening = false;
+  private openAi: ChatGptOpenAiCompat | undefined;
   private resizeObserver: ResizeObserver | undefined;
   private resizeFrame: number | undefined;
   private lastReportedHeight = 0;
 
   async connect(): Promise<void> {
     if (this.listening) return;
+    const openAi = getChatGptOpenAiCompat();
+    if (openAi) {
+      this.listening = true;
+      this.openAi = openAi;
+      window.addEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
+      const initial = normalizeCompatCallToolResult(openAi.toolOutput);
+      if (initial) this.ontoolresult?.(initial);
+      if (typeof openAi.theme === 'string') this.onhostcontextchanged?.({ theme: openAi.theme });
+      return;
+    }
+
     this.listening = true;
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.10.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.12.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -104,6 +122,13 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
   }
 
   callServerTool(params: { name: string; arguments: Record<string, unknown> }): Promise<CallToolResult> {
+    if (this.openAi) {
+      return this.openAi.callTool(params.name, params.arguments).then((result) => {
+        const normalized = normalizeCompatCallToolResult(result);
+        if (!normalized) throw new Error('ChatGPT returned an invalid callTool result.');
+        return normalized;
+      });
+    }
     return this.request('tools/call', params).then((result) => {
       const normalized = normalizeCallToolResult(result);
       if (!normalized) throw new Error('Host returned an invalid tools/call result.');
@@ -115,6 +140,8 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     if (!this.listening) return Promise.resolve();
     this.listening = false;
     window.removeEventListener('message', this.handleMessage);
+    window.removeEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
+    this.openAi = undefined;
     this.resizeObserver?.disconnect();
     this.resizeObserver = undefined;
     if (this.resizeFrame !== undefined) window.cancelAnimationFrame(this.resizeFrame);
@@ -126,6 +153,17 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     this.pending.clear();
     return Promise.resolve();
   }
+
+  private readonly handleOpenAiGlobals = (event: CustomEvent<unknown>): void => {
+    const detail = isRecord(event.detail) ? event.detail : undefined;
+    const globals = detail && isRecord(detail.globals) ? detail.globals : undefined;
+    if (!globals) return;
+    if ('toolOutput' in globals) {
+      const result = normalizeCompatCallToolResult(globals.toolOutput);
+      if (result) this.ontoolresult?.(result);
+    }
+    if (typeof globals.theme === 'string') this.onhostcontextchanged?.({ theme: globals.theme });
+  };
 
   private readonly handleMessage = (event: MessageEvent<unknown>): void => {
     if (event.source !== window.parent || !isRecord(event.data)) return;
@@ -854,6 +892,7 @@ export class TerminalViewer {
       this.useStream(refreshed);
     }).catch((error) => {
       console.error('[terminal-app] stream refresh failed', error);
+      this.startReadFallback();
       if (!this.readFallbackActive) {
         this.transportMode = 'sse';
         this.streamState = 'reconnecting';
@@ -1007,6 +1046,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function getChatGptOpenAiCompat(): ChatGptOpenAiCompat | undefined {
+  const value = (window as Window & { openai?: unknown }).openai;
+  if (!isRecord(value) || typeof value.callTool !== 'function') return undefined;
+  return value as unknown as ChatGptOpenAiCompat;
+}
+
+function normalizeCompatCallToolResult(value: unknown): CallToolResult | null {
+  return normalizeCallToolResult(value) ?? (isRecord(value) ? { structuredContent: value } : null);
+}
+
 function normalizeCallToolResult(value: unknown): CallToolResult | null {
   if (!isRecord(value)) return null;
   let candidate = value;
@@ -1075,6 +1124,6 @@ export async function bootTerminalApp(): Promise<TerminalViewer> {
   return viewer;
 }
 
-if (window.parent !== window && document.querySelector('[data-terminal-static-shell]')) {
+if (document.querySelector('[data-terminal-static-shell]')) {
   void bootTerminalApp();
 }

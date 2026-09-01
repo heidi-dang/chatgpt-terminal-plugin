@@ -34,9 +34,30 @@ describe('terminal UI static-first contract', () => {
     }
   });
 
-  it('uses a fresh v11 MCP App resource identity', async () => {
+  it('boots the app runtime whenever the static terminal shell exists', async () => {
+    const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
+    expect(runtime).toContain("if (document.querySelector('[data-terminal-static-shell]')) {");
+    expect(runtime).not.toContain("document.querySelector('[data-terminal-static-shell]') && (window.parent !== window");
+  });
+
+  it('makes every MCP server build regenerate the terminal UI bundle it serves', async () => {
+    const manifest = JSON.parse(await readFile(join(root, 'packages/mcp-server/package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    expect(manifest.scripts?.build).toContain('@terminal/terminal-ui');
+    expect(manifest.scripts?.build).toContain('tsc -b');
+  });
+
+  it('avoids concurrent writers to the generated terminal UI bundle during the root build', async () => {
+    const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    expect(manifest.scripts?.build).toContain("--filter '!@terminal/terminal-ui'");
+  });
+
+  it('uses a fresh v12 MCP App resource identity after the iOS bootstrap contract changes', async () => {
     const mcp = await readFile(join(root, 'packages/mcp-server/src/mcp.ts'), 'utf8');
-    expect(mcp).toContain("ui://terminal/v11.html");
-    expect(mcp).toContain("version: '0.11.0'");
+    expect(mcp).toContain("ui://terminal/v12.html");
+    expect(mcp).toContain("version: '0.12.0'");
   });
 });

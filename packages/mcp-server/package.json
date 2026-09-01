@@ -12,7 +12,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -b",
+    "build": "pnpm --filter @terminal/terminal-ui build && tsc -b",
     "start": "node dist/cli.js",
     "admin": "node dist/admin.js",
     "dev": "tsx src/cli.ts",

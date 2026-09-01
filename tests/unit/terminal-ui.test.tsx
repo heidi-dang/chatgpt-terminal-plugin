@@ -400,6 +400,64 @@ describe('terminal MCP App UI', () => {
   });
 
 
+  it('falls back to MCP reads when surface sync discovers a session without an SSE capability', async () => {
+    const app = createFakeApp();
+    const surfaceId = '33333333-3333-4333-8333-333333333333';
+    app.callServerTool.mockImplementation(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_surface_status') {
+        return {
+          structuredContent: {
+            surface_id: surfaceId,
+            surface_open: true,
+            surface_active: true,
+            session_id: 'session-ios',
+            status: 'running',
+            cursor: 2,
+            initial_output: '',
+            agent_id: 'agent-ios',
+            agent_name: 'iPhone host',
+            cwd: '/workspace',
+            shell: 'bash',
+            exit_code: null,
+          },
+        };
+      }
+      if (name === 'terminal_stream_refresh') {
+        return { structuredContent: { session_id: 'session-ios', status: 'running', cursor: 2 } };
+      }
+      if (name === 'terminal_read') {
+        return {
+          structuredContent: {
+            output: 'ios-mcp-fallback\r\n',
+            events: [],
+            next_cursor: 3,
+            has_more: false,
+            status: 'exited',
+            exit_code: 0,
+          },
+        };
+      }
+      return { structuredContent: {} };
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.({
+      structuredContent: { surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null },
+    });
+    viewer.markBridgeReady();
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-ios', after: 2, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    await flushFrames();
+
+    expect(document.getElementById('terminal-output')?.textContent).toContain('ios-mcp-fallback\n');
+    expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
+    viewer.destroy();
+  });
+
   it('switches a replacement PTY inside the same surface and ignores a different surface', async () => {
     const app = createFakeApp();
     const surfaceId = '11111111-1111-4111-8111-111111111111';
@@ -571,6 +629,67 @@ describe('terminal MCP App UI', () => {
   it('normalizes common ANSI, carriage-return, and backspace terminal control bytes', () => {
     expect(normalizeTerminalText('\u001b[32mgreen\u001b[0m\r\nnext\b!')).toBe('green\nnex!');
     expect(normalizeTerminalText('\u001b]0;title\u0007prompt\rprogress')).toBe('prompt\nprogress');
+  });
+
+  it('boots through ChatGPT window.openai when the native host has no usable parent bridge', async () => {
+    vi.useFakeTimers();
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
+    const callTool = vi.fn(async (name: string, args: Record<string, unknown>) => ({
+      structuredContent: { surface_id: String(args.surface_id ?? 'surface-ios'), surface_open: true, surface_active: false, session_id: null },
+    }));
+    vi.stubGlobal('openai', {
+      callTool,
+      toolOutput: { surface_id: 'surface-ios', surface_open: true, surface_active: false, session_id: null },
+      theme: 'dark',
+    });
+
+    const bridge = new ChatGptMcpBridge();
+    const toolResult = vi.fn();
+    bridge.ontoolresult = toolResult;
+
+    const connected = expect(bridge.connect()).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(15_001);
+    await connected;
+
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ method: 'ui/initialize' }), '*');
+    expect(toolResult).toHaveBeenCalledWith({
+      structuredContent: { surface_id: 'surface-ios', surface_open: true, surface_active: false, session_id: null },
+    });
+
+    const result = await bridge.callServerTool({
+      name: 'terminal_surface_status',
+      arguments: { surface_id: 'surface-ios', session_id: null },
+    });
+    expect(callTool).toHaveBeenCalledWith('terminal_surface_status', { surface_id: 'surface-ios', session_id: null });
+    expect(result.structuredContent).toEqual({
+      surface_id: 'surface-ios', surface_open: true, surface_active: false, session_id: null,
+    });
+    await bridge.close();
+  });
+
+  it('accepts terminal surface metadata injected after native ChatGPT boot', async () => {
+    vi.stubGlobal('openai', { callTool: vi.fn(async () => ({ structuredContent: {} })) });
+    const bridge = new ChatGptMcpBridge();
+    const toolResult = vi.fn();
+    const hostContext = vi.fn();
+    bridge.ontoolresult = toolResult;
+    bridge.onhostcontextchanged = hostContext;
+
+    await bridge.connect();
+    window.dispatchEvent(new CustomEvent('openai:set_globals', {
+      detail: {
+        globals: {
+          toolOutput: { surface_id: 'surface-late', surface_open: true, surface_active: false, session_id: null },
+          theme: 'light',
+        },
+      },
+    }));
+
+    expect(toolResult).toHaveBeenCalledWith({
+      structuredContent: { surface_id: 'surface-late', surface_open: true, surface_active: false, session_id: null },
+    });
+    expect(hostContext).toHaveBeenCalledWith({ theme: 'light' });
+    await bridge.close();
   });
 
   it('performs the minimal MCP Apps JSON-RPC handshake and validates parent-window messages', async () => {

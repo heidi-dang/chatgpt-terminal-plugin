@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [viteSingleFile()],
   build: {
     target: 'es2022',
+    modulePreload: false,
     cssCodeSplit: false,
     assetsInlineLimit: 100_000_000,
     rollupOptions: {

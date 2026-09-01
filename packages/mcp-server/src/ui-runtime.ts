@@ -7,11 +7,19 @@ export interface TerminalUiDocument { html: string; version: string }
 export interface TerminalUiStyles { css: string; version: string }
 
 export const TERMINAL_UI_HTML_PATH = fileURLToPath(new URL('../../terminal-ui/dist/index.html', import.meta.url));
+export const TERMINAL_UI_SOURCE_PATH = fileURLToPath(new URL('../../terminal-ui/src/main.ts', import.meta.url));
 export const TERMINAL_UI_STYLES_PATH = fileURLToPath(new URL('../../terminal-ui/src/styles.css', import.meta.url));
 
 export async function readTerminalUiDocument(): Promise<TerminalUiDocument> {
   try {
-    const [html, info] = await Promise.all([readFile(TERMINAL_UI_HTML_PATH, 'utf8'), stat(TERMINAL_UI_HTML_PATH)]);
+    const [html, info, sourceInfo] = await Promise.all([
+      readFile(TERMINAL_UI_HTML_PATH, 'utf8'),
+      stat(TERMINAL_UI_HTML_PATH),
+      stat(TERMINAL_UI_SOURCE_PATH),
+    ]);
+    if (sourceInfo.mtimeMs > info.mtimeMs) {
+      throw new Error('Terminal UI bundle is stale because the runtime source is newer than dist/index.html.');
+    }
     const version = `${Math.trunc(info.mtimeMs)}-${info.size}`;
     return { html: injectBuildVersion(html, version), version };
   } catch (error) {
