@@ -684,7 +684,12 @@ export class AgentGateway {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Terminal event agent mismatch.');
     }
     if (event.sequence <= record.latestSequence) {
-      const duplicate = record.events.find((item) => item.sequence === event.sequence);
+      // Replays almost always target the latest retained event — check the tail first (O(1)).
+      const tail = record.events[record.events.length - 1];
+      const duplicate =
+        tail?.sequence === event.sequence
+          ? tail
+          : record.events.find((item) => item.sequence === event.sequence);
       if (duplicate) {
         // Fast path: identical event_id means safe replay without full JSON compare.
         if (duplicate.event_id === event.event_id) return;
