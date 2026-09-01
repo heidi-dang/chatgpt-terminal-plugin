@@ -686,10 +686,6 @@ export class TerminalViewer {
       source.close();
       this.eventSource = undefined;
       this.startReadFallback();
-      if (!this.readFallbackActive) {
-        this.streamState = 'reconnecting';
-        this.renderState();
-      }
       this.scheduleStreamReconnect();
     };
     source.onmessage = (message) => {
@@ -701,8 +697,7 @@ export class TerminalViewer {
         console.error('[terminal-app] invalid SSE event', error);
         source.close();
         if (this.eventSource === source) this.eventSource = undefined;
-        this.streamState = 'reconnecting';
-        this.renderState();
+        this.startReadFallback();
         this.scheduleStreamReconnect();
       }
     };

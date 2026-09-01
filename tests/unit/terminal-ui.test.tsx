@@ -408,6 +408,23 @@ describe('terminal MCP App UI', () => {
     expect(FakeEventSource.instances).toHaveLength(sourcesBeforeDestroy);
   });
 
+  it('starts MCP fallback immediately when an SSE event is malformed', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 'invalid', event_type: 'terminal.stdout', data: { text: 'bad\r\n' } });
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    expect(document.getElementById('terminal-stream-state')?.textContent).toMatch(/^MCP /);
+    viewer.destroy();
+  });
+
   it('falls back to bounded MCP terminal reads when direct SSE cannot connect', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
