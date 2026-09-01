@@ -415,14 +415,15 @@ export function appendRichTerminalText(container: HTMLElement, input: string, ov
     at = pos + match[0].length;
   }
   add(input.slice(at));
-  const text = out.textContent ?? '', lines = text.split('\n'), nl = text.endsWith('\n');
-  if (nl) lines.pop();
+  const text = out.textContent ?? '';
   const reduced = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  if (overflow && !reduced && text.length < 4096 && lines.length > 2) {
-    const cut = 1 + Math.floor(Math.random() * (lines.length - 1));
-    lines.push(...lines.splice(0, cut));
-    const slot = doc.createElement('span'); slot.className = 'term-overflow'; slot.textContent = lines.join('\n') + (nl ? '\n' : '');
-    container.appendChild(slot); setTimeout(() => slot.replaceWith(out), 180); return;
+  if (overflow && !reduced && text.length < 4096 && text.indexOf('\n') !== text.lastIndexOf('\n')) {
+    const slot = doc.createElement('span');
+    slot.className = 'term-overflow';
+    slot.appendChild(out);
+    container.appendChild(slot);
+    setTimeout(() => slot.replaceWith(...slot.childNodes), 180);
+    return;
   }
   container.appendChild(out);
 }

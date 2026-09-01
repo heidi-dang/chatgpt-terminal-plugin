@@ -598,20 +598,22 @@ describe('terminal MCP App UI', () => {
     expect(output.querySelector('.term-success')?.textContent).toContain('PASS');
   });
 
-  it('previews multi-line output in Overflow order then settles into the exact transcript', () => {
+  it('animates multi-line Overflow without ever reordering terminal truth', () => {
     vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0);
     const output = document.getElementById('terminal-output')!;
     output.textContent = '';
-    const text = 'first line\nsecond line\nthird line\n';
+    const text = 'PASS first line\nconst second = 2\nthird line\n';
 
     appendRichTerminalText(output, text, true);
 
     expect(output.querySelector('.term-overflow')).not.toBeNull();
-    expect(output.textContent).not.toBe(text);
+    expect(output.textContent).toBe(text);
+    expect(output.querySelector('.term-success')?.textContent).toBe('PASS');
+    expect(output.querySelector('.term-keyword')?.textContent).toBe('const');
     vi.runAllTimers();
     expect(output.textContent).toBe(text);
     expect(output.querySelector('.term-overflow')).toBeNull();
+    expect(output.querySelector('.term-success')?.textContent).toBe('PASS');
   });
 
   it('bypasses Overflow when reduced motion is requested', () => {
