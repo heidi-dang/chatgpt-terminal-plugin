@@ -937,6 +937,7 @@ export class TerminalViewer {
         void fetch(styleUrl, { cache: 'no-store' }).then(async (response) => {
           if (!response.ok) throw new Error(`UI stylesheet reload failed with HTTP ${response.status}.`);
           const css = await response.text();
+          if (this.styleSource !== source || this.hotReloadVersion !== payload.version) return;
           let liveStyles = this.doc.querySelector<HTMLStyleElement>('#terminal-live-styles');
           if (!liveStyles) {
             liveStyles = this.doc.createElement('style');
