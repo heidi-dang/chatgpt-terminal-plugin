@@ -31,6 +31,7 @@ export class AgentGatewayClient {
   private stopped = false;
   private authenticated = false;
   private reconnectAttempt = 0;
+  private reconnectAbort: AbortController | undefined;
   private heartbeat: NodeJS.Timeout | undefined;
   private readonly queue: QueuedMessage[] = [];
   private queuedBytes = 0;
@@ -67,7 +68,15 @@ export class AgentGatewayClient {
         const backoff = Math.min(this.options.reconnectMaxMs, Math.max(floor, Math.round(base + jitter)));
         this.reconnectAttempt += 1;
         console.error(JSON.stringify({ level: 'warn', event: 'agent.gateway_disconnected', error: errorMessage(error), retry_ms: backoff }));
-        await delay(backoff);
+        const reconnectAbort = new AbortController();
+        this.reconnectAbort = reconnectAbort;
+        try {
+          await delay(backoff, undefined, { signal: reconnectAbort.signal });
+        } catch (delayError) {
+          if (!this.stopped) throw delayError;
+        } finally {
+          if (this.reconnectAbort === reconnectAbort) this.reconnectAbort = undefined;
+        }
       }
     }
   }
@@ -76,6 +85,7 @@ export class AgentGatewayClient {
     this.stopped = true;
     this.authenticated = false;
     this.clearHeartbeat();
+    this.reconnectAbort?.abort();
     this.unsubscribeEvent?.();
     this.unsubscribeEvent = undefined;
     this.socket?.close(1000, 'agent stopping');

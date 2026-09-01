@@ -44,4 +44,31 @@ describe('AgentGatewayClient lifecycle', () => {
     expect(output.stdout).toBe('after-reconnect');
     expect(output.exit_code).toBe(0);
   });
+
+
+  it('stops promptly while waiting in reconnect backoff', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-stop-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-stop', allowedWorkspaceRoots: [root], executionProfile: 'owner-full', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const client = new AgentGatewayClient(agent, {
+      url: 'ws://127.0.0.1:1/', identity: {} as never, heartbeatMs: 1_000, reconnectMaxMs: 500,
+      outboundHighWaterBytes: 1024 * 1024,
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup.push(() => errorSpy.mockRestore());
+    const run = client.start();
+    await vi.waitFor(() => expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('agent.gateway_disconnected')));
+
+    client.stop();
+    const stoppedPromptly = await Promise.race([
+      run.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    await run;
+
+    expect(stoppedPromptly).toBe(true);
+  });
 });
