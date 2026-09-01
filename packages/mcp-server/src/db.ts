@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, closeSync, mkdirSync, openSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -150,6 +150,47 @@ export function runImmediateTransaction<T>(db: TerminalDatabase, fn: () => T): T
     }
     throw error;
   }
+}
+
+/**
+ * Cross-process write lock for a shared SQLite registry file (multi-writer / multi-tenant ops).
+ * Uses exclusive create of `<dbPath>.writelock` + BEGIN IMMEDIATE inside. Not a substitute for
+ * a server RDBMS under heavy write contention, but serializes enroll/revoke across MCP processes
+ * sharing one filesystem-backed registry.
+ */
+export function runSharedRegistryWrite<T>(dbPath: string | undefined, db: TerminalDatabase, fn: () => T): T {
+  if (!dbPath) return runImmediateTransaction(db, fn);
+  const lockPath = `${dbPath}.writelock`;
+  const fd = acquireExclusiveLockFile(lockPath, 10_000);
+  try {
+    return runImmediateTransaction(db, fn);
+  } finally {
+    try {
+      closeSync(fd);
+    } catch { /* ignore */ }
+    try {
+      unlinkSync(lockPath);
+    } catch { /* ignore */ }
+  }
+}
+
+function acquireExclusiveLockFile(lockPath: string, timeoutMs: number): number {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      // 'wx' fails if another process holds the lock file.
+      return openSync(lockPath, 'wx', 0o600);
+    } catch (error) {
+      lastError = error;
+      // Busy-wait with short sleep (Atomics.wait needs SharedArrayBuffer).
+      const slice = new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(slice, 0, 0, 25);
+    }
+  }
+  throw new Error(
+    `Timed out acquiring SQLite registry write lock at ${lockPath}: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
 }
 
 function hardenFileModes(dbPath: string): void {

@@ -10,6 +10,7 @@ import {
   resolveSqlitePath,
   runFullIntegrityCheck,
   runImmediateTransaction,
+  runSharedRegistryWrite,
   type TerminalDatabase,
 } from './db.js';
 
@@ -161,7 +162,8 @@ export class DeviceRegistry {
     };
 
     if (!this.db) return apply();
-    return runImmediateTransaction(this.db, apply);
+    // Shared-file multi-process writers: file lock + BEGIN IMMEDIATE.
+    return runSharedRegistryWrite(this.sqlitePath, this.db, apply);
   }
 
   async revoke(deviceId: string, presentedToken: string | undefined): Promise<void> {
@@ -176,7 +178,7 @@ export class DeviceRegistry {
       apply();
       return;
     }
-    runImmediateTransaction(this.db, apply);
+    runSharedRegistryWrite(this.sqlitePath, this.db, apply);
   }
 
   async markSeen(deviceId: string): Promise<void> {

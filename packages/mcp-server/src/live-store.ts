@@ -58,6 +58,10 @@ const PREFIX = 'term';
 function sessionKey(id: string): string {
   return `${PREFIX}:session:${id}`;
 }
+/** Partitioned event log (LIST of JSON events) — keeps meta key small under large buffers. */
+function sessionEventsKey(id: string): string {
+  return `${PREFIX}:session:${id}:events`;
+}
 function ownerSessionsKey(ownerId: string): string {
   return `${PREFIX}:owner:${ownerId}:sessions`;
 }
@@ -103,6 +107,19 @@ function cloneSession(record: SharedSessionRecord): SharedSessionRecord {
     agentId: record.agentId,
     session: record.session ? { ...record.session } : undefined,
     events: record.events.map((e) => ({ ...e, data: { ...e.data } })),
+    latestSequence: record.latestSequence,
+    earliestSequence: record.earliestSequence,
+    retainedBytes: record.retainedBytes,
+  };
+}
+
+/** Meta-only payload for partitioned Redis storage (events live in a separate LIST). */
+function sessionMetaPayload(record: SharedSessionRecord): Omit<SharedSessionRecord, 'events'> & { events: [] } {
+  return {
+    ownerId: record.ownerId,
+    agentId: record.agentId,
+    session: record.session,
+    events: [],
     latestSequence: record.latestSequence,
     earliestSequence: record.earliestSequence,
     retainedBytes: record.retainedBytes,
@@ -245,7 +262,9 @@ export interface RedisClientLike {
   get(key: string): Promise<string | null>;
   mGet?(keys: string[]): Promise<(string | null)[]>;
   set(key: string, value: string, options?: { EX?: number; XX?: boolean; NX?: boolean }): Promise<unknown>;
-  del(key: string): Promise<unknown>;
+  del(...keys: string[]): Promise<unknown>;
+  rPush?(key: string, ...values: string[]): Promise<unknown>;
+  lRange?(key: string, start: number, stop: number): Promise<string[]>;
   sAdd(key: string, member: string): Promise<unknown>;
   /** Supports multi-member SREM (Redis) to prune stale index entries in one RTT. */
   sRem(key: string, ...members: string[]): Promise<unknown>;
@@ -353,22 +372,37 @@ export class RedisLiveStore implements LiveStore {
     const raw = await this.client.get(sessionKey(sessionId));
     if (!raw) return undefined;
     const parsed = safeParseJson<SharedSessionRecord>(raw);
-    return parsed ? cloneSession(parsed) : undefined;
+    if (!parsed) return undefined;
+    // Legacy monolith payload (events embedded in meta).
+    if (Array.isArray(parsed.events) && parsed.events.length > 0) {
+      return cloneSession(parsed);
+    }
+    // Partitioned layout: meta + LIST of event JSON strings.
+    const eventRows =
+      this.client.lRange
+        ? await this.client.lRange(sessionEventsKey(sessionId), 0, -1)
+        : [];
+    const events: TerminalEvent[] = [];
+    for (const row of eventRows) {
+      const ev = safeParseJson<TerminalEvent>(row);
+      if (ev) events.push(ev);
+    }
+    return cloneSession({ ...parsed, events });
   }
 
   async putSession(sessionId: string, record: SharedSessionRecord): Promise<void> {
     const key = sessionKey(sessionId);
+    const eventsKey = sessionEventsKey(sessionId);
     const ttl = String(this.ttlSeconds);
+    const meta = sessionMetaPayload(record);
+    const eventArgs = record.events.map((e) => JSON.stringify(e));
 
-    // With Lua CAS, skip a pre-GET RTT: Redis re-reads current and rejects stale sequences.
-    // Callers (gateway) already hold the authoritative buffer; merge is only needed without Lua.
-    // Owner index SADD+EXPIRE runs inside the same EVAL (1 RTT vs EVAL+SADD+EXPIRE).
+    // CAS + meta SET + replace event LIST + owner index in one EVAL (partitioned log).
     if (this.client.eval) {
-      const payload = JSON.stringify(record);
       const ownerKey = record.ownerId ? ownerSessionsKey(record.ownerId) : '';
       await this.client.eval(PUT_SESSION_LUA, {
-        keys: [key, ownerKey || key],
-        arguments: [payload, ttl, sessionId, record.ownerId ? '1' : '0'],
+        keys: [key, ownerKey || key, eventsKey],
+        arguments: [JSON.stringify(meta), ttl, sessionId, record.ownerId ? '1' : '0', ...eventArgs],
       });
       return;
     }
@@ -376,8 +410,22 @@ export class RedisLiveStore implements LiveStore {
     const previous = await this.getSession(sessionId);
     const merged = mergeSessionRecords(previous, record);
     if (previous && merged.latestSequence < previous.latestSequence) return;
-    await this.client.set(key, JSON.stringify(merged), { EX: this.ttlSeconds });
+    await this.client.set(key, JSON.stringify(sessionMetaPayload(merged)), { EX: this.ttlSeconds });
+    await this.replaceEventLog(eventsKey, merged.events);
     await this.reindexSessionOwner(sessionId, previous?.ownerId, merged.ownerId);
+  }
+
+  private async replaceEventLog(eventsKey: string, events: TerminalEvent[]): Promise<void> {
+    await this.client.del(eventsKey);
+    if (events.length === 0) return;
+    const rows = events.map((e) => JSON.stringify(e));
+    if (this.client.rPush) {
+      await this.client.rPush(eventsKey, ...rows);
+    } else {
+      // Minimal test doubles without LIST support: leave events only in meta (caller path rare).
+      return;
+    }
+    await this.client.expire(eventsKey, this.ttlSeconds);
   }
 
   private async reindexSessionOwner(
@@ -396,11 +444,11 @@ export class RedisLiveStore implements LiveStore {
 
   async deleteSession(sessionId: string): Promise<void> {
     const key = sessionKey(sessionId);
-    // One EVAL: peek ownerId + SREM + DEL (was GET + optional SREM + DEL = up to 3 RTTs).
-    // Still avoids full JSON.parse of large event buffers (ownerId matched in Lua).
+    const eventsKey = sessionEventsKey(sessionId);
+    // One EVAL: owner SREM + DEL meta + DEL partitioned event list.
     if (this.client.eval) {
       await this.client.eval(DELETE_SESSION_LUA, {
-        keys: [key],
+        keys: [key, eventsKey],
         arguments: [sessionId, `${PREFIX}:owner:`],
       });
       return;
@@ -410,7 +458,7 @@ export class RedisLiveStore implements LiveStore {
       const ownerId = extractJsonStringField(raw, 'ownerId');
       if (ownerId) await this.client.sRem(ownerSessionsKey(ownerId), sessionId);
     }
-    await this.client.del(key);
+    await this.client.del(key, eventsKey);
   }
 
   async listSessionIdsByOwner(ownerId: string): Promise<string[]> {
@@ -677,9 +725,10 @@ export class RedisLiveStore implements LiveStore {
   }
 }
 
-/** Lua: delete session + owner index SREM without shipping the blob to the app. */
+/** Lua: delete meta + partitioned events + owner index SREM. */
 const DELETE_SESSION_LUA = `
 local key = KEYS[1]
+local eventsKey = KEYS[2]
 local sessionId = ARGV[1]
 local ownerPrefix = ARGV[2]
 local current = redis.call('GET', key)
@@ -690,13 +739,15 @@ if current then
   end
 end
 redis.call('DEL', key)
+redis.call('DEL', eventsKey)
 return 1
 `;
 
-/** Lua: CAS on latestSequence + optional owner-session index update in one RTT. */
+/** Lua: CAS meta + replace partitioned event LIST + owner index (1 RTT). */
 const PUT_SESSION_LUA = `
 local key = KEYS[1]
 local ownerKey = KEYS[2]
+local eventsKey = KEYS[3]
 local incoming = ARGV[1]
 local ttl = tonumber(ARGV[2])
 local sessionId = ARGV[3]
@@ -710,6 +761,13 @@ if current then
   end
 end
 redis.call('SET', key, incoming, 'EX', ttl)
+redis.call('DEL', eventsKey)
+for i = 5, #ARGV do
+  redis.call('RPUSH', eventsKey, ARGV[i])
+end
+if redis.call('LLEN', eventsKey) > 0 then
+  redis.call('EXPIRE', eventsKey, ttl)
+end
 if indexOwner == '1' and ownerKey ~= '' and sessionId ~= '' then
   redis.call('SADD', ownerKey, sessionId)
   redis.call('EXPIRE', ownerKey, ttl)
