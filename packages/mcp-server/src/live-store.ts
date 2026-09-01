@@ -350,15 +350,14 @@ export class RedisLiveStore implements LiveStore {
 
     // With Lua CAS, skip a pre-GET RTT: Redis re-reads current and rejects stale sequences.
     // Callers (gateway) already hold the authoritative buffer; merge is only needed without Lua.
+    // Owner index SADD+EXPIRE runs inside the same EVAL (1 RTT vs EVAL+SADD+EXPIRE).
     if (this.client.eval) {
       const payload = JSON.stringify(record);
-      const result = await this.client.eval(PUT_SESSION_LUA, {
-        keys: [key],
-        arguments: [payload, ttl],
+      const ownerKey = record.ownerId ? ownerSessionsKey(record.ownerId) : '';
+      await this.client.eval(PUT_SESSION_LUA, {
+        keys: [key, ownerKey || key],
+        arguments: [payload, ttl, sessionId, record.ownerId ? '1' : '0'],
       });
-      const storedRaw = typeof result === 'string' ? result : payload;
-      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? record;
-      await this.reindexSessionOwner(sessionId, undefined, stored.ownerId);
       return;
     }
 
@@ -412,15 +411,12 @@ export class RedisLiveStore implements LiveStore {
     const payload = JSON.stringify(presence);
     const ttl = String(this.ttlSeconds);
 
-    // Lua CAS avoids a pre-GET RTT; owner reindex assumes stable ownerId (agents do not migrate owners).
+    // Lua CAS + owner index in one EVAL (avoids pre-GET and post SADD/EXPIRE RTTs).
     if (this.client.eval) {
-      const result = await this.client.eval(SET_PRESENCE_LUA, {
-        keys: [key],
-        arguments: [payload, ttl, String(presence.lastSeenMs)],
+      await this.client.eval(SET_PRESENCE_LUA, {
+        keys: [key, ownerAgentsKey(presence.ownerId)],
+        arguments: [payload, ttl, String(presence.lastSeenMs), agentId],
       });
-      if (result === 0 || result === '0') return;
-      await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
-      await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
       return;
     }
 
@@ -656,11 +652,14 @@ export class RedisLiveStore implements LiveStore {
   }
 }
 
-/** Lua: set session only if incoming.latestSequence >= current.latestSequence (or key missing). */
+/** Lua: CAS on latestSequence + optional owner-session index update in one RTT. */
 const PUT_SESSION_LUA = `
 local key = KEYS[1]
+local ownerKey = KEYS[2]
 local incoming = ARGV[1]
 local ttl = tonumber(ARGV[2])
+local sessionId = ARGV[3]
+local indexOwner = ARGV[4]
 local current = redis.call('GET', key)
 if current then
   local curSeq = tonumber(string.match(current, '"latestSequence":(%d+)')) or 0
@@ -670,6 +669,10 @@ if current then
   end
 end
 redis.call('SET', key, incoming, 'EX', ttl)
+if indexOwner == '1' and ownerKey ~= '' and sessionId ~= '' then
+  redis.call('SADD', ownerKey, sessionId)
+  redis.call('EXPIRE', ownerKey, ttl)
+end
 return incoming
 `;
 
@@ -690,12 +693,14 @@ redis.call('SREM', ownerKey, agentId)
 return 1
 `;
 
-/** Lua: write presence only if lastSeenMs is >= current (or key missing). */
+/** Lua: presence CAS + owner agent index in one RTT. */
 const SET_PRESENCE_LUA = `
 local key = KEYS[1]
+local ownerKey = KEYS[2]
 local incoming = ARGV[1]
 local ttl = tonumber(ARGV[2])
 local lastSeen = tonumber(ARGV[3]) or 0
+local agentId = ARGV[4]
 local current = redis.call('GET', key)
 if current then
   local curSeen = tonumber(string.match(current, '"lastSeenMs":(%d+)')) or 0
@@ -704,6 +709,10 @@ if current then
   end
 end
 redis.call('SET', key, incoming, 'EX', ttl)
+if ownerKey ~= '' and agentId ~= '' then
+  redis.call('SADD', ownerKey, agentId)
+  redis.call('EXPIRE', ownerKey, ttl)
+end
 return 1
 `;
 
