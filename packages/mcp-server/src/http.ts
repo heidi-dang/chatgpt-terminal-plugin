@@ -76,6 +76,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
   const uiReloadClients = new Set<Response>();
+  const terminalStreamClients = new Set<Response>();
   let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
   const stopUiWatcher = watchTerminalUiStyles((version) => {
     if (version === terminalUiStyleVersion) return;
@@ -295,6 +296,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('connection', 'keep-alive');
       res.setHeader('x-accel-buffering', 'no');
       res.flushHeaders();
+      terminalStreamClients.add(res);
 
       let lastSequence = cursor;
       let replaying = true;
@@ -342,6 +344,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearInterval(keepAlive);
         clearTimeout(expiryTimer);
         unsubscribe();
+        terminalStreamClients.delete(res);
         if (!res.writableEnded && !res.destroyed) res.end();
       };
       res.once('close', cleanup);
@@ -380,6 +383,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       stopUiWatcher();
       for (const client of uiReloadClients) client.end();
       uiReloadClients.clear();
+      for (const client of terminalStreamClients) client.end();
+      terminalStreamClients.clear();
       turnRegistry.dispose();
       gateway.closeAll();
       for (const session of sessions.values()) await session.server.close();
