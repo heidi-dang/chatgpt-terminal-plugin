@@ -84,9 +84,15 @@ The MCP App never receives the user's OAuth bearer token. `terminal_start` and `
 - short expiry
 - unique token identifier used for revocation
 
-The stream token is carried in the terminal SSE URL returned through MCP result `_meta`, not in model-visible structured output.
+MCP result `_meta.terminal_stream` returns:
 
-The SSE endpoint is cross-origin readable because MCP Apps run in a sandboxed origin. The capability itself supplies authorization, and the server terminates the SSE response when that token expires. The widget closes failed sources and obtains a newly scoped capability rather than allowing EventSource to retry an expired URL. CORS is not opened on `/mcp`, enrollment or OAuth endpoints. Because the capability appears in the SSE query string, reverse-proxy/access logs must redact query parameters if request logging is enabled.
+- `url` — SSE endpoint with cursor only (`after`), **without** the secret in the query string
+- `token` / `authorization` — capability for the client to send as `Authorization: Bearer …` or `x-terminal-stream-token`
+- `expires_at`
+
+The SSE endpoint accepts the token in this order: `x-terminal-stream-token`, `Authorization: Bearer`, then legacy `?token=` for plain `EventSource` clients that cannot set headers. Prefer header-based auth so reverse proxies do not log the capability. If query tokens are still used, redact query parameters in access logs.
+
+The SSE endpoint is cross-origin readable because MCP Apps run in a sandboxed origin. The capability itself supplies authorization, and the server terminates the SSE response when that token expires. The widget closes failed sources and obtains a newly scoped capability rather than allowing EventSource to retry an expired URL. CORS is not opened on `/mcp`, enrollment or OAuth endpoints.
 
 ## MCP App CSP
 

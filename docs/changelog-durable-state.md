@@ -110,6 +110,9 @@ Dependency: `redis` on `@terminal/mcp-server` (`pnpm install` after upgrade).
 
 - **Session CAS:** Redis `putSession` uses a Lua script so a lower `latestSequence` cannot overwrite a higher one under concurrent writers.
 - **Presence clear CAS:** `clearAgentPresence(agentId, instanceId)` uses Lua so a stale disconnect cannot wipe a newer owner instance.
+- **Partitioned event log:** meta key + `term:session:{id}:events` LIST; append-only `RPUSH` for `sequence > current`, `LTRIM` to retained window.
+- **Shared SQLite writers:** enroll/revoke use `*.writelock` + `BEGIN IMMEDIATE` for multi-process registry files.
+- **Stream tokens:** prefer `Authorization` / `x-terminal-stream-token`; query `token` is legacy-only.
 - **Redis reconnect:** node-redis socket `reconnectStrategy` exponential backoff (cap 5s), `connectTimeout` 10s. Startup still **fails closed** if the initial connect fails when `REDIS_URL` is set.
 - **SQLite:** uses experimental Node `node:sqlite`; runtime requires Node ≥ 22.5. Pin Node major in production images.
 
@@ -119,3 +122,4 @@ Dependency: `redis` on `@terminal/mcp-server` (`pnpm install` after upgrade).
 - Moving active WebSocket connections between processes without reconnect
 - Distributed MCP Streamable HTTP session affinity beyond Redis-backed terminal state
 - Automatic Redis Cluster topology management
+- Postgres/MySQL registry (SQLite + lock remains the multi-writer path on shared disk)

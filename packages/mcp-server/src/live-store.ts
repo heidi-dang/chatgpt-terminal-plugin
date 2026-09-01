@@ -265,6 +265,8 @@ export interface RedisClientLike {
   del(...keys: string[]): Promise<unknown>;
   rPush?(key: string, ...values: string[]): Promise<unknown>;
   lRange?(key: string, start: number, stop: number): Promise<string[]>;
+  lTrim?(key: string, start: number, stop: number): Promise<unknown>;
+  lLen?(key: string): Promise<number>;
   sAdd(key: string, member: string): Promise<unknown>;
   /** Supports multi-member SREM (Redis) to prune stale index entries in one RTT. */
   sRem(key: string, ...members: string[]): Promise<unknown>;
@@ -411,19 +413,36 @@ export class RedisLiveStore implements LiveStore {
     const merged = mergeSessionRecords(previous, record);
     if (previous && merged.latestSequence < previous.latestSequence) return;
     await this.client.set(key, JSON.stringify(sessionMetaPayload(merged)), { EX: this.ttlSeconds });
-    await this.replaceEventLog(eventsKey, merged.events);
+    await this.appendEventLog(
+      eventsKey,
+      previous?.latestSequence ?? 0,
+      merged.events,
+      merged.earliestSequence,
+      merged.latestSequence,
+    );
     await this.reindexSessionOwner(sessionId, previous?.ownerId, merged.ownerId);
   }
 
-  private async replaceEventLog(eventsKey: string, events: TerminalEvent[]): Promise<void> {
-    await this.client.del(eventsKey);
-    if (events.length === 0) return;
-    const rows = events.map((e) => JSON.stringify(e));
-    if (this.client.rPush) {
-      await this.client.rPush(eventsKey, ...rows);
-    } else {
-      // Minimal test doubles without LIST support: leave events only in meta (caller path rare).
+  /** Non-Lua path: RPUSH only seq > previousLatest, then LTRIM to retained window. */
+  private async appendEventLog(
+    eventsKey: string,
+    previousLatest: number,
+    events: TerminalEvent[],
+    earliestSequence: number,
+    latestSequence: number,
+  ): Promise<void> {
+    if (!this.client.rPush) return;
+    const toAppend = events.filter((e) => e.sequence > previousLatest).map((e) => JSON.stringify(e));
+    if (toAppend.length > 0) await this.client.rPush(eventsKey, ...toAppend);
+
+    const want = latestSequence >= earliestSequence ? latestSequence - earliestSequence + 1 : 0;
+    if (want === 0) {
+      await this.client.del(eventsKey);
       return;
+    }
+    if (this.client.lLen && this.client.lTrim) {
+      const len = await this.client.lLen(eventsKey);
+      if (len > want) await this.client.lTrim(eventsKey, len - want, -1);
     }
     await this.client.expire(eventsKey, this.ttlSeconds);
   }
