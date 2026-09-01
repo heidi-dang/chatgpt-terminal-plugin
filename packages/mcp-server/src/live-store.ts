@@ -235,7 +235,8 @@ export interface RedisClientLike {
   set(key: string, value: string, options?: { EX?: number; XX?: boolean; NX?: boolean }): Promise<unknown>;
   del(key: string): Promise<unknown>;
   sAdd(key: string, member: string): Promise<unknown>;
-  sRem(key: string, member: string): Promise<unknown>;
+  /** Supports multi-member SREM (Redis) to prune stale index entries in one RTT. */
+  sRem(key: string, ...members: string[]): Promise<unknown>;
   sMembers(key: string): Promise<string[]>;
   expire(key: string, seconds: number): Promise<unknown>;
   publish(channel: string, message: string): Promise<unknown>;
@@ -345,24 +346,26 @@ export class RedisLiveStore implements LiveStore {
 
   async putSession(sessionId: string, record: SharedSessionRecord): Promise<void> {
     const key = sessionKey(sessionId);
-    const previous = await this.getSession(sessionId);
-    const merged = mergeSessionRecords(previous, record);
-    const payload = JSON.stringify(merged);
     const ttl = String(this.ttlSeconds);
 
+    // With Lua CAS, skip a pre-GET RTT: Redis re-reads current and rejects stale sequences.
+    // Callers (gateway) already hold the authoritative buffer; merge is only needed without Lua.
     if (this.client.eval) {
+      const payload = JSON.stringify(record);
       const result = await this.client.eval(PUT_SESSION_LUA, {
         keys: [key],
         arguments: [payload, ttl],
       });
       const storedRaw = typeof result === 'string' ? result : payload;
-      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? merged;
-      await this.reindexSessionOwner(sessionId, previous?.ownerId, stored.ownerId);
+      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? record;
+      await this.reindexSessionOwner(sessionId, undefined, stored.ownerId);
       return;
     }
 
+    const previous = await this.getSession(sessionId);
+    const merged = mergeSessionRecords(previous, record);
     if (previous && merged.latestSequence < previous.latestSequence) return;
-    await this.client.set(key, payload, { EX: this.ttlSeconds });
+    await this.client.set(key, JSON.stringify(merged), { EX: this.ttlSeconds });
     await this.reindexSessionOwner(sessionId, previous?.ownerId, merged.ownerId);
   }
 
@@ -398,7 +401,8 @@ export class RedisLiveStore implements LiveStore {
       else stale.push(ids[i]!);
     }
     if (stale.length > 0) {
-      await Promise.all(stale.map((id) => this.client.sRem(ownerSessionsKey(ownerId), id)));
+      // Single multi-member SREM instead of N round-trips.
+      await this.client.sRem(ownerSessionsKey(ownerId), ...stale);
     }
     return live;
   }
@@ -407,19 +411,22 @@ export class RedisLiveStore implements LiveStore {
     const key = agentKey(agentId);
     const payload = JSON.stringify(presence);
     const ttl = String(this.ttlSeconds);
-    const previous = await this.getAgentPresence(agentId);
 
+    // Lua CAS avoids a pre-GET RTT; owner reindex assumes stable ownerId (agents do not migrate owners).
     if (this.client.eval) {
       const result = await this.client.eval(SET_PRESENCE_LUA, {
         keys: [key],
         arguments: [payload, ttl, String(presence.lastSeenMs)],
       });
       if (result === 0 || result === '0') return;
-    } else {
-      if (previous && previous.lastSeenMs > presence.lastSeenMs) return;
-      await this.client.set(key, payload, { EX: this.ttlSeconds });
+      await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
+      await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
+      return;
     }
 
+    const previous = await this.getAgentPresence(agentId);
+    if (previous && previous.lastSeenMs > presence.lastSeenMs) return;
+    await this.client.set(key, payload, { EX: this.ttlSeconds });
     if (previous && previous.ownerId !== presence.ownerId) {
       await this.client.sRem(ownerAgentsKey(previous.ownerId), agentId);
     }
@@ -473,7 +480,7 @@ export class RedisLiveStore implements LiveStore {
       else stale.push(ids[i]!);
     }
     if (stale.length > 0) {
-      await Promise.all(stale.map((id) => this.client.sRem(ownerAgentsKey(ownerId), id)));
+      await this.client.sRem(ownerAgentsKey(ownerId), ...stale);
     }
     return out;
   }
@@ -711,6 +718,8 @@ function defaultCreateRedisClient(url: string): RedisClientLike {
       };
     }) => RedisClientLike;
   };
+  // Ops note: configure Redis maxmemory + volatile-ttl (or allkeys-lru) server-side so
+  // session/presence keys with EX expire under pressure instead of OOM. App sets EX on all live keys.
   return redis.createClient({
     url,
     socket: {
