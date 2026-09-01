@@ -54,6 +54,7 @@ interface AgentConnection {
 
 interface PendingRequest {
   agentId: string;
+  socket: WebSocket;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -602,7 +603,7 @@ export class AgentGateway {
       }
 
       for (const [requestId, pending] of this.pending) {
-        if (pending.agentId !== registeredAgentId) continue;
+        if (pending.agentId !== registeredAgentId || pending.socket !== socket) continue;
         clearTimeout(pending.timer);
         pending.reject(new TerminalProtocolError('AGENT_OFFLINE', 'Agent disconnected while handling the request.', true));
         this.pending.delete(requestId);
@@ -636,7 +637,7 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
       }, timeoutMs);
       timer.unref();
-      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
+      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, socket: connection.socket, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
       connection.socket.send(JSON.stringify(command), (error) => {
         if (!error) return;
         clearTimeout(timer);
