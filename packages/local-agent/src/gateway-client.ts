@@ -179,7 +179,6 @@ export class AgentGatewayClient {
       socket.once('close', () => {
         this.authenticated = false;
         this.clearHeartbeat();
-        this.agent.stopProcessFeatures();
         resolve();
       });
     });
