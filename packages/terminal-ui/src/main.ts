@@ -67,6 +67,7 @@ const MCP_APPS_PROTOCOL_VERSION = '2026-01-26';
 const MAX_OUTPUT_CHARS = 600_000;
 const OUTPUT_TRIM_TARGET = 450_000;
 const STREAM_REFRESH_MARGIN_MS = 15_000;
+const SSE_CONNECT_TIMEOUT_MS = 2_000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 15_000;
 const SURFACE_POLL_INTERVAL_MS = 500;
 
@@ -631,6 +632,13 @@ export class TerminalViewer {
     }
     const source = new EventSource(meta.url);
     this.eventSource = source;
+    window.setTimeout(() => {
+      if (this.eventSource !== source || this.streamState !== 'connecting' || isFinalStatus(this.viewState?.status)) return;
+      source.close();
+      this.eventSource = undefined;
+      this.startReadFallback();
+      this.scheduleStreamReconnect();
+    }, SSE_CONNECT_TIMEOUT_MS);
 
     source.onopen = () => {
       if (this.eventSource !== source) return;

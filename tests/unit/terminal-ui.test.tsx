@@ -259,6 +259,23 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
   });
 
+  it('falls back to MCP reads when EventSource stays stuck connecting', async () => {
+    vi.useFakeTimers();
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE CONNECTING');
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
+    });
+  });
+
   it('does not skip unrendered stream events when a same-session tool result reports a newer cursor', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
