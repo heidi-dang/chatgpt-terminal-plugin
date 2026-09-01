@@ -11,7 +11,8 @@ Type=simple
 WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin
 EnvironmentFile=%h/.config/chatgpt-terminal-plugin/agent.env
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/env pnpm --filter @terminal/local-agent start
+# Run the verified built release directly; pnpm is required for install/build, not service runtime.
+ExecStart=/usr/bin/env node packages/local-agent/dist/cli.js
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

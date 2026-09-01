@@ -104,7 +104,7 @@ The stream capability is carried in a URL query parameter because browser `Event
 
 ## Server service
 
-Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-environment.example` as starting points. Recommended properties:
+Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-environment.example` as starting points. The service runs the already-built Node entrypoint directly, so `pnpm` is not required on the production service `PATH` after `./install.sh` completes; Node.js 22+ still must be resolvable by the service. Recommended properties:
 
 - run as a dedicated unprivileged OS account
 - working directory is the checked-out release
@@ -115,7 +115,7 @@ Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-env
 
 ## Local-agent installation
 
-The local computer requires the same built repository or a packaged agent distribution. `deploy/local-agent-environment.example` and `deploy/systemd/chatgpt-terminal-agent.service.example` provide a user-service baseline. Run the agent as the OS user whose tools/workspaces it is intentionally allowed to access; do not run it as root.
+The local computer requires the same built repository or a packaged agent distribution. `deploy/local-agent-environment.example` and `deploy/systemd/chatgpt-terminal-agent.service.example` provide a user-service baseline. The user service runs the built Node entrypoint directly; `pnpm` is needed to install/build the release but is not a runtime service dependency. Ensure Node.js 22+ is on the systemd user service `PATH`. Run the agent as the OS user whose tools/workspaces it is intentionally allowed to access; do not run it as root.
 
 Configure:
 

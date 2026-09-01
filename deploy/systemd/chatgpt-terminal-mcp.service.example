@@ -10,7 +10,8 @@ Group=chatgpt-terminal
 WorkingDirectory=/opt/chatgpt-terminal-plugin
 EnvironmentFile=/etc/chatgpt-terminal/mcp.env
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/env pnpm --filter @terminal/mcp-server start
+# Run the verified built release directly; pnpm is required for install/build, not service runtime.
+ExecStart=/usr/bin/env node packages/mcp-server/dist/cli.js
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20
