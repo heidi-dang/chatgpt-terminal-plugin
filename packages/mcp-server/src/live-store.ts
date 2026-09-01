@@ -85,6 +85,18 @@ function safeParseJson<T>(raw: string): T | undefined {
   }
 }
 
+/** O(1)-ish field peek without parsing large event arrays (big-key delete path). */
+function extractJsonStringField(raw: string, field: string): string | undefined {
+  const re = new RegExp(`"${field}"\s*:\s*"((?:\\.|[^"\\])*)"`);
+  const m = re.exec(raw);
+  if (!m?.[1]) return undefined;
+  try {
+    return JSON.parse(`"${m[1]}"`) as string;
+  } catch {
+    return m[1];
+  }
+}
+
 function cloneSession(record: SharedSessionRecord): SharedSessionRecord {
   return {
     ownerId: record.ownerId,
@@ -383,9 +395,14 @@ export class RedisLiveStore implements LiveStore {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    const previous = await this.getSession(sessionId);
-    if (previous?.ownerId) await this.client.sRem(ownerSessionsKey(previous.ownerId), sessionId);
-    await this.client.del(sessionKey(sessionId));
+    const key = sessionKey(sessionId);
+    // Avoid getSession() full JSON.parse of large event buffers — only need ownerId for index SREM.
+    const raw = await this.client.get(key);
+    if (raw) {
+      const ownerId = extractJsonStringField(raw, 'ownerId');
+      if (ownerId) await this.client.sRem(ownerSessionsKey(ownerId), sessionId);
+    }
+    await this.client.del(key);
   }
 
   async listSessionIdsByOwner(ownerId: string): Promise<string[]> {
