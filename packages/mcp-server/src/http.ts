@@ -137,6 +137,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       cleaned = true;
       clearInterval(keepAlive);
       uiReloadClients.delete(res);
+      if (!res.writableEnded && !res.destroyed) res.end();
     };
     res.once('close', cleanup);
     res.once('error', cleanup);
@@ -327,6 +328,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearInterval(keepAlive);
         clearTimeout(expiryTimer);
         unsubscribe();
+        if (!res.writableEnded && !res.destroyed) res.end();
       };
       res.once('close', cleanup);
       res.once('error', cleanup);
