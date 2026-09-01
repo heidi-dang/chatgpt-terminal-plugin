@@ -111,7 +111,7 @@ Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-env
 - secrets live in an owner/root-readable environment file outside Git
 - restart on failure
 - bind the Node service to loopback when a local reverse proxy is used
-- persist the device registry and logs on a protected local path
+- persist the device registry and logs on protected local paths; the provided systemd unit uses `StateDirectory=chatgpt-terminal` and `LogsDirectory=chatgpt-terminal` with `0700` modes so `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` are created and owned for the service automatically
 
 ## Local-agent installation
 
@@ -173,7 +173,7 @@ Protect at minimum:
 - containing secret/identity directories: owner-only
 - transcript/audit files according to your data-retention policy
 
-The application creates its device identity and registry with owner-only modes and serializes audit/transcript writes with retention pruning. Deployment ownership should still be validated after installation.
+The application creates its device identity and registry with owner-only modes and serializes audit/transcript writes with retention pruning. Deployment ownership should still be validated after installation. When using the provided server systemd unit, systemd creates the default `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` directories with owner-only modes; custom paths must be provisioned and permissioned separately.
 
 `developer` mode canonicalizes the requested launch directory and rejects symlink/path escapes outside configured roots. It does **not** sandbox arbitrary commands after the shell starts. Use a dedicated OS account, container/VM, or OS mandatory-access controls if filesystem/process containment beyond normal user permissions is required.
 

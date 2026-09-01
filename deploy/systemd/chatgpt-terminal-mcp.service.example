@@ -17,6 +17,10 @@ RestartSec=3
 TimeoutStopSec=20
 KillSignal=SIGTERM
 UMask=0077
+StateDirectory=chatgpt-terminal
+StateDirectoryMode=0700
+LogsDirectory=chatgpt-terminal
+LogsDirectoryMode=0700
 
 NoNewPrivileges=true
 PrivateTmp=true
@@ -31,7 +35,6 @@ RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/chatgpt-terminal /var/log/chatgpt-terminal
 
 [Install]
 WantedBy=multi-user.target
