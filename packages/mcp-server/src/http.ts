@@ -13,7 +13,7 @@ import { AgentGateway } from './gateway.js';
 import { createTerminalMcpServer } from './mcp.js';
 import { TerminalService } from './service.js';
 import { StreamTokenService } from './stream-token.js';
-import { readTerminalUiDocument, watchTerminalUi } from './ui-runtime.js';
+import { readTerminalUiStyles, watchTerminalUiStyles } from './ui-runtime.js';
 
 interface McpSession {
   transport: NodeStreamableHTTPServerTransport;
@@ -71,11 +71,11 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
   const uiReloadClients = new Set<Response>();
-  let terminalUiVersion = (await readTerminalUiDocument()).version;
-  const stopUiWatcher = watchTerminalUi((version) => {
-    if (version === terminalUiVersion) return;
-    terminalUiVersion = version;
-    const payload = `data: ${JSON.stringify({ version })}\n\n`;
+  let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
+  const stopUiWatcher = watchTerminalUiStyles((version) => {
+    if (version === terminalUiStyleVersion) return;
+    terminalUiStyleVersion = version;
+    const payload = `data: ${JSON.stringify({ version, kind: 'styles' })}\n\n`;
     for (const client of uiReloadClients) {
       if (!client.writableEnded && !client.destroyed) client.write(payload);
     }
@@ -100,18 +100,18 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     });
   });
 
-  app.get('/terminal-ui/runtime.html', async (_req, res) => {
+  app.get('/terminal-ui/styles.css', async (_req, res) => {
     try {
-      const document = await readTerminalUiDocument();
-      terminalUiVersion = document.version;
-      res.setHeader('content-type', 'text/html; charset=utf-8');
+      const styles = await readTerminalUiStyles();
+      terminalUiStyleVersion = styles.version;
+      res.setHeader('content-type', 'text/css; charset=utf-8');
       res.setHeader('cache-control', 'no-store, max-age=0');
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
-      res.status(200).send(document.html);
+      res.status(200).send(styles.css);
     } catch (error) {
-      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.runtime_failed', error: errorMessage(error) }));
-      res.status(503).send('Terminal UI bundle is unavailable.');
+      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.styles_failed', error: errorMessage(error) }));
+      res.status(503).send('Terminal UI stylesheet is unavailable.');
     }
   });
 
@@ -125,7 +125,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     res.setHeader('x-accel-buffering', 'no');
     res.flushHeaders();
     uiReloadClients.add(res);
-    res.write(`data: ${JSON.stringify({ version: terminalUiVersion })}\n\n`);
+    res.write(`data: ${JSON.stringify({ version: terminalUiStyleVersion, kind: 'styles' })}\n\n`);
 
     const keepAlive = setInterval(() => {
       if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');

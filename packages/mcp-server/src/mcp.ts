@@ -22,7 +22,7 @@ import type { TerminalService, RequestIdentity } from './service.js';
 import type { StreamTokenService } from './stream-token.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
 
-export const TERMINAL_UI_URI = 'ui://terminal/v3.html';
+export const TERMINAL_UI_URI = 'ui://terminal/v5.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
 const terminalStartViewOutputSchema = terminalStartOutputSchema.extend({
@@ -41,14 +41,14 @@ export interface McpServerDependencies {
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
-  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.3.0' });
+  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.5.0' });
 
   server.registerResource(
     'Live terminal',
     TERMINAL_UI_URI,
     {
       title: 'Live Terminal',
-      description: 'Responsive xterm.js terminal for an authenticated local-agent PTY session.',
+      description: 'Compact live terminal viewer for an authenticated local-agent PTY session.',
       mimeType: TERMINAL_UI_MIME,
     },
     async () => ({
@@ -58,6 +58,8 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         text: (await readTerminalUiDocument()).html,
         _meta: {
           ui: {
+            prefersBorder: true,
+            domain: deps.config.publicUrl.origin,
             csp: { connectDomains: [deps.config.publicUrl.origin] },
           },
         },

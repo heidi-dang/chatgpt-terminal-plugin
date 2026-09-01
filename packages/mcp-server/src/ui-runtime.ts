@@ -3,19 +3,15 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export interface TerminalUiDocument {
-  html: string;
-  version: string;
-}
+export interface TerminalUiDocument { html: string; version: string }
+export interface TerminalUiStyles { css: string; version: string }
 
 export const TERMINAL_UI_HTML_PATH = fileURLToPath(new URL('../../terminal-ui/dist/index.html', import.meta.url));
+export const TERMINAL_UI_STYLES_PATH = fileURLToPath(new URL('../../terminal-ui/src/styles.css', import.meta.url));
 
 export async function readTerminalUiDocument(): Promise<TerminalUiDocument> {
   try {
-    const [html, info] = await Promise.all([
-      readFile(TERMINAL_UI_HTML_PATH, 'utf8'),
-      stat(TERMINAL_UI_HTML_PATH),
-    ]);
+    const [html, info] = await Promise.all([readFile(TERMINAL_UI_HTML_PATH, 'utf8'), stat(TERMINAL_UI_HTML_PATH)]);
     const version = `${Math.trunc(info.mtimeMs)}-${info.size}`;
     return { html: injectBuildVersion(html, version), version };
   } catch (error) {
@@ -23,30 +19,36 @@ export async function readTerminalUiDocument(): Promise<TerminalUiDocument> {
   }
 }
 
-export function watchTerminalUi(onVersion: (version: string) => void): () => void {
+export async function readTerminalUiStyles(): Promise<TerminalUiStyles> {
+  try {
+    const [css, info] = await Promise.all([readFile(TERMINAL_UI_STYLES_PATH, 'utf8'), stat(TERMINAL_UI_STYLES_PATH)]);
+    return { css, version: `${Math.trunc(info.mtimeMs)}-${info.size}` };
+  } catch (error) {
+    throw new Error(`Terminal UI stylesheet is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export function watchTerminalUiStyles(onVersion: (version: string) => void): () => void {
   let watcher: FSWatcher | undefined;
   let debounceTimer: NodeJS.Timeout | undefined;
   let closed = false;
-  const directory = dirname(TERMINAL_UI_HTML_PATH);
-  const filename = basename(TERMINAL_UI_HTML_PATH);
-
-  const publishCurrentVersion = () => {
-    void stat(TERMINAL_UI_HTML_PATH).then((info) => {
+  const directory = dirname(TERMINAL_UI_STYLES_PATH);
+  const filename = basename(TERMINAL_UI_STYLES_PATH);
+  const publish = () => {
+    void stat(TERMINAL_UI_STYLES_PATH).then((info) => {
       if (!closed) onVersion(`${Math.trunc(info.mtimeMs)}-${info.size}`);
     }).catch(() => undefined);
   };
-
   try {
     watcher = watch(directory, { persistent: false }, (_eventType, changed) => {
       if (changed && changed.toString() !== filename) return;
       if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(publishCurrentVersion, 75);
+      debounceTimer = setTimeout(publish, 75);
       debounceTimer.unref();
     });
   } catch {
     return () => undefined;
   }
-
   return () => {
     closed = true;
     if (debounceTimer) clearTimeout(debounceTimer);
