@@ -188,6 +188,18 @@ export class TerminalService {
     return terminalMutationOutputSchema.parse({ session_id: input.session_id, status: snapshot.session.status, cursor: snapshot.cursor });
   }
 
+  async transcript(identity: RequestIdentity, input: { session_id: string; max_entries: number; after_sequence: number; include_output: boolean }): Promise<{ session_id: string; entries: Array<{ type: string; timestamp: string; text: string }>; next_sequence: number; has_more: boolean }> {
+    const result = this.gateway.getTranscript(identity.userId, input.session_id, input.max_entries, input.after_sequence, input.include_output);
+    await this.audit.record({
+      action: 'terminal_transcript',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      output_metadata: { entries: result.entries.length, next_sequence: result.next_sequence },
+    });
+    return { session_id: input.session_id, ...result };
+  }
+
   // --- File operations ---
 
   async readFile(identity: RequestIdentity, input: { session_id: string; path: string; max_bytes: number }): Promise<unknown> {

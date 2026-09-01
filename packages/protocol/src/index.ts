@@ -284,6 +284,29 @@ export const terminalSearchFilesOutputSchema = z.object({
 });
 export type TerminalSearchFilesOutput = z.infer<typeof terminalSearchFilesOutputSchema>;
 
+export const terminalTranscriptEntrySchema = z.object({
+  type: z.enum(['command', 'output', 'error', 'status']),
+  timestamp: z.string(),
+  text: z.string(),
+});
+export type TerminalTranscriptEntry = z.infer<typeof terminalTranscriptEntrySchema>;
+
+export const terminalTranscriptInputSchema = z.object({
+  session_id: z.string().min(1),
+  max_entries: z.number().int().positive().max(500).default(100),
+  after_sequence: z.number().int().nonnegative().default(0),
+  include_output: z.boolean().default(true),
+});
+export type TerminalTranscriptInput = z.infer<typeof terminalTranscriptInputSchema>;
+
+export const terminalTranscriptOutputSchema = z.object({
+  session_id: z.string(),
+  entries: z.array(terminalTranscriptEntrySchema),
+  next_sequence: z.number().int().nonnegative(),
+  has_more: z.boolean(),
+});
+export type TerminalTranscriptOutput = z.infer<typeof terminalTranscriptOutputSchema>;
+
 export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
     type: z.literal('request'),

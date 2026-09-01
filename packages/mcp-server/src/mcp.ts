@@ -23,6 +23,8 @@ import {
   terminalWriteFileOutputSchema,
   terminalSearchFilesInputSchema,
   terminalSearchFilesOutputSchema,
+  terminalTranscriptInputSchema,
+  terminalTranscriptOutputSchema,
 } from '@terminal/protocol';
 import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
@@ -234,6 +236,21 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(() => deps.service.close(identityFromContext(ctx), input.session_id)),
+  );
+
+  server.registerTool(
+    'terminal_session_transcript',
+    {
+      title: 'Get session transcript',
+      description: 'Return a structured chronological transcript of a terminal session: commands sent, terminal output, errors, and status changes. Use this to understand what happened in a session without re-reading raw terminal output. Supports pagination via after_sequence for long sessions. Set include_output to false to get only commands and status events.',
+      inputSchema: terminalTranscriptInputSchema,
+      outputSchema: terminalTranscriptOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.transcript(identityFromContext(ctx), input);
+      return terminalTranscriptOutputSchema.parse(result);
+    }),
   );
 
   // --- File operation tools ---

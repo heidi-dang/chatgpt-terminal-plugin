@@ -186,6 +186,56 @@ export class AgentGateway {
     };
   }
 
+  getTranscript(userId: string, sessionId: string, maxEntries: number, afterSequence: number, includeOutput: boolean): { entries: Array<{ type: string; timestamp: string; text: string }>; next_sequence: number; has_more: boolean } {
+    const record = this.requireSession(userId, sessionId);
+    const entries: Array<{ type: string; timestamp: string; text: string }> = [];
+    let lastSequence = afterSequence;
+
+    for (let i = record.eventHead; i < record.events.length && entries.length < maxEntries; i += 1) {
+      const event = record.events[i];
+      if (!event || event.sequence <= afterSequence) continue;
+      lastSequence = event.sequence;
+
+      switch (event.event_type) {
+        case 'command.input':
+          entries.push({
+            type: 'command',
+            timestamp: event.timestamp,
+            text: typeof event.data.text === 'string' ? event.data.text : '',
+          });
+          break;
+        case 'terminal.stdout':
+        case 'terminal.stderr':
+          if (includeOutput) {
+            entries.push({
+              type: event.event_type === 'terminal.stderr' ? 'error' : 'output',
+              timestamp: event.timestamp,
+              text: typeof event.data.text === 'string' ? event.data.text.slice(0, 4096) : '',
+            });
+          }
+          break;
+        case 'session.started':
+        case 'session.closed':
+        case 'process.exit':
+        case 'cwd.changed':
+        case 'agent.connected':
+        case 'agent.disconnected':
+          entries.push({
+            type: 'status',
+            timestamp: event.timestamp,
+            text: event.event_type + (event.event_type === 'process.exit' && typeof event.data.exit_code === 'number' ? ` (exit ${event.data.exit_code})` : '') + (event.event_type === 'cwd.changed' && typeof event.data.cwd === 'string' ? ` → ${event.data.cwd}` : ''),
+          });
+          break;
+      }
+    }
+
+    return {
+      entries,
+      next_sequence: lastSequence,
+      has_more: lastSequence < record.latestSequence,
+    };
+  }
+
   // --- File operations ---
   // These dispatch file commands to the agent and return generic results.
 
