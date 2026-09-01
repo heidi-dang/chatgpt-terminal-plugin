@@ -66,7 +66,7 @@ export class AgentGateway {
   private readonly agents = new Map<string, AgentConnection>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, SessionRecord>();
-  private readonly eventEmitter = new EventEmitter();
+  private readonly eventEmitter = new EventEmitter().setMaxListeners(0);
   private readonly usedAuthNonces = new Map<string, number>();
   private readonly sessionSweepTimer: NodeJS.Timeout;
 
@@ -541,8 +541,9 @@ export class AgentGateway {
       const duplicateIndex = record.eventHead + event.sequence - record.earliestSequence;
       const duplicate = record.events[duplicateIndex];
       if (duplicate?.sequence === event.sequence) {
-        // Compare by event_id (O(1) string compare) instead of full JSON serialization
-        if (duplicate.event_id !== event.event_id) {
+        // Replays are uncommon; preserve full content-integrity validation rather than
+        // trusting event_id alone as if it were a content hash.
+        if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event sequence was replayed with different content.');
         }
         return;
@@ -554,10 +555,9 @@ export class AgentGateway {
     }
     record.ownerId = ownerId;
     record.agentId = agentId;
-    // Fast-path byte estimation for terminal output events (most common):
-    // measure only the text payload + fixed structural overhead to avoid full JSON.stringify
-    const textPayload = (event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') ? event.data.text : undefined;
-    const eventBytes = typeof textPayload === 'string' ? Buffer.byteLength(textPayload) + 150 : Buffer.byteLength(JSON.stringify(event));
+    // Keep retained-byte accounting exact. Terminal output commonly contains ANSI/control
+    // bytes that expand when JSON-escaped, so raw text length can materially undercount memory.
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
     record.events.push(event);
     record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;

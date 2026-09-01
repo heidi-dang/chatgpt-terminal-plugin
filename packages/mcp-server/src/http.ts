@@ -4,7 +4,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { createMcpExpressApp, getOAuthProtectedResourceMetadataUrl, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
-import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema } from '@terminal/protocol';
+import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema, type TerminalEvent } from '@terminal/protocol';
 import { createOAuthMetadata, createTokenVerifier } from './auth.js';
 import { AuditLogger } from './audit.js';
 import type { ServerConfig } from './config.js';
@@ -134,7 +134,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     }
   });
 
-  app.get('/terminal-ui/reload', (_req, res) => {
+  app.get('/terminal-ui/reload', (req, res) => {
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
@@ -150,12 +150,18 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
     }, 15_000);
     keepAlive.unref();
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(keepAlive);
       uiReloadClients.delete(res);
+      if (!res.writableEnded && !res.destroyed) res.end();
     };
     res.once('close', cleanup);
     res.once('error', cleanup);
+    req.once('close', cleanup);
+    req.once('error', cleanup);
   });
 
   app.post(config.agentEnrollmentPath, enrollmentRateLimiter, async (req, res) => {
@@ -325,7 +331,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       for (let index = record.eventHead; index < record.events.length; index += 1) {
         const event = record.events[index];
         if (event && event.sequence > cursor && event.sequence > lastSequence) {
-          replayChunks.push(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+          replayChunks.push(formatSse(event.sequence, event));
           lastSequence = event.sequence;
         }
       }
@@ -349,9 +355,12 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearInterval(keepAlive);
         clearTimeout(expiryTimer);
         unsubscribe();
+        if (!res.writableEnded && !res.destroyed) res.end();
       };
       res.once('close', cleanup);
       res.once('error', cleanup);
+      req.once('close', cleanup);
+      req.once('error', cleanup);
     } catch (error) {
       if (error instanceof TerminalProtocolError) {
         res.status(error.code === 'STREAM_TOKEN_EXPIRED' ? 401 : error.code === 'PERMISSION_DENIED' ? 403 : 409).json(error.toPayload());
@@ -444,8 +453,12 @@ function isAllowedUpgradeHost(hostHeader: string | undefined, allowedHosts: read
   return allowedHosts.some((allowed) => allowed.toLowerCase() === hostname);
 }
 
-function writeSse(res: Response, sequence: number, event: unknown): void {
-  res.write(`id: ${sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+function formatSse(sequence: number, event: TerminalEvent): string {
+  return `id: ${sequence}\ndata: {"sequence":${sequence},"event_type":${JSON.stringify(event.event_type)},"data":${JSON.stringify(event.data)}}\n\n`;
+}
+
+function writeSse(res: Response, sequence: number, event: TerminalEvent): void {
+  res.write(formatSse(sequence, event));
 }
 
 export interface RateLimitBucket {

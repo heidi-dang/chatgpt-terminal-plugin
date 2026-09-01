@@ -31,21 +31,6 @@ interface TerminalEvent {
   data: Record<string, unknown>;
 }
 
-interface HotReloadBootstrap {
-  viewState: TerminalViewState | null;
-  streamMeta: TerminalStreamMeta | null;
-  lastSequence: number;
-}
-
-declare global {
-  interface Window {
-    __TERMINAL_HOT_BOOTSTRAP__?: HotReloadBootstrap;
-  }
-}
-
-const hotBootstrap = window.__TERMINAL_HOT_BOOTSTRAP__;
-delete window.__TERMINAL_HOT_BOOTSTRAP__;
-
 export function parseViewState(result: CallToolResult | null): TerminalViewState | null {
   if (!result?.structuredContent || typeof result.structuredContent !== 'object') return null;
   const value = result.structuredContent as Record<string, unknown>;
@@ -117,8 +102,8 @@ function terminalErrorCode(result: CallToolResult): string | undefined {
 
 export function TerminalApp(): React.JSX.Element {
   const [toolResult, setToolResult] = useState<CallToolResult | null>(null);
-  const [viewState, setViewState] = useState<TerminalViewState | null>(hotBootstrap?.viewState ?? null);
-  const [streamOverride, setStreamOverride] = useState<TerminalStreamMeta | null>(hotBootstrap?.streamMeta ?? null);
+  const [viewState, setViewState] = useState<TerminalViewState | null>(null);
+  const [streamOverride, setStreamOverride] = useState<TerminalStreamMeta | null>(null);
   const [hostContext, setHostContext] = useState<McpUiHostContext>();
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'reconnecting' | 'offline'>('connecting');
   const terminalHostRef = useRef<HTMLDivElement>(null);
@@ -126,7 +111,7 @@ export function TerminalApp(): React.JSX.Element {
   const fitAddonRef = useRef<FitAddon | undefined>(undefined);
   const eventSourceRef = useRef<EventSource | undefined>(undefined);
   const hotReloadSourceRef = useRef<EventSource | undefined>(undefined);
-  const lastSequenceRef = useRef(hotBootstrap?.lastSequence ?? hotBootstrap?.viewState?.cursor ?? 0);
+  const lastSequenceRef = useRef(0);
   const refreshInFlightRef = useRef(false);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const reconnectAttemptRef = useRef(0);
@@ -134,10 +119,9 @@ export function TerminalApp(): React.JSX.Element {
   const fitFrameRef = useRef<number | undefined>(undefined);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
   const viewStateRef = useRef<TerminalViewState | null>(viewState);
-  const streamMetaRef = useRef<TerminalStreamMeta | null>(streamOverride);
   const outputQueueRef = useRef('');
   const outputFrameRef = useRef<number | undefined>(undefined);
-  const hotReloadingRef = useRef(false);
+  const hotReloadVersionRef = useRef<string | undefined>(undefined);
   const initialStreamMeta = useMemo(() => parseStreamMeta(toolResult), [toolResult]);
   const streamMeta = streamOverride ?? initialStreamMeta;
 
@@ -207,7 +191,7 @@ export function TerminalApp(): React.JSX.Element {
     // Exponential backoff with ±25% jitter to avoid synchronized reconnect storms
     const base = Math.min(1000 * 2 ** reconnectAttemptRef.current, 15_000);
     const jitter = base * 0.25 * (2 * Math.random() - 1);
-    const delayMs = Math.max(500, Math.round(base + jitter));
+    const delayMs = Math.min(15_000, Math.max(500, Math.round(base + jitter)));
     reconnectAttemptRef.current += 1;
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = undefined;
@@ -272,10 +256,6 @@ export function TerminalApp(): React.JSX.Element {
       setStreamState('offline');
     }
   }, [viewState]);
-
-  useEffect(() => {
-    streamMetaRef.current = streamMeta;
-  }, [streamMeta]);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -344,9 +324,7 @@ export function TerminalApp(): React.JSX.Element {
 
   useEffect(() => {
     if (!viewState) return;
-    if (!hotBootstrap || hotBootstrap.viewState?.session_id !== viewState.session_id) {
-      lastSequenceRef.current = viewState.cursor;
-    }
+    lastSequenceRef.current = viewState.cursor;
     lastResizeRef.current = undefined;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -383,10 +361,14 @@ export function TerminalApp(): React.JSX.Element {
     };
     source.onerror = () => {
       if (eventSourceRef.current !== source) return;
-      source.close();
-      eventSourceRef.current = undefined;
-      setStreamState('reconnecting');
-      refreshStream(true);
+      if (source.readyState === EventSource.CLOSED) {
+        source.close();
+        eventSourceRef.current = undefined;
+        setStreamState('reconnecting');
+        refreshStream(true);
+      } else {
+        setStreamState('reconnecting');
+      }
     };
     source.onmessage = (message) => {
       if (eventSourceRef.current !== source) return;
@@ -448,40 +430,33 @@ export function TerminalApp(): React.JSX.Element {
     const source = new EventSource(`${origin}/terminal-ui/reload`);
     hotReloadSourceRef.current = source;
     source.onmessage = (message) => {
-      if (hotReloadSourceRef.current !== source || hotReloadingRef.current) return;
+      if (hotReloadSourceRef.current !== source) return;
       try {
-        const payload = JSON.parse(String(message.data)) as { version?: unknown };
-        if (typeof payload.version !== 'string') return;
-        const currentVersion = document.querySelector<HTMLMetaElement>('meta[name="terminal-ui-version"]')?.content;
-        if (currentVersion === payload.version) return;
-        hotReloadingRef.current = true;
-        const runtimeUrl = `${origin}/terminal-ui/runtime.html?v=${encodeURIComponent(payload.version)}`;
-        void fetch(runtimeUrl, { cache: 'no-store' }).then(async (response) => {
-          if (!response.ok) throw new Error(`UI runtime reload failed with HTTP ${response.status}.`);
-          let html = await response.text();
-          const bootstrap: HotReloadBootstrap = {
-            viewState: viewStateRef.current,
-            streamMeta: streamMetaRef.current,
-            lastSequence: lastSequenceRef.current,
-          };
-          const serialized = JSON.stringify(bootstrap).replaceAll('<', '\\u003c');
-          const closeScriptTag = `${String.fromCharCode(60, 47)}script>`;
-          html = html.replace('</head>', `<script>window.__TERMINAL_HOT_BOOTSTRAP__=${serialized};${closeScriptTag}</head>`);
-          flushTerminalOutput();
-          source.close();
-          document.open();
-          document.write(html);
-          document.close();
+        const payload = JSON.parse(String(message.data)) as { version?: unknown; kind?: unknown };
+        if (payload.kind !== 'styles' || typeof payload.version !== 'string') return;
+        if (hotReloadVersionRef.current === payload.version) return;
+        hotReloadVersionRef.current = payload.version;
+        const styleUrl = `${origin}/terminal-ui/styles.css?v=${encodeURIComponent(payload.version)}`;
+        void fetch(styleUrl, { cache: 'no-store' }).then(async (response) => {
+          if (!response.ok) throw new Error(`UI stylesheet reload failed with HTTP ${response.status}.`);
+          const css = await response.text();
+          let liveStyles = document.querySelector<HTMLStyleElement>('#terminal-live-styles');
+          if (!liveStyles) {
+            liveStyles = document.createElement('style');
+            liveStyles.id = 'terminal-live-styles';
+            document.head.appendChild(liveStyles);
+          }
+          liveStyles.textContent = css;
         }).catch((reloadError) => {
-          hotReloadingRef.current = false;
-          console.error('[terminal-app] hot reload failed', reloadError);
+          if (hotReloadVersionRef.current === payload.version) hotReloadVersionRef.current = undefined;
+          console.error('[terminal-app] stylesheet hot reload failed', reloadError);
         });
       } catch (reloadError) {
         console.error('[terminal-app] invalid hot reload event', reloadError);
       }
     };
     source.onerror = () => {
-      // EventSource reconnects automatically; UI hot reload must never affect the PTY SSE stream.
+      // EventSource reconnects automatically; stylesheet reload never replaces the app document.
     };
     return () => source.close();
   }, [streamMeta?.url]);
