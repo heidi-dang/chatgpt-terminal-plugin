@@ -238,6 +238,7 @@ export interface RedisClientLike {
   sMembers(key: string): Promise<string[]>;
   expire(key: string, seconds: number): Promise<unknown>;
   publish(channel: string, message: string): Promise<unknown>;
+  eval?(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
   duplicate(): RedisClientLike;
   subscribe(channel: string, listener: (message: string, channel: string) => void): Promise<void>;
   unsubscribe(channel: string): Promise<void>;
@@ -311,19 +312,32 @@ export class RedisLiveStore implements LiveStore {
 
   async putSession(sessionId: string, record: SharedSessionRecord): Promise<void> {
     const key = sessionKey(sessionId);
-    const previousRaw = await this.client.get(key);
-    const previous = previousRaw ? safeParseJson<SharedSessionRecord>(previousRaw) : undefined;
-    const merged = mergeSessionRecords(previous, record);
+    const payload = JSON.stringify(record);
+    const ttl = String(this.ttlSeconds);
 
-    if (previous?.ownerId && previous.ownerId !== merged.ownerId) {
-      await this.client.sRem(ownerSessionsKey(previous.ownerId), sessionId);
-    }
-
-    // Monotonic write: refuse to clobber a concurrent higher sequence that appeared after read.
-    if (previous && merged.latestSequence < previous.latestSequence) {
+    // Atomic CAS on latestSequence via Lua so concurrent writers cannot clobber a higher cursor.
+    if (typeof this.client.eval === 'function') {
+      const result = await this.client.eval(PUT_SESSION_LUA, {
+        keys: [key],
+        arguments: [payload, ttl],
+      });
+      const storedRaw = typeof result === 'string' ? result : payload;
+      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? record;
+      if (stored.ownerId) {
+        await this.client.sAdd(ownerSessionsKey(stored.ownerId), sessionId);
+        await this.client.expire(ownerSessionsKey(stored.ownerId), this.ttlSeconds);
+      }
       return;
     }
 
+    // Fallback without EVAL (test doubles / restricted Redis).
+    const previousRaw = await this.client.get(key);
+    const previous = previousRaw ? safeParseJson<SharedSessionRecord>(previousRaw) : undefined;
+    const merged = mergeSessionRecords(previous, record);
+    if (previous?.ownerId && previous.ownerId !== merged.ownerId) {
+      await this.client.sRem(ownerSessionsKey(previous.ownerId), sessionId);
+    }
+    if (previous && merged.latestSequence < previous.latestSequence) return;
     await this.client.set(key, JSON.stringify(merged), { EX: this.ttlSeconds });
     if (merged.ownerId) {
       await this.client.sAdd(ownerSessionsKey(merged.ownerId), sessionId);
@@ -367,15 +381,24 @@ export class RedisLiveStore implements LiveStore {
   }
 
   async clearAgentPresence(agentId: string, onlyIfInstance?: string): Promise<void> {
+    const key = agentKey(agentId);
+    if (typeof this.client.eval === 'function') {
+      const ownerHint = (await this.getAgentPresence(agentId))?.ownerId ?? '';
+      const ownerKey = ownerHint ? ownerAgentsKey(ownerHint) : `${PREFIX}:owner:_none:agents`;
+      await this.client.eval(CLEAR_PRESENCE_LUA, {
+        keys: [key, ownerKey],
+        arguments: [agentId, onlyIfInstance ?? ''],
+      });
+      return;
+    }
     const current = await this.getAgentPresence(agentId);
     if (!current) return;
     if (onlyIfInstance && current.instanceId !== onlyIfInstance) return;
-    // Re-check after read to reduce TOCTOU races (best-effort without Lua).
     const again = await this.getAgentPresence(agentId);
     if (!again) return;
     if (onlyIfInstance && again.instanceId !== onlyIfInstance) return;
     if (again.lastSeenMs !== current.lastSeenMs) return;
-    await this.client.del(agentKey(agentId));
+    await this.client.del(key);
     await this.client.sRem(ownerAgentsKey(current.ownerId), agentId);
   }
 
@@ -553,12 +576,59 @@ export class RedisLiveStore implements LiveStore {
   }
 }
 
+/** Lua: set session only if incoming.latestSequence >= current.latestSequence (or key missing). */
+const PUT_SESSION_LUA = `
+local key = KEYS[1]
+local incoming = ARGV[1]
+local ttl = tonumber(ARGV[2])
+local current = redis.call('GET', key)
+if current then
+  local curSeq = tonumber(string.match(current, '"latestSequence":(%d+)')) or 0
+  local incSeq = tonumber(string.match(incoming, '"latestSequence":(%d+)')) or 0
+  if incSeq < curSeq then
+    return current
+  end
+end
+redis.call('SET', key, incoming, 'EX', ttl)
+return incoming
+`;
+
+/** Lua: delete presence only if instance matches (when provided). */
+const CLEAR_PRESENCE_LUA = `
+local key = KEYS[1]
+local ownerKey = KEYS[2]
+local agentId = ARGV[1]
+local onlyInstance = ARGV[2]
+local current = redis.call('GET', key)
+if not current then return 0 end
+if onlyInstance ~= '' then
+  local inst = string.match(current, '"instanceId":"([^"]+)"') or ''
+  if inst ~= onlyInstance then return 0 end
+end
+redis.call('DEL', key)
+redis.call('SREM', ownerKey, agentId)
+return 1
+`;
+
 function defaultCreateRedisClient(url: string): RedisClientLike {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const redis = require('redis') as {
-    createClient: (opts: { url: string }) => RedisClientLike;
+    createClient: (opts: {
+      url: string;
+      socket?: {
+        reconnectStrategy?: (retries: number) => number | Error;
+        connectTimeout?: number;
+      };
+    }) => RedisClientLike;
   };
-  return redis.createClient({ url });
+  return redis.createClient({
+    url,
+    socket: {
+      connectTimeout: 10_000,
+      // Exponential backoff capped at 5s; never give up while process lives.
+      reconnectStrategy: (retries) => Math.min(100 * 2 ** Math.min(retries, 6), 5_000),
+    },
+  });
 }
 
 export async function createLiveStore(options: {

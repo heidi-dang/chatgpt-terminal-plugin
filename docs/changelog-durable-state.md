@@ -106,7 +106,14 @@ Dependency: `redis` on `@terminal/mcp-server` (`pnpm install` after upgrade).
 - **Backups:** back up `devices.sqlite` after a clean shutdown (include WAL/SHM if the process is still running).
 - **Secrets:** registry and Redis should not be exposed on the public internet; bind Redis to private network/TLS as appropriate for your environment.
 
-## 5. Non-goals (this change)
+## 5. Consistency & resilience notes
+
+- **Session CAS:** Redis `putSession` uses a Lua script so a lower `latestSequence` cannot overwrite a higher one under concurrent writers.
+- **Presence clear CAS:** `clearAgentPresence(agentId, instanceId)` uses Lua so a stale disconnect cannot wipe a newer owner instance.
+- **Redis reconnect:** node-redis socket `reconnectStrategy` exponential backoff (cap 5s), `connectTimeout` 10s. Startup still **fails closed** if the initial connect fails when `REDIS_URL` is set.
+- **SQLite:** uses experimental Node `node:sqlite`; runtime requires Node ≥ 22.5. Pin Node major in production images.
+
+## 6. Non-goals (this change)
 
 - Kernel-level shell sandboxing for PTY commands
 - Moving active WebSocket connections between processes without reconnect

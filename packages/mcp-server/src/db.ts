@@ -5,8 +5,23 @@ import { DatabaseSync } from 'node:sqlite';
 /**
  * Embedded SQLite is the durable device-registry store for this MCP server:
  * zero network hop, WAL for concurrent readers, synchronous API for transactions.
+ *
+ * Note: Node's built-in `node:sqlite` (`DatabaseSync`) is still marked experimental.
+ * We intentionally use it to avoid native addon build complexity. Require Node ≥ 22.5
+ * (where the module shipped). If the API changes upstream, pin the Node major in deploy.
  */
 export type TerminalDatabase = DatabaseSync;
+
+export function assertSqliteRuntimeSupport(): void {
+  const major = Number(process.versions.node.split('.')[0] ?? 0);
+  const minor = Number(process.versions.node.split('.')[1] ?? 0);
+  if (major < 22 || (major === 22 && minor < 5)) {
+    throw new Error(
+      `Device registry SQLite requires Node.js >= 22.5 (found ${process.versions.node}). ` +
+        'node:sqlite is experimental; pin a supported Node release in production.',
+    );
+  }
+}
 
 const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -48,6 +63,7 @@ export function resolveSqlitePath(registryPath: string): string {
 }
 
 export function openTerminalDatabase(dbPath: string): TerminalDatabase {
+  assertSqliteRuntimeSupport();
   mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA_SQL);
