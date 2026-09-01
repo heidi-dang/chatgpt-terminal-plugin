@@ -111,6 +111,23 @@ export function closeTerminalDatabase(db: TerminalDatabase | undefined): void {
   checkpointAndClose(db);
 }
 
+/** node:sqlite has no better-sqlite3-style .transaction(); serialize with BEGIN IMMEDIATE. */
+export function runImmediateTransaction<T>(db: TerminalDatabase, fn: () => T): T {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore rollback failure
+    }
+    throw error;
+  }
+}
+
 function hardenFileModes(dbPath: string): void {
   try {
     chmodSync(dbPath, 0o600);

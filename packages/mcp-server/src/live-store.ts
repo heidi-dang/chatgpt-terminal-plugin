@@ -338,41 +338,44 @@ export class RedisLiveStore implements LiveStore {
   async getSession(sessionId: string): Promise<SharedSessionRecord | undefined> {
     const raw = await this.client.get(sessionKey(sessionId));
     if (!raw) return undefined;
-    return safeParseJson<SharedSessionRecord>(raw);
+    const parsed = safeParseJson<SharedSessionRecord>(raw);
+    return parsed ? cloneSession(parsed) : undefined;
   }
 
   async putSession(sessionId: string, record: SharedSessionRecord): Promise<void> {
     const key = sessionKey(sessionId);
-    const payload = JSON.stringify(record);
+    const previous = await this.getSession(sessionId);
+    const merged = mergeSessionRecords(previous, record);
+    const payload = JSON.stringify(merged);
     const ttl = String(this.ttlSeconds);
 
-    // Atomic CAS on latestSequence via Lua so concurrent writers cannot clobber a higher cursor.
-    if (typeof this.client.eval === 'function') {
+    if (this.client.eval) {
       const result = await this.client.eval(PUT_SESSION_LUA, {
         keys: [key],
         arguments: [payload, ttl],
       });
       const storedRaw = typeof result === 'string' ? result : payload;
-      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? record;
-      if (stored.ownerId) {
-        await this.client.sAdd(ownerSessionsKey(stored.ownerId), sessionId);
-        await this.client.expire(ownerSessionsKey(stored.ownerId), this.ttlSeconds);
-      }
+      const stored = safeParseJson<SharedSessionRecord>(storedRaw) ?? merged;
+      await this.reindexSessionOwner(sessionId, previous?.ownerId, stored.ownerId);
       return;
     }
 
-    // Fallback without EVAL (test doubles / restricted Redis).
-    const previousRaw = await this.client.get(key);
-    const previous = previousRaw ? safeParseJson<SharedSessionRecord>(previousRaw) : undefined;
-    const merged = mergeSessionRecords(previous, record);
-    if (previous?.ownerId && previous.ownerId !== merged.ownerId) {
-      await this.client.sRem(ownerSessionsKey(previous.ownerId), sessionId);
-    }
     if (previous && merged.latestSequence < previous.latestSequence) return;
-    await this.client.set(key, JSON.stringify(merged), { EX: this.ttlSeconds });
-    if (merged.ownerId) {
-      await this.client.sAdd(ownerSessionsKey(merged.ownerId), sessionId);
-      await this.client.expire(ownerSessionsKey(merged.ownerId), this.ttlSeconds);
+    await this.client.set(key, payload, { EX: this.ttlSeconds });
+    await this.reindexSessionOwner(sessionId, previous?.ownerId, merged.ownerId);
+  }
+
+  private async reindexSessionOwner(
+    sessionId: string,
+    previousOwnerId: string | undefined,
+    nextOwnerId: string | undefined,
+  ): Promise<void> {
+    if (previousOwnerId && previousOwnerId !== nextOwnerId) {
+      await this.client.sRem(ownerSessionsKey(previousOwnerId), sessionId);
+    }
+    if (nextOwnerId) {
+      await this.client.sAdd(ownerSessionsKey(nextOwnerId), sessionId);
+      await this.client.expire(ownerSessionsKey(nextOwnerId), this.ttlSeconds);
     }
   }
 
@@ -398,27 +401,22 @@ export class RedisLiveStore implements LiveStore {
     const key = agentKey(agentId);
     const payload = JSON.stringify(presence);
     const ttl = String(this.ttlSeconds);
-    if (typeof this.client.eval === 'function') {
-      const previous = await this.getAgentPresence(agentId);
+    const previous = await this.getAgentPresence(agentId);
+
+    if (this.client.eval) {
       const result = await this.client.eval(SET_PRESENCE_LUA, {
         keys: [key],
         arguments: [payload, ttl, String(presence.lastSeenMs)],
       });
-      // result is 0 when rejected as stale, 1 when written
       if (result === 0 || result === '0') return;
-      if (previous && previous.ownerId !== presence.ownerId) {
-        await this.client.sRem(ownerAgentsKey(previous.ownerId), agentId);
-      }
-      await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
-      await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
-      return;
+    } else {
+      if (previous && previous.lastSeenMs > presence.lastSeenMs) return;
+      await this.client.set(key, payload, { EX: this.ttlSeconds });
     }
-    const previous = await this.getAgentPresence(agentId);
-    if (previous && previous.lastSeenMs > presence.lastSeenMs) return;
+
     if (previous && previous.ownerId !== presence.ownerId) {
       await this.client.sRem(ownerAgentsKey(previous.ownerId), agentId);
     }
-    await this.client.set(key, payload, { EX: this.ttlSeconds });
     await this.client.sAdd(ownerAgentsKey(presence.ownerId), agentId);
     await this.client.expire(ownerAgentsKey(presence.ownerId), this.ttlSeconds);
   }
@@ -431,18 +429,18 @@ export class RedisLiveStore implements LiveStore {
 
   async clearAgentPresence(agentId: string, onlyIfInstance?: string): Promise<void> {
     const key = agentKey(agentId);
-    if (typeof this.client.eval === 'function') {
-      const ownerHint = (await this.getAgentPresence(agentId))?.ownerId ?? '';
-      const ownerKey = ownerHint ? ownerAgentsKey(ownerHint) : `${PREFIX}:owner:_none:agents`;
+    const current = await this.getAgentPresence(agentId);
+    if (!current) return;
+    if (onlyIfInstance && current.instanceId !== onlyIfInstance) return;
+
+    if (this.client.eval) {
       await this.client.eval(CLEAR_PRESENCE_LUA, {
-        keys: [key, ownerKey],
+        keys: [key, ownerAgentsKey(current.ownerId)],
         arguments: [agentId, onlyIfInstance ?? ''],
       });
       return;
     }
-    const current = await this.getAgentPresence(agentId);
-    if (!current) return;
-    if (onlyIfInstance && current.instanceId !== onlyIfInstance) return;
+
     const again = await this.getAgentPresence(agentId);
     if (!again) return;
     if (onlyIfInstance && again.instanceId !== onlyIfInstance) return;
@@ -463,7 +461,8 @@ export class RedisLiveStore implements LiveStore {
   }
 
   async publishSessionEvent(sessionId: string, event: TerminalEvent): Promise<void> {
-    this.localEvents.emit(sessionNotifyChannel(sessionId), event);
+    // Single delivery path: Redis pub/sub fans out to every instance (including this one)
+    // via subscribeSessionEvents → localEvents. Emitting locally here would double-deliver.
     if (this.closed) return;
     await this.client.publish(sessionNotifyChannel(sessionId), JSON.stringify(event));
   }

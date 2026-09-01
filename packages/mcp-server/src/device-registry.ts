@@ -7,6 +7,7 @@ import {
   checkpointAndClose,
   openTerminalDatabase,
   resolveSqlitePath,
+  runImmediateTransaction,
   type TerminalDatabase,
 } from './db.js';
 
@@ -93,12 +94,10 @@ export class DeviceRegistry {
   }
 
   listByOwner(ownerId: string): DeviceRecord[] {
-    if (!this.db) {
+    if (!this.db || !this.stmts) {
       return [...this.memory.values()].filter((r) => r.owner_id === ownerId).map((r) => ({ ...r }));
     }
-    const rows = this.db
-      .prepare('SELECT * FROM devices WHERE owner_id = ? ORDER BY enrolled_at ASC')
-      .all(ownerId) as DeviceRow[];
+    const rows = this.stmts.listByOwner.all(ownerId) as DeviceRow[];
     return rows.map(rowToRecord);
   }
 
@@ -143,29 +142,22 @@ export class DeviceRegistry {
     };
 
     if (!this.db) return apply();
-
-    // Serialize concurrent enroll/rotate of the same device against SQLite.
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = apply();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      try {
-        this.db.exec('ROLLBACK');
-      } catch {
-        // ignore
-      }
-      throw error;
-    }
+    return runImmediateTransaction(this.db, apply);
   }
 
   async revoke(deviceId: string, presentedToken: string | undefined): Promise<void> {
     this.assertEnrollmentToken(presentedToken);
-    const current = this.readDevice(deviceId);
-    if (!current) return;
-    const now = new Date().toISOString();
-    this.writeDevice({ ...current, status: 'revoked', revoked_at: now, updated_at: now });
+    const apply = (): void => {
+      const current = this.readDevice(deviceId);
+      if (!current) return;
+      const now = new Date().toISOString();
+      this.writeDevice({ ...current, status: 'revoked', revoked_at: now, updated_at: now });
+    };
+    if (!this.db) {
+      apply();
+      return;
+    }
+    runImmediateTransaction(this.db, apply);
   }
 
   async markSeen(deviceId: string): Promise<void> {
@@ -213,15 +205,7 @@ export class DeviceRegistry {
       this.memory.set(record.device_id, { ...record });
       return;
     }
-    // Optimistic concurrency on key_version for rotations: reject stale writers.
-    const existing = this.stmts.getById.get(record.device_id) as DeviceRow | undefined;
-    if (existing && record.key_version <= existing.key_version && record.status === 'active' && existing.status === 'active') {
-      // Allow non-version-advancing updates (markSeen path is separate; revoke advances status).
-      // Full active rewrite must advance key_version except when only timestamps change with same key.
-      if (record.public_key !== existing.public_key) {
-        throw new TerminalProtocolError('PERMISSION_DENIED', 'Stale device key rotation rejected.');
-      }
-    }
+    // SQL WHERE on upsert enforces key_version monotonicity / revoke override.
     this.stmts.upsert.run(
       record.device_id,
       record.agent_id,
@@ -275,52 +259,24 @@ export class DeviceRegistry {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    // node:sqlite DatabaseSync has no better-sqlite3-style .transaction(); use explicit BEGIN/COMMIT.
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      if (parsed.version === 1) {
-        for (const record of parsed.devices) {
-          const agentId = legacyAgentId(record.device_id);
-          insert.run(
-            record.device_id,
-            agentId,
-            record.owner_id,
-            record.public_key,
-            record.display_name ?? null,
-            record.status,
-            record.key_version,
-            record.enrolled_at,
-            record.updated_at,
-            record.last_seen_at ?? null,
-            record.revoked_at ?? null,
-          );
-        }
-      } else {
-        for (const record of parsed.devices) {
-          insert.run(
-            record.device_id,
-            record.agent_id,
-            record.owner_id,
-            record.public_key,
-            record.display_name ?? null,
-            record.status,
-            record.key_version,
-            record.enrolled_at,
-            record.updated_at,
-            record.last_seen_at ?? null,
-            record.revoked_at ?? null,
-          );
-        }
+    runImmediateTransaction(this.db, () => {
+      for (const record of parsed.devices) {
+        const agentId = parsed.version === 1 ? legacyAgentId(record.device_id) : (record as DeviceRecord).agent_id;
+        insert.run(
+          record.device_id,
+          agentId,
+          record.owner_id,
+          record.public_key,
+          record.display_name ?? null,
+          record.status,
+          record.key_version,
+          record.enrolled_at,
+          record.updated_at,
+          record.last_seen_at ?? null,
+          record.revoked_at ?? null,
+        );
       }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      try {
-        this.db.exec('ROLLBACK');
-      } catch {
-        // ignore rollback failure
-      }
-      throw error;
-    }
+    });
 
     // Rewrite legacy JSON to version 2 for operators that still inspect the file,
     // then keep SQLite as the source of truth going forward.
@@ -362,6 +318,7 @@ function isMissingFile(error: unknown): boolean {
 
 type PreparedDeviceStatements = {
   getById: { get: (deviceId: string) => unknown };
+  listByOwner: { all: (ownerId: string) => unknown[] };
   upsert: { run: (...args: unknown[]) => unknown };
   markSeen: { run: (lastSeen: string, updated: string, deviceId: string) => unknown };
 };
@@ -369,6 +326,7 @@ type PreparedDeviceStatements = {
 function prepareStatements(db: TerminalDatabase): PreparedDeviceStatements {
   return {
     getById: db.prepare('SELECT * FROM devices WHERE device_id = ?'),
+    listByOwner: db.prepare('SELECT * FROM devices WHERE owner_id = ? ORDER BY enrolled_at ASC'),
     upsert: db.prepare(`
       INSERT INTO devices (
         device_id, agent_id, owner_id, public_key, display_name, status, key_version,
