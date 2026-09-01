@@ -112,6 +112,7 @@ AGENT_IDENTITY_PATH=<owner-only local path>
 ALLOWED_WORKSPACE_ROOTS=<comma-separated roots>
 EXECUTION_PROFILE=developer
 TERMINAL_LSP_SERVERS_JSON={}
+TERMINAL_TYPESCRIPT_NODE=<optional TypeScript-capable Node executable>
 ```
 
 For the first enrollment, additionally configure:

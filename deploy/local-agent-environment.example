@@ -29,3 +29,6 @@ TERMINAL_SWEEP_INTERVAL_MS=30000
 # Optional administrator-controlled LSP allowlist. Remote MCP callers can select only these IDs.
 # Example: {"typescript":{"command":"typescript-language-server","args":["--stdio"]}}
 TERMINAL_LSP_SERVERS_JSON={}
+
+# Optional Node executable used only for TypeScript code blocks. Set this when the service Node lacks --experimental-strip-types.
+TERMINAL_TYPESCRIPT_NODE=

@@ -304,11 +304,11 @@ export class TerminalService {
 
   async requestLsp(identity: RequestIdentity, rawInput: TerminalLspRequestArgs): Promise<LspRequestOutput> {
     const input = terminalLspRequestSchema.parse(rawInput);
-    await this.assertMutationAllowed(identity, 'terminal_lsp_request', { agent_id: input.agent_id, lsp_id: input.lsp_id, method: input.method });
+    await this.assertMutationAllowed(identity, 'terminal_lsp_request', { agent_id: input.agent_id, lsp_id: input.lsp_id, method: input.method, notification: input.notification ?? false });
     const output = await this.gateway.requestLsp(identity.userId, input, identity.executionProfile);
     await this.audit.record({
       action: 'terminal_lsp_request', ...auditIdentity(identity), agent_id: input.agent_id,
-      authorization: 'allow', input: { lsp_id: input.lsp_id, method: input.method },
+      authorization: 'allow', input: { lsp_id: input.lsp_id, method: input.method, notification: input.notification ?? false },
     });
     return output;
   }

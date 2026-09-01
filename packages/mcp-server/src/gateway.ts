@@ -343,7 +343,7 @@ export class AgentGateway {
 
   async requestLsp(userId: string, input: TerminalLspRequestArgs, executionProfile: ExecutionProfile): Promise<LspRequestOutput> {
     const connection = this.requireAgent(userId, input.agent_id);
-    const agentInput = { lsp_id: input.lsp_id, method: input.method, ...(input.params === undefined ? {} : { params: input.params }) };
+    const agentInput = { lsp_id: input.lsp_id, method: input.method, ...(input.notification === undefined ? {} : { notification: input.notification }), ...(input.params === undefined ? {} : { params: input.params }) };
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'lsp.request', user_id: userId,
       execution_profile: executionProfile, input: agentInput,

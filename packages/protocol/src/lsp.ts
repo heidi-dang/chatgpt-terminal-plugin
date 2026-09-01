@@ -21,6 +21,7 @@ export const terminalLspRequestSchema = z.object({
   agent_id: z.string().min(1),
   lsp_id: z.string().uuid(),
   method: z.string().min(1).max(256),
+  notification: z.boolean().optional(),
   params: z.unknown().optional(),
 });
 export type TerminalLspRequestArgs = z.infer<typeof terminalLspRequestSchema>;

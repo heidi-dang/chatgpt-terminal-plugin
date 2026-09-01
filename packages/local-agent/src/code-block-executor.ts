@@ -64,7 +64,7 @@ export class CodeBlockExecutor {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Execution identifier is already active.');
     }
 
-    const invocation = runtimeInvocation(input.runtime);
+    const invocation = runtimeInvocation(input.runtime, this.environment);
     const timeoutMs = Math.min(input.timeout_ms ?? this.defaultTimeoutMs, this.maxTimeoutMs);
     const tempDir = await mkdtemp(join(tmpdir(), 'chatgpt-terminal-code-'));
     const scriptPath = join(tempDir, `script${invocation.extension}`);
@@ -198,7 +198,7 @@ export class CodeBlockExecutor {
   }
 }
 
-function runtimeInvocation(runtime: CodeRuntime): RuntimeInvocation {
+function runtimeInvocation(runtime: CodeRuntime, environment: Readonly<Record<string, string>>): RuntimeInvocation {
   switch (runtime) {
     case 'bash':
       return { extension: '.sh', command: 'bash', args: (scriptPath) => [scriptPath] };
@@ -206,8 +206,10 @@ function runtimeInvocation(runtime: CodeRuntime): RuntimeInvocation {
       return { extension: '.py', command: 'python3', args: (scriptPath) => [scriptPath] };
     case 'node':
       return { extension: '.mjs', command: process.execPath, args: (scriptPath) => [scriptPath] };
-    case 'typescript':
-      return { extension: '.ts', command: process.execPath, args: (scriptPath) => ['--experimental-strip-types', scriptPath] };
+    case 'typescript': {
+      const configuredNode = environment.TERMINAL_TYPESCRIPT_NODE?.trim();
+      return { extension: '.ts', command: configuredNode || process.execPath, args: (scriptPath) => ['--experimental-strip-types', scriptPath] };
+    }
   }
 }
 

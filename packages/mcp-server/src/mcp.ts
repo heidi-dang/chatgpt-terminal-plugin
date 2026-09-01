@@ -458,7 +458,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_lsp_request',
     {
       title: 'Send LSP request',
-      description: 'Send one bounded JSON-RPC request to an owned LSP process on the selected local agent.',
+      description: 'Send one bounded JSON-RPC request or client notification to an owned LSP process on the selected local agent. Standard LSP notification methods are auto-detected; set notification=true for custom notifications.',
       inputSchema: terminalLspRequestSchema,
       outputSchema: lspRequestOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },

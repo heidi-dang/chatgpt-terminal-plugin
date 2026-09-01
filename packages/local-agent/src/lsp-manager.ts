@@ -54,6 +54,13 @@ const DEFAULT_MAX_HEADER_BYTES = 16 * 1024;
 const DEFAULT_MAX_STDERR_BYTES = 256 * 1024;
 const DEFAULT_KILL_GRACE_MS = 1_000;
 
+const STANDARD_LSP_CLIENT_NOTIFICATIONS = new Set([
+  'initialized', 'exit', '$/cancelRequest', '$/setTrace', 'window/workDoneProgress/cancel',
+  'workspace/didChangeConfiguration', 'workspace/didChangeWatchedFiles', 'workspace/didChangeWorkspaceFolders',
+  'textDocument/didOpen', 'textDocument/didChange', 'textDocument/willSave', 'textDocument/didSave', 'textDocument/didClose',
+  'notebookDocument/didOpen', 'notebookDocument/didChange', 'notebookDocument/didSave', 'notebookDocument/didClose',
+]);
+
 export class LspManager {
   private readonly processes = new Map<string, ManagedLsp>();
   private readonly servers: Readonly<Record<string, LspServerDefinition>>;
@@ -135,8 +142,14 @@ export class LspManager {
 
   request(userId: string, input: LspRequestInput): Promise<LspRequestOutput> {
     const managed = this.requireOwned(userId, input.lsp_id);
-    const requestId = managed.nextRequestId++;
+    const isNotification = input.notification === true || STANDARD_LSP_CLIENT_NOTIFICATIONS.has(input.method);
+    if (isNotification) {
+      const message: Record<string, unknown> = { jsonrpc: '2.0', method: input.method };
+      if (input.params !== undefined) message.params = input.params;
+      return this.writeMessage(managed, message).then(() => ({ lsp_id: managed.lspId }));
+    }
 
+    const requestId = managed.nextRequestId++;
     return new Promise<LspRequestOutput>((resolve, reject) => {
       const timer = setTimeout(() => {
         managed.pending.delete(requestId);

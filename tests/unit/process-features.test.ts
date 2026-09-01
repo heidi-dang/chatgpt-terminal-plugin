@@ -3,7 +3,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { terminalExecuteCodeBlockToolSchema } from '../../packages/protocol/src/index.js';
+import { terminalExecuteCodeBlockToolSchema, terminalLspRequestSchema } from '../../packages/protocol/src/index.js';
 import { CodeBlockExecutor } from '../../packages/local-agent/src/code-block-executor.js';
 import { cleanEnvironment, LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
 import { LspManager } from '../../packages/local-agent/src/lsp-manager.js';
@@ -72,6 +72,30 @@ describe('bounded code execution', () => {
     }, 'read-only')).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 
+  it('uses an administrator-configured TypeScript-capable Node runtime instead of process.execPath', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-typescript-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const wrapper = join(root, 'typescript-node');
+    const marker = join(root, 'typescript-node-used.txt');
+    await writeFile(wrapper, `#!/bin/sh
+printf '%s' used > "${marker}"
+exec "${process.execPath}" "$@"
+`, { mode: 0o700 });
+    const executor = new CodeBlockExecutor({
+      environment: { ...cleanEnvironment(), TERMINAL_TYPESCRIPT_NODE: wrapper },
+    });
+    cleanup.push(() => executor.shutdown());
+
+    const output = await executor.execute('user-a', {
+      execution_id: randomUUID(), runtime: 'typescript',
+      code: `const value: number = 42; console.log(value)`, timeout_ms: 2_000,
+    }, root);
+
+    expect(output.exit_code).toBe(0);
+    expect(output.stdout.trim()).toBe('42');
+    await expect(access(marker)).resolves.toBeUndefined();
+  });
+
   it('enforces execution timeouts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-code-timeout-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -116,6 +140,12 @@ describe('bounded code execution', () => {
 });
 
 describe('bounded LSP management', () => {
+  it('accepts explicit LSP notification intent in the public tool schema', () => {
+    expect(terminalLspRequestSchema.parse({
+      agent_id: 'agent-a', lsp_id: randomUUID(), method: 'custom/notify', notification: true, params: { value: 7 },
+    })).toMatchObject({ method: 'custom/notify', notification: true });
+  });
+
   it('rejects arbitrary or unconfigured LSP server IDs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-root-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -167,6 +197,45 @@ describe('bounded LSP management', () => {
     await expect(manager.request('user-a', { lsp_id: started.lsp_id, method: 'example/echo', params: { value: 42 } }))
       .resolves.toEqual({ lsp_id: started.lsp_id, result: { method: 'example/echo', value: 42 } });
     expect(manager.stop('user-a', started.lsp_id)).toEqual({ lsp_id: started.lsp_id, stopped: true });
+  });
+
+  it('sends standard and explicit LSP notifications without JSON-RPC ids', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-notify-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const marker = join(root, 'notifications.txt');
+    const script = await writeLspScript(root, `
+      const fs = require('node:fs'); let buffer = Buffer.alloc(0);
+      process.stdin.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); drain(); });
+      function drain() {
+        for (;;) {
+          const end = buffer.indexOf('\\r\\n\\r\\n'); if (end < 0) return;
+          const m = /Content-Length:\\s*(\\d+)/i.exec(buffer.subarray(0,end).toString('ascii')); if (!m) return;
+          const len = Number(m[1]); const start = end + 4; if (buffer.length < start + len) return;
+          const msg = JSON.parse(buffer.subarray(start,start+len).toString('utf8')); buffer = buffer.subarray(start+len);
+          fs.appendFileSync(process.argv[2], JSON.stringify({ method: msg.method, hasId: Object.hasOwn(msg, 'id') }) + '\\n');
+        }
+      }
+      setInterval(() => {}, 1000);
+    `);
+    const manager = new LspManager({ servers: { notify: { command: process.execPath, args: [script, marker] } }, environment: cleanEnvironment() });
+    cleanup.push(() => manager.stopAll());
+    const started = await manager.start('user-a', { server_id: 'notify', root }, root);
+
+    await expect(manager.request('user-a', { lsp_id: started.lsp_id, method: 'initialized', params: {} }))
+      .resolves.toEqual({ lsp_id: started.lsp_id });
+    await expect(manager.request('user-a', { lsp_id: started.lsp_id, method: 'custom/notify', notification: true, params: { value: 1 } }))
+      .resolves.toEqual({ lsp_id: started.lsp_id });
+    await waitUntil(async () => {
+      try {
+        const text = await (await import('node:fs/promises')).readFile(marker, 'utf8');
+        return text.trim().split('\n').length >= 2;
+      } catch { return false; }
+    });
+    const text = await (await import('node:fs/promises')).readFile(marker, 'utf8');
+    expect(text.trim().split('\n').map((line) => JSON.parse(line))).toEqual([
+      { method: 'initialized', hasId: false },
+      { method: 'custom/notify', hasId: false },
+    ]);
   });
 
   it('times out pending requests and sends LSP $/cancelRequest', async () => {
