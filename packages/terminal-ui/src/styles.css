@@ -146,6 +146,17 @@ body { background: transparent; color: #f0f6fc; }
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(86,211,100,0.32), rgba(56,139,253,0.25), transparent);
   pointer-events: none;
+  transition: background 0.3s ease;
+}
+/* State-reactive glow line: amber during reconnect, dimmed when offline */
+[data-state="reconnecting"] .terminal-frame::before,
+[data-state="connecting"] .terminal-frame::before {
+  background: linear-gradient(90deg, transparent, rgba(210,153,34,0.4), rgba(210,153,34,0.2), transparent);
+}
+[data-state="closed"] .terminal-frame::before,
+[data-state="exited"] .terminal-frame::before,
+[data-state="failed"] .terminal-frame::before {
+  background: linear-gradient(90deg, transparent, rgba(140,149,159,0.15), transparent);
 }
 
 .terminal-host {
@@ -154,7 +165,8 @@ body { background: transparent; color: #f0f6fc; }
   min-height: 350px;
 }
 .terminal-host .xterm { height: 100%; }
-.terminal-host .xterm-viewport { background: transparent !important; scrollbar-width: thin; scrollbar-color: rgba(139,148,158,0.25) transparent; }
+.terminal-host .xterm-viewport { background: transparent !important; scrollbar-width: thin; scrollbar-color: rgba(139,148,158,0.35) transparent; }
+.terminal-host .xterm-viewport:hover { scrollbar-color: rgba(139,148,158,0.5) transparent; }
 .terminal-host .xterm-screen { padding-bottom: 4px; }
 
 .terminal-footer {
