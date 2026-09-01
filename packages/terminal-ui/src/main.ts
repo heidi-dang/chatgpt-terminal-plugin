@@ -486,10 +486,18 @@ function terminalErrorCode(result: CallToolResult): string | undefined {
   return match?.[1];
 }
 
+type TerminalEventSource = EventSource & { t?: number };
+
+function closeTerminalSource(source?: TerminalEventSource): void {
+  if (!source) return;
+  window.clearTimeout(source.t);
+  source.close();
+}
+
 export class TerminalViewer {
   private viewState: TerminalViewState | null = null;
   private streamState: StreamState = 'connecting';
-  private eventSource: EventSource | undefined;
+  private eventSource: TerminalEventSource | undefined;
   private styleSource: EventSource | undefined;
   private lastSequence = 0;
   private refreshId = 0;
@@ -590,7 +598,7 @@ export class TerminalViewer {
       if (previousSession !== next.session_id) {
         this.refreshId += 1;
         this.refreshing = false;
-        this.eventSource?.close();
+        closeTerminalSource(this.eventSource);
         this.eventSource = undefined;
         this.clearReconnectTimer();
         this.clearRefreshTimer();
@@ -656,18 +664,18 @@ export class TerminalViewer {
   }
 
   private connectTerminalStream(meta: TerminalStreamMeta): void {
-    this.eventSource?.close();
+    closeTerminalSource(this.eventSource);
     if (!this.viewState || isFinalStatus(this.viewState.status)) return;
     if (!this.readFallbackActive) {
       this.transportMode = 'sse';
       this.streamState = 'connecting';
       this.renderState();
     }
-    const source = new EventSource(meta.url);
+    const source = new EventSource(meta.url) as TerminalEventSource;
     this.eventSource = source;
-    window.setTimeout(() => {
+    source.t = window.setTimeout(() => {
       if (this.eventSource !== source || this.streamState !== 'connecting' || isFinalStatus(this.viewState?.status)) return;
-      source.close();
+      closeTerminalSource(source);
       this.eventSource = undefined;
       this.startReadFallback();
       this.scheduleStreamReconnect();
@@ -675,6 +683,7 @@ export class TerminalViewer {
 
     source.onopen = () => {
       if (this.eventSource !== source) return;
+      window.clearTimeout(source.t);
       this.stopReadFallback();
       this.transportMode = 'sse';
       this.reconnectAttempt = 0;
@@ -683,7 +692,7 @@ export class TerminalViewer {
     };
     source.onerror = () => {
       if (this.eventSource !== source || isFinalStatus(this.viewState?.status)) return;
-      source.close();
+      closeTerminalSource(source);
       this.eventSource = undefined;
       this.startReadFallback();
       this.scheduleStreamReconnect();
@@ -695,7 +704,7 @@ export class TerminalViewer {
         this.acceptEvent(parseTerminalEvent(message.data), source);
       } catch (error) {
         console.error('[terminal-app] invalid SSE event', error);
-        source.close();
+        closeTerminalSource(source);
         if (this.eventSource === source) this.eventSource = undefined;
         this.startReadFallback();
         this.scheduleStreamReconnect();
@@ -709,7 +718,7 @@ export class TerminalViewer {
     if (sequenceState === 'gap') {
       console.error('[terminal-app] terminal sequence gap', { expected: this.lastSequence + 1, received: event.sequence });
       if (source) {
-        source.close();
+        closeTerminalSource(source);
         if (this.eventSource === source) this.eventSource = undefined;
         this.streamState = 'reconnecting';
         this.renderState();
@@ -744,7 +753,7 @@ export class TerminalViewer {
   private finishStream(): void {
     this.refreshId += 1;
     this.refreshing = false;
-    this.eventSource?.close();
+    closeTerminalSource(this.eventSource);
     this.eventSource = undefined;
     this.clearReconnectTimer();
     this.clearRefreshTimer();

@@ -445,6 +445,20 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
   });
 
+  it('clears a pending SSE connect timeout when the viewer is destroyed', async () => {
+    vi.useFakeTimers();
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    viewer.destroy();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('falls back to MCP reads when EventSource stays stuck connecting', async () => {
     vi.useFakeTimers();
     const app = createFakeApp();
