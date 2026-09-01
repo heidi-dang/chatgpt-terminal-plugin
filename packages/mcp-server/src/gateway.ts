@@ -64,7 +64,7 @@ export class AgentGateway {
   private readonly agents = new Map<string, AgentConnection>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, SessionRecord>();
-  private readonly eventEmitter = new EventEmitter();
+  private readonly eventEmitter = new EventEmitter().setMaxListeners(0);
   private readonly usedAuthNonces = new Map<string, number>();
   private readonly sessionSweepTimer: NodeJS.Timeout;
 
