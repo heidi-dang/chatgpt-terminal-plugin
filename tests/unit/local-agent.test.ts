@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -114,6 +114,49 @@ describe('LocalTerminalAgent', () => {
     expect(() => agent.start('user-test', {
       agent_id: 'agent-owner-full', cwd: escape, shell: 'bash', cols: 80, rows: 24,
     }, 'developer')).toThrowError(expect.objectContaining({ code: 'PATH_NOT_ALLOWED' }));
+  });
+
+  it('supports bounded workspace file tools and rejects path and symlink escapes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-files-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'terminal-files-outside-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(outside, { recursive: true, force: true }));
+    await writeTextFile(join(outside, 'secret.txt'), 'outside-secret\n', 'utf8');
+    await symlink(outside, join(root, 'escape'), 'dir');
+    await symlink(join(outside, 'secret.txt'), join(root, 'linked.txt'), 'file');
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-files', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-files', cwd: root, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+
+    const written = await agent.writeFile(started.session.session_id, 'nested/new.txt', 'alpha\nneedle\nomega\n', true);
+    expect(written.bytes_written).toBe(Buffer.byteLength('alpha\nneedle\nomega\n'));
+    expect(written.path).toBe('nested/new.txt');
+
+    const read = await agent.readFile(started.session.session_id, 'nested/new.txt', 64 * 1024);
+    expect(read).toMatchObject({ path: 'nested/new.txt', content: 'alpha\nneedle\nomega\n', truncated: false });
+
+    const listed = await agent.listFiles(started.session.session_id, '.', 100);
+    expect(listed.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'nested', type: 'directory' }),
+      expect.objectContaining({ name: 'escape', type: 'symlink' }),
+      expect.objectContaining({ name: 'linked.txt', type: 'symlink' }),
+    ]));
+
+    const searched = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
+    expect(searched.matches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: 'nested/new.txt', line: 2, text: 'needle' }),
+    ]));
+    expect(searched.files_searched).toBeGreaterThanOrEqual(1);
+
+    await expect(agent.readFile(started.session.session_id, 'escape/secret.txt', 1024)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.writeFile(started.session.session_id, 'escape/new.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.writeFile(started.session.session_id, join(outside, 'absolute.txt'), 'blocked', true)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.writeFile(started.session.session_id, 'linked.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
   });
 
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {

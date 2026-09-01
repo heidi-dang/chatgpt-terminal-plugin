@@ -149,7 +149,17 @@ export class TerminalService {
     const input = terminalSessionIdInputSchema.parse({ session_id: sessionId });
     const snapshot = await this.gateway.status(identity.userId, input.session_id);
     const agentOnline = this.gateway.listAgents(identity.userId).some((agent) => agent.agent_id === snapshot.session.agent_id && agent.online);
-    const output = terminalStatusOutputSchema.parse({ ...snapshot.session, agent_online: agentOnline, cursor: snapshot.cursor });
+    const metrics = this.gateway.getSessionMetrics(identity.userId, input.session_id);
+    const uptimeSeconds = (Date.now() - new Date(snapshot.session.created_at).getTime()) / 1000;
+    const output = terminalStatusOutputSchema.parse({
+      ...snapshot.session,
+      agent_online: agentOnline,
+      cursor: snapshot.cursor,
+      uptime_seconds: Math.max(0, Math.round(uptimeSeconds)),
+      total_events: metrics?.totalEvents ?? 0,
+      total_output_bytes: metrics?.totalOutputBytes ?? 0,
+      command_count: metrics?.commandCount ?? 0,
+    });
     await this.audit.record({
       action: 'terminal_status',
       ...auditIdentity(identity),
@@ -176,6 +186,65 @@ export class TerminalService {
       output_metadata: { status: snapshot.session.status },
     });
     return terminalMutationOutputSchema.parse({ session_id: input.session_id, status: snapshot.session.status, cursor: snapshot.cursor });
+  }
+
+  async transcript(identity: RequestIdentity, input: { session_id: string; max_entries: number; after_sequence: number; include_output: boolean }): Promise<{ session_id: string; entries: Array<{ type: string; timestamp: string; text: string }>; next_sequence: number; has_more: boolean }> {
+    const result = this.gateway.getTranscript(identity.userId, input.session_id, input.max_entries, input.after_sequence, input.include_output);
+    await this.audit.record({
+      action: 'terminal_transcript',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      output_metadata: { entries: result.entries.length, next_sequence: result.next_sequence },
+    });
+    return { session_id: input.session_id, ...result };
+  }
+
+  // --- File operations ---
+
+  async readFile(identity: RequestIdentity, input: { session_id: string; path: string; max_bytes: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_read',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.readFile(identity.userId, input.session_id, input.path, input.max_bytes);
+  }
+
+  async listFiles(identity: RequestIdentity, input: { session_id: string; path: string; max_entries: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_list',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.listFiles(identity.userId, input.session_id, input.path, input.max_entries);
+  }
+
+  async searchFiles(identity: RequestIdentity, input: { session_id: string; pattern: string; path: string; include?: string | undefined; max_results: number; context_lines: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_search',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { pattern: input.pattern, path: input.path },
+    });
+    return this.gateway.searchFiles(identity.userId, input.session_id, input.pattern, input.path, input.include, input.max_results, input.context_lines);
+  }
+
+  async writeFile(identity: RequestIdentity, input: { session_id: string; path: string; content: string; create_directories: boolean }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_write', { path: input.path });
+    await this.audit.record({
+      action: 'file_write',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path, bytes: Buffer.byteLength(input.content) },
+    });
+    return this.gateway.writeFile(identity.userId, input.session_id, input.path, input.content, input.create_directories);
   }
 
   private async assertMutationAllowed(identity: RequestIdentity, action: string, input?: unknown): Promise<void> {

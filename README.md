@@ -85,7 +85,12 @@ The local agent creates a persistent Ed25519 identity on first run. Its private 
 | `terminal_write` | Write terminal input/commands. |
 | `terminal_resize` | Resize the PTY. |
 | `terminal_interrupt` | Send Ctrl+C/SIGINT. |
-| `terminal_status` | Return session and agent connection state. |
+| `terminal_status` | Return session/agent state plus live session counters (uptime, events, output bytes, commands). |
+| `terminal_session_transcript` | Return a bounded structured transcript with sequence-based pagination. |
+| `terminal_read_file` | Read a bounded UTF-8 file within the active session workspace policy. |
+| `terminal_list_files` | List bounded directory entries without following symlink metadata. |
+| `terminal_write_file` | Write a bounded file through the agent workspace policy; denied for read-only identities. |
+| `terminal_search_files` | Search workspace text files with bounded results, file count, and per-file size. |
 | `terminal_stream_refresh` | Issue a new short-lived UI stream capability. |
 | `terminal_close` | Terminate and dispose the PTY. |
 
@@ -94,7 +99,7 @@ The local agent creates a persistent Ed25519 identity on first run. Its private 
 The server and agent enforce profiles independently.
 
 - `read-only` — MCP discovery/read/status operations only; PTY creation and mutations are rejected server-side. The agent also rejects terminal creation under this profile.
-- `developer` — PTY creation is allowed only when the requested launch directory canonically resolves under a configured workspace root. This is a launch-path boundary, not a kernel/filesystem sandbox; commands subsequently run with the agent OS user's normal permissions.
+- `developer` — PTY creation and direct file tools are restricted to canonically resolved configured workspace roots. Direct writes revalidate the canonical parent and reject symlink targets; terminal commands themselves still run with the agent OS user's normal permissions, so this is not a kernel/filesystem sandbox.
 - `owner-full` — terminal execution is allowed without the launch-root restriction on the agent. OS-level elevation remains subject to the local operating system and shell configuration.
 
 JWT access tokens may carry an `execution_profile` claim. If absent, the server uses `MCP_DEFAULT_EXECUTION_PROFILE`. The effective session profile is the more restrictive of the authenticated server profile and local agent profile.

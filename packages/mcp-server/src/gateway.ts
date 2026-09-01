@@ -10,13 +10,21 @@ import {
   gatewayAuthProofSchema,
   gatewayChallengePayload,
   gatewayMessageSchema,
+  terminalListFilesOutputSchema,
+  terminalReadFileOutputSchema,
   terminalReadOutputSchema,
+  terminalSearchFilesOutputSchema,
+  terminalWriteFileOutputSchema,
   type Agent,
   type AgentCommand,
   type ExecutionProfile,
   type AgentSessionSnapshot,
   type TerminalEvent,
+  type TerminalListFilesOutput,
+  type TerminalReadFileOutput,
   type TerminalReadOutput,
+  type TerminalSearchFilesOutput,
+  type TerminalWriteFileOutput,
   type TerminalSession,
   type TerminalStartInput,
 } from '@terminal/protocol';
@@ -32,9 +40,10 @@ interface AgentConnection {
 
 interface PendingRequest {
   agentId: string;
-  resolve: (snapshot: AgentSessionSnapshot) => void;
+  resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  parseResult?: ((raw: unknown) => unknown) | undefined;
 }
 
 export interface SessionRecord {
@@ -47,6 +56,10 @@ export interface SessionRecord {
   latestSequence: number;
   earliestSequence: number;
   retainedBytes: number;
+  // Session metrics — monotonically increasing counters
+  totalEvents: number;
+  totalOutputBytes: number;
+  commandCount: number;
 }
 
 export interface AgentGatewayOptions {
@@ -169,6 +182,116 @@ export class AgentGateway {
       action: 'terminal.status',
       input: { session_id: sessionId },
     });
+  }
+
+  getSessionMetrics(userId: string, sessionId: string): { totalEvents: number; totalOutputBytes: number; commandCount: number } | undefined {
+    const record = this.sessions.get(sessionId);
+    if (!record || (record.ownerId && record.ownerId !== userId)) return undefined;
+    return {
+      totalEvents: record.totalEvents,
+      totalOutputBytes: record.totalOutputBytes,
+      commandCount: record.commandCount,
+    };
+  }
+
+  getTranscript(userId: string, sessionId: string, maxEntries: number, afterSequence: number, includeOutput: boolean): { entries: Array<{ type: string; timestamp: string; text: string }>; next_sequence: number; has_more: boolean } {
+    const record = this.requireSession(userId, sessionId);
+    const entries: Array<{ type: string; timestamp: string; text: string }> = [];
+    let lastSequence = afterSequence;
+
+    for (let i = record.eventHead; i < record.events.length && entries.length < maxEntries; i += 1) {
+      const event = record.events[i];
+      if (!event || event.sequence <= afterSequence) continue;
+      lastSequence = event.sequence;
+
+      switch (event.event_type) {
+        case 'command.input':
+          entries.push({
+            type: 'command',
+            timestamp: event.timestamp,
+            text: typeof event.data.text === 'string' ? event.data.text : '',
+          });
+          break;
+        case 'terminal.stdout':
+        case 'terminal.stderr':
+          if (includeOutput) {
+            entries.push({
+              type: event.event_type === 'terminal.stderr' ? 'error' : 'output',
+              timestamp: event.timestamp,
+              text: typeof event.data.text === 'string' ? event.data.text.slice(0, 4096) : '',
+            });
+          }
+          break;
+        case 'session.started':
+        case 'session.closed':
+        case 'process.exit':
+        case 'cwd.changed':
+        case 'agent.connected':
+        case 'agent.disconnected':
+          entries.push({
+            type: 'status',
+            timestamp: event.timestamp,
+            text: event.event_type + (event.event_type === 'process.exit' && typeof event.data.exit_code === 'number' ? ` (exit ${event.data.exit_code})` : '') + (event.event_type === 'cwd.changed' && typeof event.data.cwd === 'string' ? ` → ${event.data.cwd}` : ''),
+          });
+          break;
+      }
+    }
+
+    return {
+      entries,
+      next_sequence: lastSequence,
+      has_more: lastSequence < record.latestSequence,
+    };
+  }
+
+  // --- File operations ---
+  // These dispatch file commands to the agent and return generic results.
+
+  async readFile(userId: string, sessionId: string, path: string, maxBytes: number): Promise<TerminalReadFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.read',
+      input: { session_id: sessionId, path, max_bytes: maxBytes },
+    }, (raw) => terminalReadFileOutputSchema.parse(raw));
+  }
+
+  async listFiles(userId: string, sessionId: string, path: string, maxEntries: number): Promise<TerminalListFilesOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.list',
+      input: { session_id: sessionId, path, max_entries: maxEntries },
+    }, (raw) => terminalListFilesOutputSchema.parse(raw));
+  }
+
+  async writeFile(userId: string, sessionId: string, path: string, content: string, createDirectories: boolean): Promise<TerminalWriteFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.write',
+      input: { session_id: sessionId, path, content, create_directories: createDirectories },
+    }, (raw) => terminalWriteFileOutputSchema.parse(raw));
+  }
+
+  async searchFiles(userId: string, sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<TerminalSearchFilesOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    const input = {
+      session_id: sessionId,
+      pattern,
+      path,
+      max_results: maxResults,
+      context_lines: contextLines,
+      ...(include === undefined ? {} : { include }),
+    };
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.search', input,
+    }, (raw) => terminalSearchFilesOutputSchema.parse(raw));
   }
 
   async read(userId: string, sessionId: string, after: number, maxBytes: number, waitMs = 0): Promise<TerminalReadOutput> {
@@ -373,6 +496,9 @@ export class AgentGateway {
               latestSequence: baseCursor,
               earliestSequence: baseCursor + 1,
               retainedBytes: 0,
+              totalEvents: 0,
+              totalOutputBytes: 0,
+              commandCount: 0,
             };
             if (record.latestSequence < snapshot.earliestCursor) {
               record.events = [];
@@ -430,7 +556,7 @@ export class AgentGateway {
     return this.withServerCursor(snapshot);
   }
 
-  private request(connection: AgentConnection, command: AgentCommand): Promise<AgentSessionSnapshot> {
+  private request<T = AgentSessionSnapshot>(connection: AgentConnection, command: AgentCommand, parseResult?: (raw: unknown) => T): Promise<T> {
     if (connection.socket.readyState !== WebSocket.OPEN) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
     }
@@ -441,7 +567,7 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
       }, this.options.requestTimeoutMs);
       timer.unref();
-      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve, reject, timer });
+      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
       connection.socket.send(JSON.stringify(command), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -468,7 +594,8 @@ export class AgentGateway {
       return;
     }
 
-    pending.resolve(agentSessionSnapshotSchema.parse(response.result));
+    const parsed = pending.parseResult ? pending.parseResult(response.result) : agentSessionSnapshotSchema.parse(response.result);
+    pending.resolve(parsed);
   }
 
   private requireAgent(userId: string, agentId: string): AgentConnection {
@@ -502,6 +629,9 @@ export class AgentGateway {
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
+      totalEvents: 0,
+      totalOutputBytes: 0,
+      commandCount: 0,
     };
     if (ownerId !== undefined) record.ownerId = ownerId;
     record.agentId = snapshot.session.agent_id;
@@ -528,6 +658,9 @@ export class AgentGateway {
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
+      totalEvents: 0,
+      totalOutputBytes: 0,
+      commandCount: 0,
     };
 
     if (record.ownerId && record.ownerId !== ownerId) {
@@ -562,6 +695,18 @@ export class AgentGateway {
     record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;
     record.retainedBytes += eventBytes;
+
+    // Update session metrics. Count only bytes actually emitted by terminal stdout/stderr.
+    record.totalEvents += 1;
+    const textPayload = (event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') && typeof event.data.text === 'string'
+      ? event.data.text
+      : undefined;
+    if (textPayload !== undefined) {
+      record.totalOutputBytes += Buffer.byteLength(textPayload);
+    }
+    if (event.event_type === 'command.input') {
+      record.commandCount += 1;
+    }
 
     if (record.session) {
       record.session.last_activity_at = event.timestamp;

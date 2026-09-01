@@ -25,6 +25,12 @@ function fakeGateway() {
     interrupt: vi.fn(),
     status: vi.fn(),
     close: vi.fn(),
+    readFile: vi.fn(),
+    listFiles: vi.fn(),
+    writeFile: vi.fn(),
+    searchFiles: vi.fn(),
+    getSessionMetrics: vi.fn(),
+    getTranscript: vi.fn(),
   };
 }
 
@@ -69,10 +75,14 @@ describe('server execution-profile authorization', () => {
       .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(service.close(readOnlyIdentity, 'session-a'))
       .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.writeFile(readOnlyIdentity, {
+      session_id: 'session-a', path: 'blocked.txt', content: 'blocked', create_directories: false,
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
 
     expect(gateway.write).not.toHaveBeenCalled();
     expect(gateway.resize).not.toHaveBeenCalled();
     expect(gateway.interrupt).not.toHaveBeenCalled();
     expect(gateway.close).not.toHaveBeenCalled();
+    expect(gateway.writeFile).not.toHaveBeenCalled();
   });
 });

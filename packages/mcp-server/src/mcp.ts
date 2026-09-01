@@ -15,6 +15,16 @@ import {
   terminalStreamRefreshInputSchema,
   terminalStreamRefreshOutputSchema,
   terminalWriteInputSchema,
+  terminalReadFileInputSchema,
+  terminalReadFileOutputSchema,
+  terminalListFilesInputSchema,
+  terminalListFilesOutputSchema,
+  terminalWriteFileInputSchema,
+  terminalWriteFileOutputSchema,
+  terminalSearchFilesInputSchema,
+  terminalSearchFilesOutputSchema,
+  terminalTranscriptInputSchema,
+  terminalTranscriptOutputSchema,
 } from '@terminal/protocol';
 import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
@@ -226,6 +236,83 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(() => deps.service.close(identityFromContext(ctx), input.session_id)),
+  );
+
+  server.registerTool(
+    'terminal_session_transcript',
+    {
+      title: 'Get session transcript',
+      description: 'Return a structured chronological transcript of a terminal session: commands sent, terminal output, errors, and status changes. Use this to understand what happened in a session without re-reading raw terminal output. Supports pagination via after_sequence for long sessions. Set include_output to false to get only commands and status events.',
+      inputSchema: terminalTranscriptInputSchema,
+      outputSchema: terminalTranscriptOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.transcript(identityFromContext(ctx), input);
+      return terminalTranscriptOutputSchema.parse(result);
+    }),
+  );
+
+  // --- File operation tools ---
+
+  server.registerTool(
+    'terminal_read_file',
+    {
+      title: 'Read a file',
+      description: 'Read the contents of a file within the workspace of an active terminal session. The file path is resolved relative to the session current working directory. Paths outside configured workspace roots are rejected.',
+      inputSchema: terminalReadFileInputSchema,
+      outputSchema: terminalReadFileOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.readFile(identityFromContext(ctx), input);
+      return terminalReadFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_list_files',
+    {
+      title: 'List directory contents',
+      description: 'List files and directories at a path within the workspace of an active terminal session. Returns name, type (file/directory/symlink), size, and modification timestamp for each entry.',
+      inputSchema: terminalListFilesInputSchema,
+      outputSchema: terminalListFilesOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.listFiles(identityFromContext(ctx), input);
+      return terminalListFilesOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_write_file',
+    {
+      title: 'Write a file',
+      description: 'Write content to a file within the workspace of an active terminal session. The file path is resolved relative to the session current working directory. Requires a non-read-only execution profile. Optionally creates parent directories.',
+      inputSchema: terminalWriteFileInputSchema,
+      outputSchema: terminalWriteFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.writeFile(identityFromContext(ctx), input);
+      return terminalWriteFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_search_files',
+    {
+      title: 'Search files',
+      description: 'Search for a regex pattern across files in the workspace of an active terminal session. Returns matching lines with file paths and line numbers. Supports file type filtering (e.g. include: "*.ts") and optional context lines around each match. Much faster than running grep through the terminal and returns structured results.',
+      inputSchema: terminalSearchFilesInputSchema,
+      outputSchema: terminalSearchFilesOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
+      return terminalSearchFilesOutputSchema.parse(result);
+    }),
   );
 
   return server;

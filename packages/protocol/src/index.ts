@@ -97,6 +97,8 @@ export const terminalErrorCodeSchema = z.enum([
   'STREAM_TOKEN_EXPIRED',
   'SESSION_LIMIT_REACHED',
   'INVALID_ARGUMENT',
+  'FILE_NOT_FOUND',
+  'FILE_TOO_LARGE',
 ]);
 export type TerminalErrorCode = z.infer<typeof terminalErrorCodeSchema>;
 
@@ -185,6 +187,10 @@ export type TerminalMutationOutput = z.infer<typeof terminalMutationOutputSchema
 export const terminalStatusOutputSchema = terminalSessionSchema.extend({
   agent_online: z.boolean(),
   cursor: z.number().int().nonnegative(),
+  uptime_seconds: z.number().nonnegative().optional(),
+  total_events: z.number().int().nonnegative().optional(),
+  total_output_bytes: z.number().int().nonnegative().optional(),
+  command_count: z.number().int().nonnegative().optional(),
 });
 export type TerminalStatusOutput = z.infer<typeof terminalStatusOutputSchema>;
 
@@ -197,6 +203,109 @@ export const agentSessionSnapshotSchema = z.object({
   earliestCursor: z.number().int().nonnegative(),
 });
 export type AgentSessionSnapshot = z.infer<typeof agentSessionSnapshotSchema>;
+
+// --- File operation schemas ---
+
+export const terminalReadFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  path: z.string().min(1).max(4096),
+  max_bytes: z.number().int().positive().max(262_144).default(65_536),
+});
+export type TerminalReadFileInput = z.infer<typeof terminalReadFileInputSchema>;
+
+export const terminalReadFileOutputSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+  size: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type TerminalReadFileOutput = z.infer<typeof terminalReadFileOutputSchema>;
+
+export const terminalListFilesInputSchema = z.object({
+  session_id: z.string().min(1),
+  path: z.string().min(1).max(4096).default('.'),
+  max_entries: z.number().int().positive().max(500).default(100),
+});
+export type TerminalListFilesInput = z.infer<typeof terminalListFilesInputSchema>;
+
+export const terminalFileEntrySchema = z.object({
+  name: z.string(),
+  type: z.enum(['file', 'directory', 'symlink', 'other']),
+  size: z.number().int().nonnegative(),
+  modified_at: z.string().datetime(),
+});
+export type TerminalFileEntry = z.infer<typeof terminalFileEntrySchema>;
+
+export const terminalListFilesOutputSchema = z.object({
+  path: z.string(),
+  entries: z.array(terminalFileEntrySchema),
+  truncated: z.boolean(),
+});
+export type TerminalListFilesOutput = z.infer<typeof terminalListFilesOutputSchema>;
+
+export const terminalWriteFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  path: z.string().min(1).max(4096),
+  content: z.string().max(262_144),
+  create_directories: z.boolean().default(false),
+});
+export type TerminalWriteFileInput = z.infer<typeof terminalWriteFileInputSchema>;
+
+export const terminalWriteFileOutputSchema = z.object({
+  path: z.string(),
+  bytes_written: z.number().int().nonnegative(),
+});
+export type TerminalWriteFileOutput = z.infer<typeof terminalWriteFileOutputSchema>;
+
+export const terminalSearchFilesInputSchema = z.object({
+  session_id: z.string().min(1),
+  pattern: z.string().min(1).max(1024),
+  path: z.string().min(1).max(4096).default('.'),
+  include: z.string().max(256).optional(),
+  max_results: z.number().int().positive().max(200).default(50),
+  context_lines: z.number().int().nonnegative().max(5).default(0),
+});
+export type TerminalSearchFilesInput = z.infer<typeof terminalSearchFilesInputSchema>;
+
+export const terminalSearchMatchSchema = z.object({
+  file: z.string(),
+  line: z.number().int().positive(),
+  text: z.string(),
+  context_before: z.array(z.string()).optional(),
+  context_after: z.array(z.string()).optional(),
+});
+export type TerminalSearchMatch = z.infer<typeof terminalSearchMatchSchema>;
+
+export const terminalSearchFilesOutputSchema = z.object({
+  pattern: z.string(),
+  matches: z.array(terminalSearchMatchSchema),
+  truncated: z.boolean(),
+  files_searched: z.number().int().nonnegative(),
+});
+export type TerminalSearchFilesOutput = z.infer<typeof terminalSearchFilesOutputSchema>;
+
+export const terminalTranscriptEntrySchema = z.object({
+  type: z.enum(['command', 'output', 'error', 'status']),
+  timestamp: z.string(),
+  text: z.string(),
+});
+export type TerminalTranscriptEntry = z.infer<typeof terminalTranscriptEntrySchema>;
+
+export const terminalTranscriptInputSchema = z.object({
+  session_id: z.string().min(1),
+  max_entries: z.number().int().positive().max(500).default(100),
+  after_sequence: z.number().int().nonnegative().default(0),
+  include_output: z.boolean().default(true),
+});
+export type TerminalTranscriptInput = z.infer<typeof terminalTranscriptInputSchema>;
+
+export const terminalTranscriptOutputSchema = z.object({
+  session_id: z.string(),
+  entries: z.array(terminalTranscriptEntrySchema),
+  next_sequence: z.number().int().nonnegative(),
+  has_more: z.boolean(),
+});
+export type TerminalTranscriptOutput = z.infer<typeof terminalTranscriptOutputSchema>;
 
 export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
@@ -236,6 +345,30 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     request_id: z.string().min(1),
     action: z.literal('terminal.status'),
     input: terminalSessionIdInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.read'),
+    input: terminalReadFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.list'),
+    input: terminalListFilesInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.write'),
+    input: terminalWriteFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.search'),
+    input: terminalSearchFilesInputSchema,
   }),
 ]);
 export type AgentCommand = z.infer<typeof agentCommandSchema>;
@@ -320,3 +453,5 @@ export const terminalStreamRefreshOutputSchema = z.object({
   expires_at: z.string().datetime(),
 });
 export type TerminalStreamRefreshOutput = z.infer<typeof terminalStreamRefreshOutputSchema>;
+
+
