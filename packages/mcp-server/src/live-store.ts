@@ -743,7 +743,7 @@ redis.call('DEL', eventsKey)
 return 1
 `;
 
-/** Lua: CAS meta + replace partitioned event LIST + owner index (1 RTT). */
+/** Lua: CAS meta + append-only event LIST (RPUSH seq > cur) + LTRIM to window + owner index. */
 const PUT_SESSION_LUA = `
 local key = KEYS[1]
 local ownerKey = KEYS[2]
@@ -753,17 +753,33 @@ local ttl = tonumber(ARGV[2])
 local sessionId = ARGV[3]
 local indexOwner = ARGV[4]
 local current = redis.call('GET', key)
+local curSeq = 0
 if current then
-  local curSeq = tonumber(string.match(current, '"latestSequence":(%d+)')) or 0
+  curSeq = tonumber(string.match(current, '"latestSequence":(%d+)')) or 0
   local incSeq = tonumber(string.match(incoming, '"latestSequence":(%d+)')) or 0
   if incSeq < curSeq then
     return current
   end
 end
 redis.call('SET', key, incoming, 'EX', ttl)
-redis.call('DEL', eventsKey)
+-- Append only events newer than stored sequence (avoid rewriting full buffer each tick).
 for i = 5, #ARGV do
-  redis.call('RPUSH', eventsKey, ARGV[i])
+  local ev = ARGV[i]
+  local seq = tonumber(string.match(ev, '"sequence":(%d+)')) or 0
+  if seq > curSeq then
+    redis.call('RPUSH', eventsKey, ev)
+  end
+end
+-- Align list length with retained window [earliestSequence, latestSequence].
+local earliest = tonumber(string.match(incoming, '"earliestSequence":(%d+)')) or 1
+local latest = tonumber(string.match(incoming, '"latestSequence":(%d+)')) or 0
+local want = 0
+if latest >= earliest then want = latest - earliest + 1 end
+local len = redis.call('LLEN', eventsKey)
+if want == 0 then
+  redis.call('DEL', eventsKey)
+elseif len > want then
+  redis.call('LTRIM', eventsKey, len - want, -1)
 end
 if redis.call('LLEN', eventsKey) > 0 then
   redis.call('EXPIRE', eventsKey, ttl)

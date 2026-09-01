@@ -93,12 +93,12 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       try {
         const identity = identityFromContext(ctx);
         const started = await deps.service.start(identity, input);
-        const record = deps.gateway.getSessionForUser(identity.userId, started.session_id);
+        const record = await deps.gateway.getSessionForUser(identity.userId, started.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const agent = deps.gateway.listAgents(identity.userId).find((candidate) => candidate.agent_id === record.session!.agent_id);
         const stream = deps.streamTokens.issue(identity.userId, started.session_id);
+        // Prefer header auth: URL carries cursor only; token returned separately for Authorization / x-terminal-stream-token.
         const streamUrl = new URL(`/terminal/${encodeURIComponent(started.session_id)}/events`, deps.config.publicUrl);
-        streamUrl.searchParams.set('token', stream.token);
         streamUrl.searchParams.set('after', String(started.cursor));
         const output = terminalStartViewOutputSchema.parse({
           ...started,
@@ -109,7 +109,12 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
           exit_code: record.session.exit_code,
         });
         return successResult(output, {
-          terminal_stream: { url: streamUrl.href, expires_at: stream.expiresAt },
+          terminal_stream: {
+            url: streamUrl.href,
+            token: stream.token,
+            authorization: `Bearer ${stream.token}`,
+            expires_at: stream.expiresAt,
+          },
         });
       } catch (error) {
         return errorResult(error);
@@ -187,20 +192,26 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: { ui: { visibility: ['app'] } },
     },
-    (input, ctx) => {
+    async (input, ctx) => {
       try {
         const identity = identityFromContext(ctx);
-        const record = deps.gateway.getSessionForUser(identity.userId, input.session_id);
+        const record = await deps.gateway.getSessionForUser(identity.userId, input.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const stream = deps.streamTokens.issue(identity.userId, input.session_id);
         const streamUrl = new URL(`/terminal/${encodeURIComponent(input.session_id)}/events`, deps.config.publicUrl);
-        streamUrl.searchParams.set('token', stream.token);
         if (input.after < record.earliestSequence - 1 || input.after > record.latestSequence) {
           throw new TerminalProtocolError('INVALID_CURSOR', 'Stream refresh cursor is outside the retained event range.');
         }
         streamUrl.searchParams.set('after', String(input.after));
         const output = terminalStreamRefreshOutputSchema.parse({ session_id: input.session_id, expires_at: stream.expiresAt });
-        return successResult(output, { terminal_stream: { url: streamUrl.href, expires_at: stream.expiresAt } });
+        return successResult(output, {
+          terminal_stream: {
+            url: streamUrl.href,
+            token: stream.token,
+            authorization: `Bearer ${stream.token}`,
+            expires_at: stream.expiresAt,
+          },
+        });
       } catch (error) {
         return errorResult(error);
       }

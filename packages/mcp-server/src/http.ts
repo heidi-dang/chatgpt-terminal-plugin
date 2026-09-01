@@ -92,15 +92,16 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   app.get('/health', (_req, res) => {
+    // Production stays sparse (no session counts); always expose backend kind for load balancers.
     res.status(200).json({
       status: 'ok',
       timestamp: new Date().toISOString(),
+      live_store: liveStore.backend,
       ...(config.nodeEnv === 'production'
         ? {}
         : {
             active_agents: gateway.activeAgentCount(),
             mcp_sessions: sessions.size,
-            live_store: liveStore.backend,
             instance_id: liveStore.instanceId,
           }),
     });
@@ -265,7 +266,9 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   app.get('/terminal/:sessionId/events', (req, res) => {
     void (async () => {
       const sessionId = req.params.sessionId;
-      const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+      // Prefer Authorization / dedicated header so proxies do not log secrets in query strings.
+      // Query `token` remains accepted for legacy EventSource clients that cannot set headers.
+      const token = extractStreamToken(req);
       if (!token) {
         res.status(401).json({ error: 'STREAM_TOKEN_EXPIRED' });
         return;
@@ -471,6 +474,19 @@ function clientAddress(req: Request): string {
   const fromLoopbackProxy = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
   const cloudflareAddress = fromLoopbackProxy ? req.get('cf-connecting-ip') : undefined;
   return (cloudflareAddress ?? req.ip ?? remoteAddress) || 'unknown';
+}
+
+function extractStreamToken(req: Request): string | undefined {
+  const headerToken = req.get('x-terminal-stream-token')?.trim();
+  if (headerToken) return headerToken;
+  const authorization = req.get('authorization');
+  if (authorization) {
+    const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+    if (match?.[1]) return match[1].trim();
+  }
+  // Legacy EventSource cannot set headers; query still works but may appear in proxy logs.
+  if (typeof req.query.token === 'string' && req.query.token.length > 0) return req.query.token;
+  return undefined;
 }
 
 function errorMessage(error: unknown): string {
