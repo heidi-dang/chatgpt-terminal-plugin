@@ -185,6 +185,24 @@ describe('terminal MCP App UI', () => {
     expect(source.close).toHaveBeenCalled();
   });
 
+  it('refreshes an expired stream capability before opening EventSource', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const expired = initialResult();
+    expired._meta.terminal_stream.expires_at = new Date(Date.now() - 1_000).toISOString();
+
+    app.ontoolresult?.(expired);
+
+    expect(FakeEventSource.instances.some((source) => source.url.includes('token=initial'))).toBe(false);
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_stream_refresh',
+      arguments: { session_id: 'session-1', after: 4 },
+    });
+    await vi.waitFor(() => expect(FakeEventSource.instances.some((source) => source.url.includes('token=refreshed'))).toBe(true));
+    viewer.destroy();
+  });
+
   it('does not yank a user-scrolled transcript back to the live tail', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);

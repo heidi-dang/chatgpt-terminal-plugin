@@ -658,9 +658,11 @@ export class TerminalViewer {
   }
 
   private useStream(meta: TerminalStreamMeta): void {
+    const ttl = Date.parse(meta.expires_at) - Date.now();
+    if (ttl <= STREAM_REFRESH_MARGIN_MS) return this.refreshStream(true);
     this.connectTerminalStream(meta);
     this.connectStyleReload(meta);
-    this.scheduleCapabilityRefresh(meta);
+    this.scheduleCapabilityRefresh(ttl);
   }
 
   private connectTerminalStream(meta: TerminalStreamMeta): void {
@@ -913,11 +915,10 @@ export class TerminalViewer {
     });
   }
 
-  private scheduleCapabilityRefresh(meta: TerminalStreamMeta): void {
+  private scheduleCapabilityRefresh(ttl: number): void {
     this.clearRefreshTimer();
-    const expiry = Date.parse(meta.expires_at);
-    if (!Number.isFinite(expiry)) return;
-    const delay = Math.max(1_000, expiry - Date.now() - STREAM_REFRESH_MARGIN_MS);
+    if (!Number.isFinite(ttl)) return;
+    const delay = Math.max(1_000, ttl - STREAM_REFRESH_MARGIN_MS);
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = undefined;
       this.refreshStream(true);
