@@ -281,6 +281,25 @@ describe('bounded LSP management', () => {
       .toThrowError(expect.objectContaining({ code: 'SESSION_NOT_FOUND' }));
   });
 
+  it('reserves LSP capacity across concurrent starts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-concurrent-limit-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const script = await writeLspScript(root, `setInterval(() => {}, 1000);`);
+    const manager = new LspManager({
+      servers: { idle: { command: process.execPath, args: [script] } }, environment: cleanEnvironment(), maxProcesses: 1,
+    });
+    cleanup.push(() => manager.stopAll());
+
+    const results = await Promise.allSettled([
+      manager.start('user-a', { server_id: 'idle', root }, root),
+      manager.start('user-a', { server_id: 'idle', root }, root),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    expect(rejected?.reason).toMatchObject({ code: 'SESSION_LIMIT_REACHED' });
+  });
+
   it('enforces a maximum concurrent LSP process count', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-limit-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

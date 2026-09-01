@@ -72,6 +72,7 @@ export class LspManager {
   private readonly maxHeaderBytes: number;
   private readonly maxStderrBytes: number;
   private readonly killGraceMs: number;
+  private starting = 0;
 
   constructor(options: LspManagerOptions) {
     this.servers = options.servers;
@@ -86,7 +87,7 @@ export class LspManager {
   }
 
   async start(userId: string, input: LspStartInput, root: string): Promise<LspStartOutput> {
-    if (this.processes.size >= this.maxProcesses) {
+    if (this.processes.size + this.starting >= this.maxProcesses) {
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'LSP process limit has been reached.');
     }
     const definition = this.servers[input.server_id];
@@ -94,50 +95,55 @@ export class LspManager {
       throw new TerminalProtocolError('INVALID_ARGUMENT', `LSP server '${input.server_id}' is not configured on this agent.`);
     }
 
-    const child = spawn(definition.command, definition.args, {
-      cwd: root,
-      env: this.environment,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      detached: process.platform !== 'win32',
-    });
-    const lspId = randomUUID();
-    const managed: ManagedLsp = {
-      lspId,
-      userId,
-      serverId: input.server_id,
-      root,
-      child,
-      buffer: Buffer.alloc(0),
-      stderrBytes: 0,
-      nextRequestId: 1,
-      pending: new Map(),
-      stopping: false,
-    };
-
-    child.stdout.on('data', (chunk: Buffer) => this.handleStdout(managed, chunk));
-    child.stderr.on('data', (chunk: Buffer) => this.handleStderr(managed, chunk));
-    child.once('close', (code, signal) => this.handleExit(managed, code, signal));
-
-    await new Promise<void>((resolve, reject) => {
-      const onSpawn = (): void => {
-        child.off('error', onError);
-        resolve();
+    this.starting += 1;
+    try {
+      const child = spawn(definition.command, definition.args, {
+        cwd: root,
+        env: this.environment,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        detached: process.platform !== 'win32',
+      });
+      const lspId = randomUUID();
+      const managed: ManagedLsp = {
+        lspId,
+        userId,
+        serverId: input.server_id,
+        root,
+        child,
+        buffer: Buffer.alloc(0),
+        stderrBytes: 0,
+        nextRequestId: 1,
+        pending: new Map(),
+        stopping: false,
       };
-      const onError = (error: Error): void => {
-        child.off('spawn', onSpawn);
-        reject(new TerminalProtocolError('PTY_CREATE_FAILED', `Failed to start configured LSP server: ${error.message}`));
-      };
-      child.once('spawn', onSpawn);
-      child.once('error', onError);
-    });
 
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new TerminalProtocolError('PTY_CREATE_FAILED', 'Configured LSP server exited during startup.');
+      child.stdout.on('data', (chunk: Buffer) => this.handleStdout(managed, chunk));
+      child.stderr.on('data', (chunk: Buffer) => this.handleStderr(managed, chunk));
+      child.once('close', (code, signal) => this.handleExit(managed, code, signal));
+
+      await new Promise<void>((resolve, reject) => {
+        const onSpawn = (): void => {
+          child.off('error', onError);
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          child.off('spawn', onSpawn);
+          reject(new TerminalProtocolError('PTY_CREATE_FAILED', `Failed to start configured LSP server: ${error.message}`));
+        };
+        child.once('spawn', onSpawn);
+        child.once('error', onError);
+      });
+
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new TerminalProtocolError('PTY_CREATE_FAILED', 'Configured LSP server exited during startup.');
+      }
+      child.on('error', (error) => this.failProcess(managed, new TerminalProtocolError('PTY_CREATE_FAILED', `LSP process error: ${error.message}`)));
+      this.processes.set(lspId, managed);
+      return { lsp_id: lspId, server_id: input.server_id, root };
+    } finally {
+      this.starting -= 1;
     }
-    child.on('error', (error) => this.failProcess(managed, new TerminalProtocolError('PTY_CREATE_FAILED', `LSP process error: ${error.message}`)));
-    this.processes.set(lspId, managed);
-    return { lsp_id: lspId, server_id: input.server_id, root };
   }
 
   request(userId: string, input: LspRequestInput): Promise<LspRequestOutput> {
