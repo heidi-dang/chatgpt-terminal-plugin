@@ -396,7 +396,15 @@ export class RedisLiveStore implements LiveStore {
 
   async deleteSession(sessionId: string): Promise<void> {
     const key = sessionKey(sessionId);
-    // Avoid getSession() full JSON.parse of large event buffers — only need ownerId for index SREM.
+    // One EVAL: peek ownerId + SREM + DEL (was GET + optional SREM + DEL = up to 3 RTTs).
+    // Still avoids full JSON.parse of large event buffers (ownerId matched in Lua).
+    if (this.client.eval) {
+      await this.client.eval(DELETE_SESSION_LUA, {
+        keys: [key],
+        arguments: [sessionId, `${PREFIX}:owner:`],
+      });
+      return;
+    }
     const raw = await this.client.get(key);
     if (raw) {
       const ownerId = extractJsonStringField(raw, 'ownerId');
@@ -668,6 +676,22 @@ export class RedisLiveStore implements LiveStore {
     } catch { /* ignore */ }
   }
 }
+
+/** Lua: delete session + owner index SREM without shipping the blob to the app. */
+const DELETE_SESSION_LUA = `
+local key = KEYS[1]
+local sessionId = ARGV[1]
+local ownerPrefix = ARGV[2]
+local current = redis.call('GET', key)
+if current then
+  local ownerId = string.match(current, '"ownerId":"([^"]*)"')
+  if ownerId and ownerId ~= '' and ownerPrefix ~= '' then
+    redis.call('SREM', ownerPrefix .. ownerId .. ':sessions', sessionId)
+  end
+end
+redis.call('DEL', key)
+return 1
+`;
 
 /** Lua: CAS on latestSequence + optional owner-session index update in one RTT. */
 const PUT_SESSION_LUA = `
