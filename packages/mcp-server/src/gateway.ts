@@ -583,9 +583,10 @@ export class AgentGateway {
 
   private async loadSession(sessionId: string): Promise<SessionRecord | undefined> {
     const cached = this.sessions.get(sessionId);
-    if (cached) return cached;
     const shared = await this.liveStore.getSession(sessionId);
-    if (!shared) return undefined;
+    if (!shared) return cached;
+    // Prefer the fresher of local cache vs shared store (multi-instance consistency).
+    if (cached && cached.latestSequence >= shared.latestSequence) return cached;
     const record: SessionRecord = {
       ownerId: shared.ownerId,
       agentId: shared.agentId,

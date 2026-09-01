@@ -1,11 +1,10 @@
 import { createPublicKey, timingSafeEqual, verify } from 'node:crypto';
-import { chmodSync } from 'node:fs';
 import { mkdir as mkdirAsync, readFile as readFileAsync, rename as renameAsync, writeFile as writeFileAsync, chmod as chmodAsync } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { TerminalProtocolError, deviceEnrollmentRequestSchema, type DeviceEnrollmentRequest } from '@terminal/protocol';
 import {
-  closeTerminalDatabase,
+  checkpointAndClose,
   openTerminalDatabase,
   resolveSqlitePath,
   type TerminalDatabase,
@@ -50,6 +49,7 @@ export class DeviceRegistry {
   private db: TerminalDatabase | undefined;
   /** In-memory fallback when no path is configured (tests / ephemeral mode). */
   private readonly memory = new Map<string, DeviceRecord>();
+  private stmts: PreparedDeviceStatements | undefined;
 
   private constructor(
     private readonly path: string | undefined,
@@ -64,6 +64,7 @@ export class DeviceRegistry {
 
     await mkdirAsync(dirname(sqlitePath), { recursive: true, mode: 0o700 });
     registry.db = openTerminalDatabase(sqlitePath);
+    registry.stmts = prepareStatements(registry.db);
 
     // One-time migration from legacy JSON registry files.
     if (path.endsWith('.json') || path !== sqlitePath) {
@@ -148,10 +149,15 @@ export class DeviceRegistry {
   }
 
   async markSeen(deviceId: string): Promise<void> {
-    const current = this.readDevice(deviceId);
-    if (!current || current.status !== 'active') return;
     const now = new Date().toISOString();
-    this.writeDevice({ ...current, last_seen_at: now, updated_at: now });
+    if (!this.db || !this.stmts) {
+      const current = this.memory.get(deviceId);
+      if (!current || current.status !== 'active') return;
+      this.memory.set(deviceId, { ...current, last_seen_at: now, updated_at: now });
+      return;
+    }
+    // Lightweight path: avoid read-modify-write races on last_seen only.
+    this.stmts.markSeen.run(now, now, deviceId);
   }
 
   verifyProof(deviceId: string, payload: string, signatureBase64Url: string): DeviceRecord {
@@ -168,41 +174,35 @@ export class DeviceRegistry {
   }
 
   close(): void {
-    closeTerminalDatabase(this.db);
+    checkpointAndClose(this.db, this.sqlitePath);
     this.db = undefined;
+    this.stmts = undefined;
   }
 
   private readDevice(deviceId: string): DeviceRecord | undefined {
-    if (!this.db) {
+    if (!this.db || !this.stmts) {
       const record = this.memory.get(deviceId);
       return record ? { ...record } : undefined;
     }
-    const row = this.db.prepare('SELECT * FROM devices WHERE device_id = ?').get(deviceId) as DeviceRow | undefined;
+    const row = this.stmts.getById.get(deviceId) as DeviceRow | undefined;
     return row ? rowToRecord(row) : undefined;
   }
 
   private writeDevice(record: DeviceRecord): void {
-    if (!this.db) {
+    if (!this.db || !this.stmts) {
       this.memory.set(record.device_id, { ...record });
       return;
     }
-    this.db.prepare(`
-      INSERT INTO devices (
-        device_id, agent_id, owner_id, public_key, display_name, status, key_version,
-        enrolled_at, updated_at, last_seen_at, revoked_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(device_id) DO UPDATE SET
-        agent_id = excluded.agent_id,
-        owner_id = excluded.owner_id,
-        public_key = excluded.public_key,
-        display_name = excluded.display_name,
-        status = excluded.status,
-        key_version = excluded.key_version,
-        enrolled_at = excluded.enrolled_at,
-        updated_at = excluded.updated_at,
-        last_seen_at = excluded.last_seen_at,
-        revoked_at = excluded.revoked_at
-    `).run(
+    // Optimistic concurrency on key_version for rotations: reject stale writers.
+    const existing = this.stmts.getById.get(record.device_id) as DeviceRow | undefined;
+    if (existing && record.key_version <= existing.key_version && record.status === 'active' && existing.status === 'active') {
+      // Allow non-version-advancing updates (markSeen path is separate; revoke advances status).
+      // Full active rewrite must advance key_version except when only timestamps change with same key.
+      if (record.public_key !== existing.public_key) {
+        throw new TerminalProtocolError('PERMISSION_DENIED', 'Stale device key rotation rejected.');
+      }
+    }
+    this.stmts.upsert.run(
       record.device_id,
       record.agent_id,
       record.owner_id,
@@ -215,13 +215,6 @@ export class DeviceRegistry {
       record.last_seen_at ?? null,
       record.revoked_at ?? null,
     );
-    if (this.sqlitePath) {
-      try {
-        chmodSync(this.sqlitePath, 0o600);
-      } catch {
-        // best-effort
-      }
-    }
   }
 
   private assertEnrollmentToken(presented: string | undefined): void {
@@ -262,7 +255,9 @@ export class DeviceRegistry {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const tx = this.db.transaction(() => {
+    // node:sqlite DatabaseSync has no better-sqlite3-style .transaction(); use explicit BEGIN/COMMIT.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
       if (parsed.version === 1) {
         for (const record of parsed.devices) {
           const agentId = legacyAgentId(record.device_id);
@@ -297,8 +292,15 @@ export class DeviceRegistry {
           );
         }
       }
-    });
-    tx();
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore rollback failure
+      }
+      throw error;
+    }
 
     // Rewrite legacy JSON to version 2 for operators that still inspect the file,
     // then keep SQLite as the source of truth going forward.
@@ -336,4 +338,40 @@ function legacyAgentId(deviceId: string): string {
 
 function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
+}
+
+type PreparedDeviceStatements = {
+  getById: { get: (deviceId: string) => unknown };
+  upsert: { run: (...args: unknown[]) => unknown };
+  markSeen: { run: (lastSeen: string, updated: string, deviceId: string) => unknown };
+};
+
+function prepareStatements(db: TerminalDatabase): PreparedDeviceStatements {
+  return {
+    getById: db.prepare('SELECT * FROM devices WHERE device_id = ?'),
+    upsert: db.prepare(`
+      INSERT INTO devices (
+        device_id, agent_id, owner_id, public_key, display_name, status, key_version,
+        enrolled_at, updated_at, last_seen_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(device_id) DO UPDATE SET
+        agent_id = excluded.agent_id,
+        owner_id = excluded.owner_id,
+        public_key = excluded.public_key,
+        display_name = excluded.display_name,
+        status = excluded.status,
+        key_version = excluded.key_version,
+        enrolled_at = excluded.enrolled_at,
+        updated_at = excluded.updated_at,
+        last_seen_at = excluded.last_seen_at,
+        revoked_at = excluded.revoked_at
+      WHERE excluded.key_version >= devices.key_version
+         OR excluded.status = 'revoked'
+    `),
+    markSeen: db.prepare(`
+      UPDATE devices
+      SET last_seen_at = ?, updated_at = ?
+      WHERE device_id = ? AND status = 'active'
+    `),
+  };
 }

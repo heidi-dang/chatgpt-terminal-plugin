@@ -105,4 +105,51 @@ describe('MemoryLiveStore', () => {
     expect(result).toEqual({ ok: true, command: { type: 'ping' } });
     await store.close();
   });
+
+  it('merges sessions monotonically by sequence', async () => {
+    const { mergeSessionRecords } = await import('../../packages/mcp-server/src/live-store.js');
+    const lower = {
+      ownerId: 'o',
+      agentId: 'a',
+      events: [],
+      latestSequence: 2,
+      earliestSequence: 1,
+      retainedBytes: 0,
+    };
+    const higher = {
+      ownerId: 'o',
+      agentId: 'a',
+      events: [],
+      latestSequence: 5,
+      earliestSequence: 1,
+      retainedBytes: 10,
+    };
+    expect(mergeSessionRecords(higher, lower).latestSequence).toBe(5);
+    expect(mergeSessionRecords(lower, higher).latestSequence).toBe(5);
+  });
+
+  it('ignores stale agent presence with older lastSeenMs', async () => {
+    const store = new MemoryLiveStore();
+    const agent = sampleAgent('agent-1');
+    await store.setAgentPresence('agent-1', {
+      agent,
+      deviceId: 'd1',
+      ownerId: 'owner-a',
+      online: true,
+      lastSeenMs: 2_000,
+      instanceId: 'i-1',
+    });
+    await store.setAgentPresence('agent-1', {
+      agent,
+      deviceId: 'd1',
+      ownerId: 'owner-a',
+      online: false,
+      lastSeenMs: 1_000,
+      instanceId: 'i-2',
+    });
+    const presence = await store.getAgentPresence('agent-1');
+    expect(presence?.online).toBe(true);
+    expect(presence?.lastSeenMs).toBe(2_000);
+    await store.close();
+  });
 });
