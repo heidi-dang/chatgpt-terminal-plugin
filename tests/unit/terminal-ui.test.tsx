@@ -257,6 +257,101 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
   });
 
+  it('does not skip unrendered stream events when a same-session tool result reports a newer cursor', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    app.ontoolresult?.({
+      structuredContent: { session_id: 'session-1', status: 'running', cursor: 8, cwd: '/workspace', shell: 'bash' },
+    });
+    terminalSource().emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'must-not-be-skipped\r\n' } });
+    await flushFrames();
+
+    expect(document.getElementById('terminal-output')?.textContent).toContain('must-not-be-skipped\n');
+  });
+
+  it('renders host-normalized MCP read output and advances the fallback cursor', async () => {
+    const app = createFakeApp();
+    let readCount = 0;
+    app.callServerTool.mockImplementation(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_read') {
+        readCount += 1;
+        if (readCount === 1) {
+          return {
+            structuredContent: {
+              output: 'host-normalized\r\n',
+              next_cursor: 6,
+              has_more: false,
+              status: 'running',
+            },
+          };
+        }
+        return {
+          structuredContent: {
+            output: 'fallback-done\r\n',
+            next_cursor: 7,
+            has_more: false,
+            status: 'exited',
+            exit_code: 0,
+          },
+        };
+      }
+      if (name === 'terminal_stream_refresh') {
+        return {
+          structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+          _meta: { terminal_stream: { url: 'https://terminal.example/events?token=refreshed', expires_at: new Date(Date.now() + 60_000).toISOString() } },
+        };
+      }
+      return { structuredContent: {} };
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    terminalSource().emitError();
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 6, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    await flushFrames();
+
+    expect(document.getElementById('terminal-output')?.textContent).toContain('host-normalized\nfallback-done\n');
+    expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
+  });
+
+  it('does not report MCP live until the first fallback read succeeds', async () => {
+    const app = createFakeApp();
+    let resolveFirstRead: ((result: CallToolResult) => void) | undefined;
+    let firstRead = true;
+    app.callServerTool.mockImplementation(({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_read' && firstRead) {
+        firstRead = false;
+        return new Promise<CallToolResult>((resolve) => { resolveFirstRead = resolve; });
+      }
+      if (name === 'terminal_read') return new Promise<CallToolResult>(() => undefined);
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    terminalSource().emitError();
+
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('MCP CONNECTING');
+
+    resolveFirstRead?.({
+      structuredContent: { output: '', events: [], next_cursor: 4, has_more: false, status: 'running', exit_code: null },
+    });
+    await vi.waitFor(() => expect(document.getElementById('terminal-stream-state')?.textContent).toBe('MCP LIVE'));
+    viewer.destroy();
+  });
+
   it('hot reloads CSS without replacing the document or terminal SSE source', async () => {
     const css = '.terminal-shell { outline: 1px solid transparent; }';
     const fetchMock = vi.fn(async () => new Response(css, { status: 200 }));

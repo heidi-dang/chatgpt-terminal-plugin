@@ -31,7 +31,8 @@ interface TerminalEvent {
 }
 
 interface TerminalReadResult {
-  events: TerminalEvent[];
+  output: string;
+  events: TerminalEvent[] | null;
   next_cursor: number;
   has_more: boolean;
   status: string;
@@ -80,7 +81,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.7.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.8.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -323,20 +324,32 @@ function parseTerminalEvent(raw: string): TerminalEvent {
 
 function parseTerminalReadResult(result: CallToolResult): TerminalReadResult | null {
   const value = result.structuredContent;
-  if (!isRecord(value) || !Array.isArray(value.events)) return null;
+  if (!isRecord(value)) return null;
+  const output = value.output;
   const nextCursor = value.next_cursor;
   const hasMore = value.has_more;
   const status = value.status;
   const exitCode = value.exit_code;
+  if (typeof output !== 'string') return null;
   if (!Number.isInteger(nextCursor) || typeof nextCursor !== 'number' || nextCursor < 0) return null;
   if (typeof hasMore !== 'boolean' || typeof status !== 'string') return null;
-  if (exitCode !== null && typeof exitCode !== 'number') return null;
+  if (exitCode !== undefined && exitCode !== null && typeof exitCode !== 'number') return null;
+
+  let events: TerminalEvent[] | null = null;
+  if (Array.isArray(value.events)) {
+    try {
+      events = value.events.map(parseTerminalEventValue);
+    } catch {
+      events = null;
+    }
+  }
   return {
-    events: value.events.map(parseTerminalEventValue),
+    output,
+    events,
     next_cursor: nextCursor,
     has_more: hasMore,
     status,
-    exit_code: exitCode,
+    exit_code: typeof exitCode === 'number' ? exitCode : null,
   };
 }
 
@@ -432,8 +445,6 @@ export class TerminalViewer {
         this.hasLiveOutput = false;
         this.output.textContent = '';
         if (next.initial_output) this.queueOutput(next.initial_output);
-      } else if (next.cursor > this.lastSequence && !isFinalStatus(next.status)) {
-        this.lastSequence = next.cursor;
       }
       this.renderState();
     }
@@ -559,7 +570,7 @@ export class TerminalViewer {
     this.readFallbackActive = true;
     const generation = ++this.readFallbackGeneration;
     this.transportMode = 'mcp';
-    this.streamState = 'live';
+    this.streamState = 'connecting';
     this.renderState();
     void this.runReadFallback(generation);
   }
@@ -591,18 +602,25 @@ export class TerminalViewer {
         if (!read) throw new Error('Terminal read fallback returned an invalid result.');
 
         let sequenceGap = false;
-        for (const event of read.events) {
-          if (this.acceptEvent(event) === 'gap') {
-            sequenceGap = true;
-            break;
+        if (read.events) {
+          for (const event of read.events) {
+            if (this.acceptEvent(event) === 'gap') {
+              sequenceGap = true;
+              break;
+            }
+            if (!this.readFallbackActive || generation !== this.readFallbackGeneration) return;
           }
-          if (!this.readFallbackActive || generation !== this.readFallbackGeneration) return;
+        } else if (read.next_cursor > this.lastSequence) {
+          if (read.output) this.queueOutput(read.output);
+          this.lastSequence = read.next_cursor;
         }
         if (sequenceGap) {
           await this.resynchronizeCursor(current.session_id);
           continue;
         }
 
+        this.transportMode = 'mcp';
+        this.streamState = 'live';
         if (this.viewState?.session_id === current.session_id) {
           this.viewState = { ...this.viewState, status: read.status, exit_code: read.exit_code };
           if (isFinalStatus(read.status)) {
