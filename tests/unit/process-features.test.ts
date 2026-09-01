@@ -372,6 +372,53 @@ describe('bounded LSP management', () => {
       .toThrowError(expect.objectContaining({ code: 'SESSION_NOT_FOUND' }));
   });
 
+
+  it('does not register an LSP process whose startup outlives manager shutdown', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-start-shutdown-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const script = await writeLspScript(root, `setInterval(() => {}, 1000);`);
+    const manager = new LspManager({
+      servers: { idle: { command: process.execPath, args: [script] } }, environment: cleanEnvironment(), killGraceMs: 20,
+    });
+    cleanup.push(() => manager.stopAll());
+
+    const starting = manager.start('user-a', { server_id: 'idle', root }, root);
+    manager.stopAll();
+    const [settled] = await Promise.allSettled([starting]);
+
+    expect(settled).toMatchObject({ status: 'rejected', reason: { code: 'AGENT_OFFLINE' } });
+    await expect(manager.start('user-a', { server_id: 'idle', root }, root))
+      .rejects.toMatchObject({ code: 'AGENT_OFFLINE' });
+  });
+
+
+  it('rejects pending LSP requests immediately when the manager shuts down', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-active-shutdown-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const script = await writeLspScript(root, `
+      process.on('SIGTERM', () => {});
+      process.stdin.resume();
+      setInterval(() => {}, 1000);
+    `);
+    const manager = new LspManager({
+      servers: { stubborn: { command: process.execPath, args: [script] } }, environment: cleanEnvironment(),
+      requestTimeoutMs: 5_000, killGraceMs: 20,
+    });
+    cleanup.push(() => manager.stopAll());
+    const started = await manager.start('user-a', { server_id: 'stubborn', root }, root);
+    const pending = manager.request('user-a', { lsp_id: started.lsp_id, method: 'never/responds', params: {} });
+
+    const stoppedAt = Date.now();
+    manager.stopAll();
+
+    await expect(pending).rejects.toMatchObject({ code: 'AGENT_OFFLINE' });
+    expect(Date.now() - stoppedAt).toBeLessThan(2_000);
+    expect(() => manager.request('user-a', { lsp_id: started.lsp_id, method: 'after/shutdown', params: {} }))
+      .toThrowError(expect.objectContaining({ code: 'SESSION_NOT_FOUND' }));
+    await expect(manager.start('user-a', { server_id: 'stubborn', root }, root))
+      .rejects.toMatchObject({ code: 'AGENT_OFFLINE' });
+  });
+
   it('reserves LSP capacity across concurrent starts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-concurrent-limit-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

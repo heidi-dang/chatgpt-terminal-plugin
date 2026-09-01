@@ -203,20 +203,29 @@ async function waitForText(
     return output.includes(needle);
   };
 
-  if (consume()) return { output, cursor };
-
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      reject(new Error(`Timed out waiting for terminal output: ${needle}\n${normalizeTerminal(output)}`));
-    }, timeoutMs);
-    const unsubscribe = agent.onEvent((event) => {
-      if (event.session_id !== sessionId) return;
-      if (!consume()) return;
+    let settled = false;
+    let unsubscribe = () => undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       unsubscribe();
       resolve({ output, cursor });
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      reject(new Error(`Timed out waiting for terminal output: ${needle}\n${normalizeTerminal(output)}`));
+    }, timeoutMs);
+    unsubscribe = agent.onEvent((event) => {
+      if (event.session_id !== sessionId) return;
+      if (consume()) finish();
     });
+    // Subscribe before the durable-buffer check so output arriving between the check
+    // and listener registration cannot be missed permanently.
+    if (consume()) finish();
   });
 }
 

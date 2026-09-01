@@ -383,10 +383,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       managed.metadata.last_activity_at = new Date().toISOString();
       const closeRequest = managed.closeRequest;
       if (closeRequest) {
-        managed.metadata.status = 'closed';
         setImmediate(() => {
           if (closeRequest.finalized) return;
           closeRequest.finalized = true;
+          managed.metadata.status = 'closed';
           this.recordEvent(managed, closeRequest.actor, 'session.closed', {
             reason: closeRequest.reason,
             exit_code: exitCode,
