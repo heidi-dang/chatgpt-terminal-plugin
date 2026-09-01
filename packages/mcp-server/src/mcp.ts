@@ -30,12 +30,31 @@ import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
 import type { TerminalService, RequestIdentity } from './service.js';
 import type { StreamTokenService } from './stream-token.js';
+import type { TerminalTurnRegistry, TerminalTurnState } from './turn-registry.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
 
-export const TERMINAL_UI_URI = 'ui://terminal/v9.html';
+export const TERMINAL_UI_URI = 'ui://terminal/v10.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
+const terminalSurfaceInputSchema = z.object({});
+const terminalSurfaceStatusInputSchema = z.object({ surface_id: z.string().uuid(), session_id: z.string().nullable().optional() });
+const terminalSurfaceOutputSchema = z.object({
+  surface_id: z.string().nullable(),
+  surface_open: z.boolean(),
+  surface_active: z.boolean(),
+  session_id: z.string().nullable(),
+  status: z.string().optional(),
+  cursor: z.number().int().nonnegative().optional(),
+  initial_output: z.string().optional(),
+  agent_id: z.string().optional(),
+  agent_name: z.string().optional(),
+  cwd: z.string().optional(),
+  shell: z.string().optional(),
+  exit_code: z.number().int().nullable().optional(),
+});
+
 const terminalStartViewOutputSchema = terminalStartOutputSchema.extend({
+  surface_id: z.string().uuid(),
   agent_id: z.string(),
   agent_name: z.string(),
   cwd: z.string(),
@@ -48,10 +67,11 @@ export interface McpServerDependencies {
   gateway: AgentGateway;
   service: TerminalService;
   streamTokens: StreamTokenService;
+  turnRegistry: TerminalTurnRegistry;
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
-  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.9.0' });
+  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.10.0' });
 
   server.registerResource(
     'Live terminal',
@@ -94,22 +114,69 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
   );
 
   server.registerTool(
-    'terminal_start',
+    'terminal_surface',
     {
-      title: 'Start terminal session',
-      description: 'Create a persistent PTY terminal on a selected local computer. An optional initial command may execute immediately.',
-      inputSchema: terminalStartInputSchema,
-      outputSchema: terminalStartViewOutputSchema,
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      title: 'Open terminal surface',
+      description: 'Call exactly once before any other terminal tool in each assistant turn. Opens the single Terminal UI for this turn and closes any stale PTY from the previous turn. Do not call it again within the same turn.',
+      inputSchema: terminalSurfaceInputSchema,
+      outputSchema: terminalSurfaceOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       _meta: {
         ui: { resourceUri: TERMINAL_UI_URI },
         'openai/outputTemplate': TERMINAL_UI_URI,
       },
     },
+    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.begin(identityFromContext(ctx)))),
+  );
+
+  server.registerTool(
+    'terminal_surface_status',
+    {
+      title: 'Read terminal surface state',
+      description: 'App-only state sync for the single Terminal UI. Returns the current PTY attached to this exact surface without rendering another UI.',
+      inputSchema: terminalSurfaceStatusInputSchema,
+      outputSchema: terminalSurfaceOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      _meta: { ui: { visibility: ['app'] }, 'openai/widgetAccessible': true },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const identity = identityFromContext(ctx);
+      const state = deps.turnRegistry.status(identity, input.surface_id);
+      return terminalSurfaceOutputSchema.parse(state.session_id === input.session_id ? state : await terminalSurfaceView(deps, identity, state));
+    }),
+  );
+
+  server.registerTool(
+    'terminal_turn_close',
+    {
+      title: 'Close terminal turn',
+      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface. The Terminal UI also calls it during host teardown.',
+      inputSchema: terminalSurfaceInputSchema,
+      outputSchema: terminalSurfaceOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
+    },
+    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identityFromContext(ctx)))),
+  );
+
+  server.registerTool(
+    'terminal_start',
+    {
+      title: 'Start terminal session',
+      description: 'Start a fresh PTY inside the already-open terminal_surface for this assistant turn. If another PTY is active in this turn, it is killed first and the same Terminal UI switches to this new stream. Never renders another Terminal UI.',
+      inputSchema: terminalStartInputSchema,
+      outputSchema: terminalStartViewOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    },
     async (input, ctx) => {
       try {
         const identity = identityFromContext(ctx);
+        if (!deps.turnRegistry.current(identity).surface_open) {
+          throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
+        }
+        await deps.turnRegistry.clearActive(identity);
         const started = await deps.service.start(identity, input);
+        const turn = await deps.turnRegistry.activate(identity, started.session_id);
         const record = deps.gateway.getSessionForUser(identity.userId, started.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const agent = deps.gateway.listAgents(identity.userId).find((candidate) => candidate.agent_id === record.session!.agent_id);
@@ -119,6 +186,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         streamUrl.searchParams.set('after', String(started.cursor));
         const output = terminalStartViewOutputSchema.parse({
           ...started,
+          surface_id: turn.surface_id,
           agent_id: record.session.agent_id,
           agent_name: agent?.display_name ?? record.session.agent_id,
           cwd: record.session.cwd,
@@ -235,7 +303,12 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.close(identityFromContext(ctx), input.session_id)),
+    async (input, ctx) => resultFrom(async () => {
+      const identity = identityFromContext(ctx);
+      const result = await deps.service.close(identity, input.session_id);
+      deps.turnRegistry.deactivate(identity, input.session_id);
+      return result;
+    }),
   );
 
   server.registerTool(
@@ -316,6 +389,41 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
   );
 
   return server;
+}
+
+
+async function terminalSurfaceView(
+  deps: McpServerDependencies,
+  identity: RequestIdentity,
+  state: TerminalTurnState,
+): Promise<Record<string, unknown>> {
+  if (!state.surface_open || !state.session_id) return { ...state };
+  try {
+    const status = await deps.service.status(identity, state.session_id);
+    const read = await deps.service.read(identity, {
+      session_id: state.session_id,
+      after: 0,
+      max_bytes: deps.config.maxReadBytes,
+      wait_ms: 0,
+    });
+    const agent = deps.gateway.listAgents(identity.userId).find((candidate) => candidate.agent_id === status.agent_id);
+    return {
+      ...state,
+      status: status.status,
+      cursor: read.next_cursor,
+      initial_output: read.output,
+      agent_id: status.agent_id,
+      agent_name: agent?.display_name ?? status.agent_id,
+      cwd: status.cwd,
+      shell: status.shell,
+      exit_code: status.exit_code,
+    };
+  } catch (error) {
+    if (error instanceof TerminalProtocolError && (error.code === 'SESSION_CLOSED' || error.code === 'SESSION_NOT_FOUND')) {
+      return { ...deps.turnRegistry.deactivate(identity, state.session_id) };
+    }
+    throw error;
+  }
 }
 
 function identityFromContext(ctx: ServerContext): RequestIdentity {

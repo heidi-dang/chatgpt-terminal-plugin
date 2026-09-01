@@ -19,6 +19,13 @@ interface TerminalViewState {
   exit_code?: number | null;
 }
 
+interface TerminalSurfaceState {
+  surface_id: string | null;
+  surface_open: boolean;
+  surface_active: boolean;
+  session_id: string | null;
+}
+
 interface TerminalStreamMeta {
   url: string;
   expires_at: string;
@@ -61,6 +68,7 @@ const MAX_OUTPUT_CHARS = 600_000;
 const OUTPUT_TRIM_TARGET = 450_000;
 const STREAM_REFRESH_MARGIN_MS = 15_000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 15_000;
+const SURFACE_POLL_INTERVAL_MS = 500;
 
 export class ChatGptMcpBridge implements TerminalAppBridge {
   ontoolresult: ((result: CallToolResult) => void) | undefined;
@@ -81,7 +89,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.9.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.10.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -244,6 +252,22 @@ export function parseStreamMeta(result: CallToolResult | null): TerminalStreamMe
     : null;
 }
 
+function parseSurfaceState(result: CallToolResult | null): TerminalSurfaceState | null {
+  if (!result) return null;
+  const value = structuredPayload(result);
+  if (!value || typeof value.surface_open !== 'boolean' || typeof value.surface_active !== 'boolean') return null;
+  const surfaceId = value.surface_id;
+  const sessionId = value.session_id;
+  if (surfaceId !== null && typeof surfaceId !== 'string') return null;
+  if (sessionId !== null && typeof sessionId !== 'string') return null;
+  return {
+    surface_id: surfaceId,
+    surface_open: value.surface_open,
+    surface_active: value.surface_active,
+    session_id: sessionId,
+  };
+}
+
 export function mergeViewState(previous: TerminalViewState | null, next: TerminalViewState): TerminalViewState {
   if (!previous || previous.session_id !== next.session_id) return next;
   return { ...previous, ...next };
@@ -308,6 +332,60 @@ export function normalizeTerminalText(input: string): string {
     index += 1;
   }
   return output;
+}
+
+
+const TERM_RE = /(^.*?[$#>]\s)([\w./:+-]+)?|(^\s*(?:\/\/|#\s)[^\n]*)|\b(ERROR|FAIL|FATAL|EXCEPTION)\b|\b(WARN(?:ING)?)\b|\b(PASS|SUCCESS|DONE|OK)\b|("[^"\n]*"|'[^'\n]*')|(--?[\w-]+)|((?:~|\.{1,2})?\/[^\s"';|&]+)|(\b\d+(?:\.\d+)?\b)|\b(const|let|var|function|class|if|else|for|while|return|import|from|export|async|await|new|true|false|null|undefined)\b/gim;
+const TERM_KIND = ['', 'prompt','command','comment','error','warning','success','string','option','path','number','keyword'];
+
+export function highlightTerminalText(doc: Document, input: string): DocumentFragment {
+  const text = normalizeTerminalText(input), out = doc.createDocumentFragment();
+  let end = 0;
+  const add = (value: string, kind: number) => { const span = doc.createElement('span'); span.className = `term-${TERM_KIND[kind]}`; span.textContent = value; out.appendChild(span); };
+  TERM_RE.lastIndex = 0;
+  for (const match of text.matchAll(TERM_RE)) {
+    const at = match.index ?? 0;
+    if (at > end) out.append(text.slice(end, at));
+    if (match[1]) { add(match[1], 1); if (match[2]) add(match[2], 2); }
+    else add(match[0], match.slice(1).findIndex(Boolean) + 1);
+    end = at + match[0].length;
+  }
+  if (end < text.length) out.append(text.slice(end));
+  return out;
+}
+
+export function appendRichTerminalText(container: HTMLElement, input: string, overflow = false): void {
+  const doc = container.ownerDocument, out = doc.createDocumentFragment(), colors = 'black red green yellow blue magenta cyan white'.split(' ');
+  let at = 0, color = '', bold = false;
+  const add = (text: string) => {
+    if (!text) return;
+    const part = highlightTerminalText(doc, text);
+    if (!color && !bold) out.appendChild(part);
+    else { const span = doc.createElement('span'); span.className = `${color ? `term-${color}` : ''}${bold ? ' term-bold' : ''}`; span.appendChild(part); out.appendChild(span); }
+  };
+  for (const match of input.matchAll(new RegExp(String.fromCharCode(27) + '\\[([0-9;]*)m', 'g'))) {
+    const pos = match.index ?? 0;
+    add(input.slice(at, pos));
+    for (const code of (match[1] || '0').split(';').map(Number)) {
+      if (!code) { color = ''; bold = false; }
+      else if (code === 1) bold = true;
+      else if (code === 22) bold = false;
+      else if (code === 39) color = '';
+      else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) color = colors[code >= 90 ? code - 90 : code - 30] ?? '';
+    }
+    at = pos + match[0].length;
+  }
+  add(input.slice(at));
+  const text = out.textContent ?? '', lines = text.split('\n'), nl = text.endsWith('\n');
+  if (nl) lines.pop();
+  const reduced = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (overflow && !reduced && text.length < 4096 && lines.length > 2) {
+    const cut = 1 + Math.floor(Math.random() * (lines.length - 1));
+    lines.push(...lines.splice(0, cut));
+    const slot = doc.createElement('span'); slot.className = 'term-overflow'; slot.textContent = lines.join('\n') + (nl ? '\n' : '');
+    container.appendChild(slot); setTimeout(() => slot.replaceWith(out), 180); return;
+  }
+  container.appendChild(out);
 }
 
 function parseTerminalEventValue(parsed: unknown): TerminalEvent {
@@ -386,6 +464,10 @@ export class TerminalViewer {
   private outputQueue = '';
   private hasLiveOutput = false;
   private hotReloadVersion: string | undefined;
+  private surfaceId: string | undefined;
+  private surfacePollTimer: number | undefined;
+  private surfacePollInFlight = false;
+  private bridgeReady = false;
 
   private readonly shell: HTMLElement;
   private readonly machine: HTMLElement;
@@ -416,9 +498,15 @@ export class TerminalViewer {
       const theme = context.theme;
       if (typeof theme === 'string') this.doc.documentElement.dataset.theme = theme;
     };
-    this.app.onteardown = () => {
+    this.app.onteardown = async () => {
+      this.stopSurfaceSync();
+      try {
+        await this.callTool('terminal_turn_close', {});
+      } catch (error) {
+        console.error('[terminal-app] turn cleanup failed', error);
+      }
       this.destroy();
-      return Promise.resolve({});
+      return {};
     };
     this.app.onerror = (error) => {
       console.error('[terminal-app]', error);
@@ -427,7 +515,9 @@ export class TerminalViewer {
   }
 
   markBridgeReady(): void {
+    this.bridgeReady = true;
     this.shell.dataset.bridge = 'ready';
+    if (this.surfaceId) this.startSurfaceSync();
   }
 
   showBridgeFailure(error: unknown): void {
@@ -438,11 +528,35 @@ export class TerminalViewer {
   }
 
   applyToolResult(result: CallToolResult): void {
+    const surface = parseSurfaceState(result);
+    if (!this.surfaceId && surface?.surface_id) {
+      this.surfaceId = surface.surface_id;
+      if (this.bridgeReady) this.startSurfaceSync();
+    }
+    if (surface?.surface_id && this.surfaceId && surface.surface_id !== this.surfaceId) return;
+    if (surface && !surface.surface_open) {
+      this.stopSurfaceSync();
+      this.finishStream();
+      this.viewState = null;
+      this.machine.textContent = 'Terminal turn complete';
+      this.path.textContent = 'A fresh terminal will open on the next prompt.';
+      this.path.title = '';
+      this.renderState();
+      return;
+    }
+
     const next = parseViewState(result);
     if (next) {
       const previousSession = this.viewState?.session_id;
+      const resultSurfaceId = surface?.surface_id;
+      const canSwitch = previousSession === undefined || previousSession === next.session_id || (Boolean(resultSurfaceId) && resultSurfaceId === this.surfaceId);
+      if (!canSwitch) return;
       this.viewState = mergeViewState(this.viewState, next);
       if (previousSession !== next.session_id) {
+        this.eventSource?.close();
+        this.eventSource = undefined;
+        this.clearReconnectTimer();
+        this.clearRefreshTimer();
         this.stopReadFallback();
         this.transportMode = 'sse';
         this.lastSequence = next.cursor;
@@ -460,6 +574,7 @@ export class TerminalViewer {
   }
 
   destroy(): void {
+    this.stopSurfaceSync();
     this.eventSource?.close();
     this.styleSource?.close();
     this.eventSource = undefined;
@@ -468,6 +583,36 @@ export class TerminalViewer {
     this.clearRefreshTimer();
     this.stopReadFallback();
     this.flushOutput();
+  }
+
+  private startSurfaceSync(): void {
+    if (!this.surfaceId || this.surfacePollTimer !== undefined) return;
+    void this.pollSurface();
+    this.surfacePollTimer = window.setInterval(() => void this.pollSurface(), SURFACE_POLL_INTERVAL_MS);
+  }
+
+  private stopSurfaceSync(): void {
+    if (this.surfacePollTimer !== undefined) window.clearInterval(this.surfacePollTimer);
+    this.surfacePollTimer = undefined;
+  }
+
+  private async pollSurface(): Promise<void> {
+    const surfaceId = this.surfaceId;
+    if (!surfaceId || this.surfacePollInFlight) return;
+    this.surfacePollInFlight = true;
+    try {
+      const previousSession = this.viewState?.session_id;
+      const result = await this.callTool('terminal_surface_status', { surface_id: surfaceId, session_id: previousSession ?? null });
+      const surface = parseSurfaceState(result);
+      if (!result.isError && this.surfaceId === surfaceId && surface?.surface_id === surfaceId) {
+        this.applyToolResult(result);
+        if (surface.session_id && surface.session_id !== previousSession) this.refreshStream(false);
+      }
+    } catch (error) {
+      console.error('[terminal-app] surface sync failed', error);
+    } finally {
+      this.surfacePollInFlight = false;
+    }
   }
 
   private useStream(meta: TerminalStreamMeta): void {
@@ -763,9 +908,8 @@ export class TerminalViewer {
   }
 
   private queueOutput(text: string): void {
-    const normalized = normalizeTerminalText(text);
-    if (!normalized) return;
-    this.outputQueue += normalized;
+    if (!text) return;
+    this.outputQueue += text;
     if (this.outputFrame !== undefined) return;
     this.outputFrame = window.requestAnimationFrame(() => {
       this.outputFrame = undefined;
@@ -783,7 +927,7 @@ export class TerminalViewer {
       this.output.textContent = '';
       this.hasLiveOutput = true;
     }
-    this.output.appendChild(this.doc.createTextNode(this.outputQueue));
+    appendRichTerminalText(this.output, this.outputQueue, true);
     this.outputQueue = '';
     this.trimOutput();
     this.output.scrollTop = this.output.scrollHeight;
@@ -795,7 +939,8 @@ export class TerminalViewer {
     let tail = text.slice(-OUTPUT_TRIM_TARGET);
     const newline = tail.indexOf('\n');
     if (newline >= 0) tail = tail.slice(newline + 1);
-    this.output.textContent = `[Older terminal output trimmed for mobile performance]\n${tail}`;
+    this.output.textContent = '';
+    appendRichTerminalText(this.output, `[Older terminal output trimmed for mobile performance]\n${tail}`);
   }
 
   private renderState(): void {

@@ -2,7 +2,9 @@
   color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
   background: transparent;
+  --tr:#ff7b72;--tg:#56d364;--ty:#e3b341;--tb:#79c0ff;--tm:#d2a8ff;--tc:#76e3ea;--tw:#f0f6fc;--tk:#484f58;
 }
+:root[data-theme="light"]{--tr:#cf222e;--tg:#1a7f37;--ty:#9a6700;--tb:#0969da;--tm:#8250df;--tc:#1b7c83;--tw:#24292f;--tk:#57606a}
 
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; min-height: 100%; }
@@ -17,30 +19,15 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   overflow: hidden;
   isolation: isolate;
   color: #f0f6fc;
-  background:
-    radial-gradient(circle at 10% -20%, rgba(48, 210, 120, 0.16), transparent 36%),
-    radial-gradient(circle at 100% 0%, rgba(56, 139, 253, 0.15), transparent 32%),
-    linear-gradient(180deg, #10151d 0%, #070a0f 28%, #05070b 100%);
+  background: linear-gradient(180deg,#10151d,#05070b);
   border: 1px solid rgba(240, 246, 252, 0.10);
   border-radius: 20px;
-  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.28), inset 0 1px rgba(255, 255, 255, 0.04);
-}
-
-.terminal-shell::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(120deg, rgba(255,255,255,0.025), transparent 38%);
 }
 
 .terminal-header {
   min-width: 0;
   padding: 14px 16px 12px;
   border-bottom: 1px solid rgba(240, 246, 252, 0.08);
-  backdrop-filter: blur(18px) saturate(125%);
-  -webkit-backdrop-filter: blur(18px) saturate(125%);
 }
 
 .terminal-identity { min-width: 0; }
@@ -84,7 +71,6 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.08em;
-  transition: color 0.25s ease, background 0.25s ease, border-color 0.25s ease;
 }
 
 .state-dot {
@@ -92,31 +78,14 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   height: 7px;
   border-radius: 999px;
   background: currentColor;
-  box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
-  transition: box-shadow 0.25s ease;
 }
 .terminal-status[data-state="live"] { color: #56d364; background: rgba(46, 160, 67, 0.09); border-color: rgba(63,185,80,0.17); }
-.terminal-status[data-state="live"] .state-dot { box-shadow: 0 0 12px rgba(86,211,100,0.75); animation: pulse-live 2s ease-in-out infinite; }
 .terminal-status[data-state="reconnecting"],
 .terminal-status[data-state="connecting"] { color: #d29922; }
-.terminal-status[data-state="reconnecting"] .state-dot,
-.terminal-status[data-state="connecting"] .state-dot { animation: pulse-reconnect 1.2s ease-in-out infinite; }
 .terminal-status[data-state="closed"],
 .terminal-status[data-state="exited"],
 .terminal-status[data-state="failed"],
 .terminal-status[data-state="offline"] { color: #8c959f; }
-
-/* Subtle glow pulse for the live connection indicator */
-@keyframes pulse-live {
-  0%, 100% { box-shadow: 0 0 8px rgba(86,211,100,0.55); }
-  50% { box-shadow: 0 0 16px rgba(86,211,100,0.85); }
-}
-
-/* Faster pulse for reconnecting/connecting states to indicate activity */
-@keyframes pulse-reconnect {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
 
 .terminal-path {
   margin-top: 5px;
@@ -135,28 +104,6 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   padding: 11px 10px 9px 11px;
   overflow: hidden;
   background: rgba(3, 5, 8, 0.72);
-}
-
-.terminal-frame::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(86,211,100,0.32), rgba(56,139,253,0.25), transparent);
-  pointer-events: none;
-  transition: background 0.3s ease;
-}
-/* State-reactive glow line: amber during reconnect, dimmed when offline */
-[data-state="reconnecting"] .terminal-frame::before,
-[data-state="connecting"] .terminal-frame::before {
-  background: linear-gradient(90deg, transparent, rgba(210,153,34,0.4), rgba(210,153,34,0.2), transparent);
-}
-[data-state="closed"] .terminal-frame::before,
-[data-state="exited"] .terminal-frame::before,
-[data-state="failed"] .terminal-frame::before {
-  background: linear-gradient(90deg, transparent, rgba(140,149,159,0.15), transparent);
 }
 
 .terminal-output {
@@ -179,8 +126,16 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   letter-spacing: -0.01em;
   -webkit-overflow-scrolling: touch;
 }
-.terminal-output::-webkit-scrollbar { width: 5px; height: 5px; }
-.terminal-output::-webkit-scrollbar-thumb { background: rgba(139,148,158,0.30); border-radius: 999px; }
+
+.term-keyword,.term-error,.term-red{color:var(--tr)}
+.term-path,.term-success,.term-green{color:var(--tg)}
+.term-number,.term-warning,.term-yellow{color:var(--ty)}
+.term-string,.term-command,.term-blue{color:var(--tb)}
+.term-option,.term-magenta{color:var(--tm)}
+.term-prompt,.term-comment{color:var(--tk)}
+.term-cyan{color:var(--tc)}.term-white{color:var(--tw)}.term-black{color:var(--tk)}
+.term-command,.term-error,.term-bold{font-weight:700}.term-comment{font-style:italic}
+.term-overflow{position:relative;animation:overflow .18s steps(2,end)}@keyframes overflow{from{top:1em;opacity:.45}to{top:0;opacity:1}}
 
 .terminal-footer {
   display: flex;
@@ -198,7 +153,7 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   letter-spacing: 0.055em;
   white-space: nowrap;
 }
-.terminal-footer span:nth-child(2) { color: #3fb950; transition: color 0.2s ease; }
+.terminal-footer span:nth-child(2) { color: #3fb950; }
 [data-state="reconnecting"] .terminal-footer span:nth-child(2),
 [data-state="connecting"] .terminal-footer span:nth-child(2) { color: #d29922; }
 [data-state="closed"] .terminal-footer span:nth-child(2),
@@ -232,12 +187,6 @@ body { background: transparent; color: #f0f6fc; overflow-x: hidden; }
   .terminal-frame { min-height: 430px; padding: 9px 8px 7px; }
   .terminal-output { min-height: 420px; font-size: 11.5px; line-height: 1.32; }
   .terminal-footer { gap: 8px; min-height: 28px; padding-inline: 10px; font-size: 8px; }
-}
-
-/* Respect user preference for reduced motion */
-@media (prefers-reduced-motion: reduce) {
-  .state-dot { animation: none !important; }
-  .terminal-status { transition: none !important; }
 }
 
 @media (max-width: 390px) {

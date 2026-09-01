@@ -116,6 +116,9 @@ describe('terminal MCP end-to-end', () => {
     const toolNames = new Set(listed.tools.map((tool) => tool.name));
     for (const expected of [
       'terminal_list_agents',
+      'terminal_surface',
+      'terminal_surface_status',
+      'terminal_turn_close',
       'terminal_start',
       'terminal_read',
       'terminal_write',
@@ -130,11 +133,23 @@ describe('terminal MCP end-to-end', () => {
       'terminal_search_files',
     ]) expect(toolNames.has(expected)).toBe(true);
 
+    const surfaceTool = listed.tools.find((tool) => tool.name === 'terminal_surface');
+    const surfaceMeta = surfaceTool?._meta as Record<string, unknown> | undefined;
+    const surfaceUi = surfaceMeta?.ui as Record<string, unknown> | undefined;
+    expect(surfaceUi?.resourceUri).toBe('ui://terminal/v10.html');
+    expect(surfaceMeta?.['openai/outputTemplate']).toBe('ui://terminal/v10.html');
+
     const startTool = listed.tools.find((tool) => tool.name === 'terminal_start');
     const startMeta = startTool?._meta as Record<string, unknown> | undefined;
     const startUi = startMeta?.ui as Record<string, unknown> | undefined;
-    expect(startUi?.resourceUri).toBe('ui://terminal/v9.html');
-    expect(startMeta?.['openai/outputTemplate']).toBe('ui://terminal/v9.html');
+    expect(startUi?.resourceUri).toBeUndefined();
+    expect(startMeta?.['openai/outputTemplate']).toBeUndefined();
+
+    const surfaceStatusTool = listed.tools.find((tool) => tool.name === 'terminal_surface_status');
+    const surfaceStatusMeta = surfaceStatusTool?._meta as Record<string, unknown> | undefined;
+    const surfaceStatusUi = surfaceStatusMeta?.ui as Record<string, unknown> | undefined;
+    expect(surfaceStatusUi?.visibility).toEqual(['app']);
+    expect(surfaceStatusMeta?.['openai/widgetAccessible']).toBe(true);
     const refreshTool = listed.tools.find((tool) => tool.name === 'terminal_stream_refresh');
     const refreshMeta = refreshTool?._meta as Record<string, unknown> | undefined;
     const refreshUi = refreshMeta?.ui as Record<string, unknown> | undefined;
@@ -147,7 +162,7 @@ describe('terminal MCP end-to-end', () => {
       expect(toolMeta?.['openai/widgetAccessible']).toBe(true);
     }
 
-    const resourceResult = await client.readResource({ uri: 'ui://terminal/v9.html' });
+    const resourceResult = await client.readResource({ uri: 'ui://terminal/v10.html' });
     const uiResource = resourceResult.contents[0] as {
       mimeType?: string;
       text?: string;
@@ -183,6 +198,10 @@ describe('terminal MCP end-to-end', () => {
     const agentList = structured(await client.callTool({ name: 'terminal_list_agents', arguments: {} }));
     expect((agentList.agents as Array<{ agent_id: string }>).some((candidate) => candidate.agent_id === identity.agentId)).toBe(true);
 
+    const surface = structured(await client.callTool({ name: 'terminal_surface', arguments: {} }));
+    const surfaceId = stringField(surface, 'surface_id');
+    expect(surface.surface_active).toBe(false);
+
     const startedResult = await client.callTool({
       name: 'terminal_start',
       arguments: { agent_id: identity.agentId, cwd: workspace, shell: 'bash', cols: 80, rows: 24 },
@@ -190,6 +209,10 @@ describe('terminal MCP end-to-end', () => {
     const started = structured(startedResult);
     const sessionId = stringField(started, 'session_id');
     let cursor = numberField(started, 'cursor');
+
+    const liveSurface = structured(await client.callTool({ name: 'terminal_surface_status', arguments: { surface_id: surfaceId } }));
+    expect(liveSurface.surface_active).toBe(true);
+    expect(liveSurface.session_id).toBe(sessionId);
 
     const writtenFile = structured(await client.callTool({
       name: 'terminal_write_file',
@@ -277,11 +300,17 @@ describe('terminal MCP end-to-end', () => {
     cursor = streamedEvent.sequence;
     await streamReader.cancel();
 
-    const closed = structured(await client.callTool({ name: 'terminal_close', arguments: { session_id: sessionId } }));
-    expect(closed.status).toBe('closing');
+    const replacement = structured(await client.callTool({
+      name: 'terminal_start',
+      arguments: { agent_id: identity.agentId, cwd: workspace, shell: 'bash', cols: 80, rows: 24 },
+    }));
+    const replacementSessionId = stringField(replacement, 'session_id');
+    expect(replacementSessionId).not.toBe(sessionId);
+    expect(replacement.surface_id).toBe(surfaceId);
+
     await waitUntil(async () => {
-      const finalStatus = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: sessionId } }));
-      return finalStatus.status === 'closed';
+      const previousStatus = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: sessionId } }));
+      return previousStatus.status === 'closed';
     });
     const status = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: sessionId } }));
     expect(status.status).toBe('closed');
@@ -292,6 +321,30 @@ describe('terminal MCP end-to-end', () => {
     }));
     const finalEvents = finalRead.events as Array<{ event_type?: string }>;
     expect(finalEvents.at(-1)?.event_type).toBe('session.closed');
+
+    const replacementSurface = structured(await client.callTool({
+      name: 'terminal_surface_status', arguments: { surface_id: surfaceId },
+    }));
+    expect(replacementSurface.surface_active).toBe(true);
+    expect(replacementSurface.session_id).toBe(replacementSessionId);
+
+    await client.callTool({ name: 'terminal_write', arguments: { session_id: replacementSessionId, text: "printf '__REPLACEMENT__\n'\r" } });
+    const replacementCursor = numberField(replacement, 'cursor');
+    await readUntil(client, replacementSessionId, replacementCursor, '__REPLACEMENT__');
+
+    const turnClosed = structured(await client.callTool({ name: 'terminal_turn_close', arguments: {} }));
+    expect(turnClosed.surface_open).toBe(false);
+    expect(turnClosed.surface_active).toBe(false);
+    expect(turnClosed.session_id).toBeNull();
+    await waitUntil(async () => {
+      const replacementStatus = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: replacementSessionId } }));
+      return replacementStatus.status === 'closed';
+    });
+    const staleSurface = structured(await client.callTool({
+      name: 'terminal_surface_status', arguments: { surface_id: surfaceId },
+    }));
+    expect(staleSurface.surface_open).toBe(false);
+    expect(staleSurface.session_id).toBeNull();
 
     await waitUntil(async () => {
       try {

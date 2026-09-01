@@ -26,9 +26,17 @@ describe('terminal UI static-first contract', () => {
     expect(runtime).toContain('EventSource');
   });
 
-  it('uses a fresh v9 MCP App resource identity', async () => {
+  it('ships terminal syntax colors for both host themes', async () => {
+    const css = await readFile(join(root, 'packages/terminal-ui/src/styles.css'), 'utf8');
+    expect(css).toContain(':root[data-theme="light"]');
+    for (const token of ['.term-keyword', '.term-string', '.term-number', '.term-path', '.term-option', '.term-error', '.term-warning', '.term-success']) {
+      expect(css).toContain(token);
+    }
+  });
+
+  it('uses a fresh v10 MCP App resource identity', async () => {
     const mcp = await readFile(join(root, 'packages/mcp-server/src/mcp.ts'), 'utf8');
-    expect(mcp).toContain("ui://terminal/v9.html");
-    expect(mcp).toContain("version: '0.9.0'");
+    expect(mcp).toContain("ui://terminal/v10.html");
+    expect(mcp).toContain("version: '0.10.0'");
   });
 });

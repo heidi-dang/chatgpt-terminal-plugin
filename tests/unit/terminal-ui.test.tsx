@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ChatGptMcpBridge,
   TerminalViewer,
+  appendRichTerminalText,
   classifySequence,
+  highlightTerminalText,
   normalizeTerminalText,
   type CallToolResult,
   type TerminalAppBridge,
@@ -380,6 +382,90 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
+
+  it('switches a replacement PTY inside the same surface and ignores a different surface', async () => {
+    const app = createFakeApp();
+    const surfaceId = '11111111-1111-4111-8111-111111111111';
+    app.callServerTool.mockImplementation(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_surface_status') {
+        return {
+          structuredContent: {
+            surface_id: surfaceId,
+            surface_open: true,
+            surface_active: true,
+            session_id: 'session-2',
+            status: 'running',
+            cursor: 2,
+            initial_output: 'replacement\r\n',
+            agent_id: 'agent-1',
+            agent_name: 'My computer',
+            cwd: '/replacement',
+            shell: 'bash',
+            exit_code: null,
+          },
+        };
+      }
+      if (name === 'terminal_stream_refresh') {
+        return {
+          structuredContent: { session_id: 'session-2', status: 'running', cursor: 2 },
+          _meta: {
+            terminal_stream: {
+              url: 'https://terminal.example/events?token=replacement',
+              expires_at: new Date(Date.now() + 60_000).toISOString(),
+            },
+          },
+        };
+      }
+      return { structuredContent: {} };
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.({
+      structuredContent: { surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null },
+    });
+    viewer.markBridgeReady();
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_surface_status', arguments: { surface_id: surfaceId, session_id: null },
+    }));
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_stream_refresh', arguments: { session_id: 'session-2', after: 2 },
+    }));
+    await flushFrames();
+
+    expect(document.querySelectorAll('#terminal-shell')).toHaveLength(1);
+    expect(document.getElementById('terminal-output')?.textContent).toContain('replacement\n');
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: '22222222-2222-4222-8222-222222222222',
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-3',
+        status: 'running',
+        cursor: 1,
+        initial_output: 'WRONG-SURFACE\r\n',
+      },
+    });
+    await flushFrames();
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('WRONG-SURFACE');
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+    viewer.destroy();
+  });
+
+  it('closes the active terminal turn when the host tears down the widget', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+
+    await app.onteardown?.();
+
+    expect(app.callServerTool).toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+  });
+
   it('hot reloads CSS without replacing the document or terminal SSE source', async () => {
     const css = '.terminal-shell { outline: 1px solid transparent; }';
     const fetchMock = vi.fn(async () => new Response(css, { status: 200 }));
@@ -397,6 +483,72 @@ describe('terminal MCP App UI', () => {
     expect(fetchMock).toHaveBeenCalled();
     expect(documentOpen).not.toHaveBeenCalled();
     expect(terminal.close).not.toHaveBeenCalled();
+  });
+
+  it('adds rich terminal syntax tokens without changing the transcript text', () => {
+    const text = 'shacker@host:/workspace$ pnpm test --filter "ui" ./src 42\nERROR build failed\nPASS 12 tests\n';
+    const host = document.createElement('div');
+    host.appendChild(highlightTerminalText(document, text));
+
+    expect(host.textContent).toBe(text);
+    for (const token of ['prompt', 'command', 'option', 'string', 'path', 'number', 'error', 'success']) {
+      expect(host.querySelector(`.term-${token}`)).not.toBeNull();
+    }
+  });
+
+  it('renders ANSI and semantic terminal syntax with DOM-safe themed spans', () => {
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+
+    appendRichTerminalText(output, '\u001b[31;1mERROR\u001b[0m const answer = "ok"; --force /tmp/demo 42\n');
+
+    expect(output.textContent).toBe('ERROR const answer = "ok"; --force /tmp/demo 42\n');
+    expect(output.querySelector('.term-red.term-bold')?.textContent).toBe('ERROR');
+    expect(output.querySelector('.term-keyword')?.textContent).toBe('const');
+    expect(output.querySelector('.term-string')?.textContent).toBe('"ok"');
+    expect(output.querySelector('.term-option')?.textContent).toBe('--force');
+    expect(output.querySelector('.term-path')?.textContent).toBe('/tmp/demo');
+    expect(output.querySelector('.term-number')?.textContent).toBe('42');
+    expect(output.innerHTML).not.toContain('<script');
+  });
+
+  it('classifies plain diagnostic and comment lines without changing terminal text', () => {
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+    const text = 'WARN retrying\n// source comment\nPASS complete\n';
+    appendRichTerminalText(output, text);
+    expect(output.textContent).toBe(text);
+    expect(output.querySelector('.term-warning')?.textContent).toContain('WARN');
+    expect(output.querySelector('.term-comment')?.textContent).toContain('// source comment');
+    expect(output.querySelector('.term-success')?.textContent).toContain('PASS');
+  });
+
+  it('previews multi-line output in Overflow order then settles into the exact transcript', () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+    const text = 'first line\nsecond line\nthird line\n';
+
+    appendRichTerminalText(output, text, true);
+
+    expect(output.querySelector('.term-overflow')).not.toBeNull();
+    expect(output.textContent).not.toBe(text);
+    vi.runAllTimers();
+    expect(output.textContent).toBe(text);
+    expect(output.querySelector('.term-overflow')).toBeNull();
+  });
+
+  it('bypasses Overflow when reduced motion is requested', () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+    const text = 'first line\nsecond line\nthird line\n';
+
+    appendRichTerminalText(output, text, true);
+
+    expect(output.textContent).toBe(text);
+    expect(output.querySelector('.term-overflow')).toBeNull();
   });
 
   it('normalizes common ANSI, carriage-return, and backspace terminal control bytes', () => {

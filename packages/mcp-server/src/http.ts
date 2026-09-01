@@ -13,6 +13,7 @@ import { AgentGateway } from './gateway.js';
 import { createTerminalMcpServer } from './mcp.js';
 import { TerminalService } from './service.js';
 import { StreamTokenService } from './stream-token.js';
+import { TerminalTurnRegistry } from './turn-registry.js';
 import { readTerminalUiStyles, watchTerminalUiStyles } from './ui-runtime.js';
 
 interface McpSession {
@@ -67,6 +68,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
   const service = new TerminalService(gateway, config, audit);
   const streamTokens = new StreamTokenService(config.streamTokenSecret, config.streamTokenTtlSeconds);
+  const turnRegistry = new TerminalTurnRegistry(
+    async (identity, sessionId) => service.close(identity, sessionId).then(() => undefined),
+    config.terminalTurnLeaseMs,
+  );
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
@@ -231,7 +236,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
           return;
         }
 
-        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens });
+        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry });
         const transport = new NodeStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {
@@ -375,6 +380,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       stopUiWatcher();
       for (const client of uiReloadClients) client.end();
       uiReloadClients.clear();
+      turnRegistry.dispose();
       gateway.closeAll();
       for (const session of sessions.values()) await session.server.close();
       sessions.clear();
