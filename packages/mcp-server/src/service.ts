@@ -212,6 +212,17 @@ export class TerminalService {
     return this.gateway.listFiles(identity.userId, input.session_id, input.path, input.max_entries);
   }
 
+  async searchFiles(identity: RequestIdentity, input: { session_id: string; pattern: string; path: string; include?: string; max_results: number; context_lines: number }): Promise<unknown> {
+    await this.audit.record({
+      action: 'file_search',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { pattern: input.pattern, path: input.path },
+    });
+    return this.gateway.searchFiles(identity.userId, input.session_id, input.pattern, input.path, input.include, input.max_results, input.context_lines);
+  }
+
   async writeFile(identity: RequestIdentity, input: { session_id: string; path: string; content: string; create_directories: boolean }): Promise<unknown> {
     await this.assertMutationAllowed(identity, 'file_write', { path: input.path });
     await this.audit.record({

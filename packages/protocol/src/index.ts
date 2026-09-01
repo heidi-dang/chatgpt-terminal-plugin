@@ -257,6 +257,33 @@ export const terminalWriteFileOutputSchema = z.object({
 });
 export type TerminalWriteFileOutput = z.infer<typeof terminalWriteFileOutputSchema>;
 
+export const terminalSearchFilesInputSchema = z.object({
+  session_id: z.string().min(1),
+  pattern: z.string().min(1).max(1024),
+  path: z.string().min(1).max(4096).default('.'),
+  include: z.string().max(256).optional(),
+  max_results: z.number().int().positive().max(200).default(50),
+  context_lines: z.number().int().nonnegative().max(5).default(0),
+});
+export type TerminalSearchFilesInput = z.infer<typeof terminalSearchFilesInputSchema>;
+
+export const terminalSearchMatchSchema = z.object({
+  file: z.string(),
+  line: z.number().int().positive(),
+  text: z.string(),
+  context_before: z.array(z.string()).optional(),
+  context_after: z.array(z.string()).optional(),
+});
+export type TerminalSearchMatch = z.infer<typeof terminalSearchMatchSchema>;
+
+export const terminalSearchFilesOutputSchema = z.object({
+  pattern: z.string(),
+  matches: z.array(terminalSearchMatchSchema),
+  truncated: z.boolean(),
+  files_searched: z.number().int().nonnegative(),
+});
+export type TerminalSearchFilesOutput = z.infer<typeof terminalSearchFilesOutputSchema>;
+
 export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
     type: z.literal('request'),
@@ -313,6 +340,12 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     request_id: z.string().min(1),
     action: z.literal('file.write'),
     input: terminalWriteFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.search'),
+    input: terminalSearchFilesInputSchema,
   }),
 ]);
 export type AgentCommand = z.infer<typeof agentCommandSchema>;

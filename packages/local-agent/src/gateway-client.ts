@@ -243,6 +243,8 @@ export class AgentGatewayClient {
         return this.agent.listFiles(command.input.session_id, command.input.path, command.input.max_entries);
       case 'file.write':
         return this.agent.writeFile(command.input.session_id, command.input.path, command.input.content, command.input.create_directories);
+      case 'file.search':
+        return this.agent.searchFiles(command.input.session_id, command.input.pattern, command.input.path, command.input.include, command.input.max_results, command.input.context_lines);
     }
   }
 

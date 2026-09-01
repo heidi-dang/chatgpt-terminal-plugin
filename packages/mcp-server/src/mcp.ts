@@ -21,6 +21,8 @@ import {
   terminalListFilesOutputSchema,
   terminalWriteFileInputSchema,
   terminalWriteFileOutputSchema,
+  terminalSearchFilesInputSchema,
+  terminalSearchFilesOutputSchema,
 } from '@terminal/protocol';
 import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
@@ -278,6 +280,21 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     async (input, ctx) => resultFrom(async () => {
       const result = await deps.service.writeFile(identityFromContext(ctx), input);
       return terminalWriteFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_search_files',
+    {
+      title: 'Search files',
+      description: 'Search for a regex pattern across files in the workspace of an active terminal session. Returns matching lines with file paths and line numbers. Supports file type filtering (e.g. include: "*.ts") and optional context lines around each match. Much faster than running grep through the terminal and returns structured results.',
+      inputSchema: terminalSearchFilesInputSchema,
+      outputSchema: terminalSearchFilesOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.searchFiles(identityFromContext(ctx), input);
+      return terminalSearchFilesOutputSchema.parse(result);
     }),
   );
 

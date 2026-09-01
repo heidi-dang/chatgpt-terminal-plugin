@@ -63,6 +63,7 @@ export interface TerminalAgentApi {
   readFile(sessionId: string, path: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }>;
   listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
   writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
+  searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
   onEvent(listener: (event: TerminalEvent) => void): () => void;
   shutdown(): void;
 }
@@ -92,6 +93,43 @@ function isFileNotFound(error: unknown): boolean {
 
 function errorMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Simple glob matching for file include filters (e.g. "*.ts", "*.{js,jsx}"). */
+function matchGlob(filename: string, pattern: string): boolean {
+  // Handle {a,b} alternation
+  const braceMatch = pattern.match(/^(.*)\.\{([^}]+)\}$/);
+  if (braceMatch) {
+    const extensions = braceMatch[2].split(',');
+    return extensions.some(ext => filename.endsWith('.' + ext));
+  }
+  // Handle simple *.ext
+  if (pattern.startsWith('*.')) {
+    return filename.endsWith(pattern.slice(1));
+  }
+  // Exact match
+  return filename === pattern;
+}
+
+/** Read a file as UTF-8 text, returning null if it's binary or too large. */
+async function readFileContent(filePath: string, maxBytes: number): Promise<string | null> {
+  try {
+    const info = await stat(filePath);
+    if (info.size > maxBytes) return null;
+    const fd = await open(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(Math.min(info.size, maxBytes));
+      const { bytesRead } = await fd.read(buffer, 0, buffer.length, 0);
+      const chunk = buffer.subarray(0, bytesRead);
+      // Quick binary check: if there are null bytes in the first 8KB, skip
+      if (chunk.subarray(0, 8192).includes(0)) return null;
+      return chunk.toString('utf8');
+    } finally {
+      await fd.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 export function restrictiveExecutionProfile(localProfile: ExecutionProfile, requestedProfile: ExecutionProfile): ExecutionProfile {
@@ -468,6 +506,113 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Parent directory not found: ${filePath}`);
       throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot write file: ${errorMsg(error)}`);
     }
+  }
+
+  async searchFiles(
+    sessionId: string,
+    pattern: string,
+    searchPath: string,
+    include: string | undefined,
+    maxResults: number,
+    contextLines: number,
+  ): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }> {
+    const managed = this.requireSession(sessionId);
+    const resolved = this.resolveFilePath(managed, searchPath);
+    const info = await stat(resolved).catch(() => null);
+    if (!info) throw new TerminalProtocolError('FILE_NOT_FOUND', `Path not found: ${searchPath}`);
+
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, 'i');
+    } catch {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Invalid regex pattern: ${pattern}`);
+    }
+
+    const matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }> = [];
+    let filesSearched = 0;
+    let truncated = false;
+
+    const walk = async (dir: string): Promise<void> => {
+      if (truncated) return;
+      let dirents;
+      try {
+        dirents = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return; // skip unreadable directories
+      }
+      for (const dirent of dirents) {
+        if (truncated) return;
+        const entryPath = resolve(dir, dirent.name);
+        // Skip hidden dirs, node_modules, .git
+        if (dirent.name.startsWith('.') || dirent.name === 'node_modules') continue;
+        if (dirent.isDirectory()) {
+          await walk(entryPath);
+        } else if (dirent.isFile()) {
+          // Apply include filter (simple glob: *.ts, *.js etc)
+          if (include && !matchGlob(dirent.name, include)) continue;
+          filesSearched += 1;
+          try {
+            const content = await readFileContent(entryPath, 512 * 1024); // max 512KB per file
+            if (content === null) continue; // binary or too large
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length; i += 1) {
+              const lineText = lines[i] ?? '';
+              if (regex.test(lineText)) {
+                const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
+                  file: relative(managed.metadata.cwd, entryPath) || entryPath,
+                  line: i + 1,
+                  text: lineText.slice(0, 500),
+                };
+                if (contextLines > 0) {
+                  match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
+                  match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
+                }
+                matches.push(match);
+                if (matches.length >= maxResults) {
+                  truncated = true;
+                  return;
+                }
+              }
+            }
+          } catch {
+            // skip unreadable files
+          }
+        }
+      }
+    };
+
+    if (info.isFile()) {
+      // Search single file
+      filesSearched = 1;
+      try {
+        const content = await readFileContent(resolved, 512 * 1024);
+        if (content !== null) {
+          const lines = content.split('\n');
+          for (let i = 0; i < lines.length; i += 1) {
+            const lineText = lines[i] ?? '';
+            if (regex.test(lineText)) {
+              const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
+                file: relative(managed.metadata.cwd, resolved) || resolved,
+                line: i + 1,
+                text: lineText.slice(0, 500),
+              };
+              if (contextLines > 0) {
+                match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
+                match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
+              }
+              matches.push(match);
+              if (matches.length >= maxResults) { truncated = true; break; }
+            }
+          }
+        }
+      } catch {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${searchPath}`);
+      }
+    } else {
+      await walk(resolved);
+    }
+
+    return { pattern, matches, truncated, files_searched: filesSearched };
   }
 
   private resolveFilePath(managed: ManagedSession, filePath: string): string {

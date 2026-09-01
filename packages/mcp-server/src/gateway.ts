@@ -219,6 +219,16 @@ export class AgentGateway {
     }, (raw) => raw);
   }
 
+  async searchFiles(userId: string, sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<unknown> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.search',
+      input: { session_id: sessionId, pattern, path, include, max_results: maxResults, context_lines: contextLines },
+    }, (raw) => raw);
+  }
+
   async read(userId: string, sessionId: string, after: number, maxBytes: number, waitMs = 0): Promise<TerminalReadOutput> {
     const record = this.requireSession(userId, sessionId);
     this.assertCursor(record, after);
