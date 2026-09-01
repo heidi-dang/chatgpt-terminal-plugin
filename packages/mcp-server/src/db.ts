@@ -50,10 +50,13 @@ CREATE TABLE IF NOT EXISTS devices (
   revoked_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_id);
-CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
-CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
+-- Primary lookup is PK (device_id). listByOwner uses owner_id + ORDER BY enrolled_at:
+-- composite avoids a TEMP B-TREE sort (see EXPLAIN QUERY PLAN).
+CREATE INDEX IF NOT EXISTS idx_devices_owner_enrolled ON devices(owner_id, enrolled_at);
+-- Optional filter path for active-only listings.
 CREATE INDEX IF NOT EXISTS idx_devices_owner_status ON devices(owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
+-- Low-cardinality status-only index is intentionally omitted (active|revoked).
 `;
 
 export function resolveSqlitePath(registryPath: string): string {
