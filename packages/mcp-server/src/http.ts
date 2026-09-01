@@ -13,7 +13,7 @@ import { AgentGateway } from './gateway.js';
 import { createTerminalMcpServer } from './mcp.js';
 import { TerminalService } from './service.js';
 import { StreamTokenService } from './stream-token.js';
-import { readTerminalUiStyles, watchTerminalUiStyles } from './ui-runtime.js';
+import { readTerminalUiDocument, readTerminalUiStyles, watchTerminalUiStyles } from './ui-runtime.js';
 
 interface McpSession {
   transport: NodeStreamableHTTPServerTransport;
@@ -98,6 +98,20 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       timestamp: new Date().toISOString(),
       ...(config.nodeEnv === 'production' ? {} : { active_agents: gateway.activeAgentCount(), mcp_sessions: sessions.size }),
     });
+  });
+
+  app.get('/terminal-ui/runtime.html', async (_req, res) => {
+    try {
+      const uiDoc = await readTerminalUiDocument();
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.setHeader('cache-control', 'no-store, max-age=0');
+      res.setHeader('access-control-allow-origin', '*');
+      res.setHeader('cross-origin-resource-policy', 'cross-origin');
+      res.status(200).send(uiDoc.html);
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.runtime_html_failed', error: errorMessage(error) }));
+      res.status(503).send('Terminal UI runtime is unavailable.');
+    }
   });
 
   app.get('/terminal-ui/styles.css', async (_req, res) => {

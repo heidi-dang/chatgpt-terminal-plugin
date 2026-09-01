@@ -539,7 +539,8 @@ export class AgentGateway {
       const duplicateIndex = record.eventHead + event.sequence - record.earliestSequence;
       const duplicate = record.events[duplicateIndex];
       if (duplicate?.sequence === event.sequence) {
-        if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
+        // Compare by event_id (O(1) string compare) instead of full JSON serialization
+        if (duplicate.event_id !== event.event_id) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event sequence was replayed with different content.');
         }
         return;
