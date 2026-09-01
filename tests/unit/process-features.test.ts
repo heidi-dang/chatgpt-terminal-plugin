@@ -72,6 +72,97 @@ describe('bounded code execution', () => {
     }, 'read-only')).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 
+  it('reserves an execution id before asynchronous process setup begins', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-duplicate-id-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment(), killGraceMs: 20 });
+    cleanup.push(() => executor.shutdown());
+    const executionId = randomUUID();
+
+    const results = await Promise.allSettled([
+      executor.execute('user-a', {
+        execution_id: executionId, runtime: 'node', code: 'setTimeout(() => {}, 120)', timeout_ms: 1_000,
+      }, root),
+      executor.execute('user-a', {
+        execution_id: executionId, runtime: 'node', code: 'setTimeout(() => {}, 120)', timeout_ms: 1_000,
+      }, root),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    expect(rejected?.reason).toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('honors cancellation requested during asynchronous process setup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-early-cancel-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment(), killGraceMs: 20 });
+    cleanup.push(() => executor.shutdown());
+    const executionId = randomUUID();
+
+    const running = executor.execute('user-a', {
+      execution_id: executionId, runtime: 'node', code: 'setTimeout(() => {}, 200)', timeout_ms: 1_000,
+    }, root);
+    const cancelResult = executor.cancel('user-a', executionId);
+    const [settled] = await Promise.allSettled([running]);
+
+    expect(cancelResult).toEqual({ execution_id: executionId, cancelled: true });
+    expect(settled).toMatchObject({ status: 'rejected', reason: { code: 'REQUEST_CANCELLED' } });
+  });
+
+  it('does not spawn an execution whose setup outlives executor shutdown', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-shutdown-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment(), killGraceMs: 20 });
+    cleanup.push(() => executor.shutdown());
+
+    const running = executor.execute('user-a', {
+      execution_id: randomUUID(), runtime: 'node', code: 'setTimeout(() => {}, 200)', timeout_ms: 1_000,
+    }, root);
+    executor.shutdown();
+    const [settled] = await Promise.allSettled([running]);
+
+    expect(settled).toMatchObject({ status: 'rejected', reason: { code: 'AGENT_OFFLINE' } });
+  });
+
+  it('enforces cancellation ownership even while execution is still in setup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-early-cancel-owner-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment(), killGraceMs: 20 });
+    cleanup.push(() => executor.shutdown());
+    const executionId = randomUUID();
+
+    const running = executor.execute('user-a', {
+      execution_id: executionId, runtime: 'node', code: 'setTimeout(() => {}, 200)', timeout_ms: 1_000,
+    }, root);
+    expect(() => executor.cancel('user-b', executionId))
+      .toThrowError(expect.objectContaining({ code: 'PERMISSION_DENIED' }));
+    expect(executor.cancel('user-a', executionId)).toEqual({ execution_id: executionId, cancelled: true });
+    await expect(running).rejects.toMatchObject({ code: 'REQUEST_CANCELLED' });
+  });
+
+  it('force-terminates an active execution during shutdown and reports agent offline', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-active-shutdown-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const marker = join(root, 'active.txt');
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment(), killGraceMs: 20 });
+    cleanup.push(() => executor.shutdown());
+    const code = `import { writeFileSync } from 'node:fs';\nprocess.on('SIGTERM', () => {});\nwriteFileSync(${JSON.stringify(marker)}, 'ready');\nsetInterval(() => {}, 1000);`;
+
+    const running = executor.execute('user-a', {
+      execution_id: randomUUID(), runtime: 'node', code, timeout_ms: 5_000,
+    }, root);
+    await waitUntil(async () => { try { await access(marker); return true; } catch { return false; } });
+    const startedAt = Date.now();
+    executor.shutdown();
+
+    await expect(running).rejects.toMatchObject({ code: 'AGENT_OFFLINE' });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await expect(executor.execute('user-a', {
+      execution_id: randomUUID(), runtime: 'node', code: 'console.log(1)', timeout_ms: 1_000,
+    }, root)).rejects.toMatchObject({ code: 'AGENT_OFFLINE' });
+  });
+
   it('uses an administrator-configured TypeScript-capable Node runtime instead of process.execPath', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-code-typescript-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
