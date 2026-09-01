@@ -131,12 +131,17 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
     }, 15_000);
     keepAlive.unref();
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearInterval(keepAlive);
       uiReloadClients.delete(res);
     };
     res.once('close', cleanup);
     res.once('error', cleanup);
+    req.once('close', cleanup);
+    req.once('error', cleanup);
   });
 
   app.post(config.agentEnrollmentPath, enrollmentRateLimiter, async (req, res) => {
@@ -325,6 +330,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       };
       res.once('close', cleanup);
       res.once('error', cleanup);
+      req.once('close', cleanup);
+      req.once('error', cleanup);
     } catch (error) {
       if (error instanceof TerminalProtocolError) {
         res.status(error.code === 'STREAM_TOKEN_EXPIRED' ? 401 : error.code === 'PERMISSION_DENIED' ? 403 : 409).json(error.toPayload());
