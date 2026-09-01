@@ -324,6 +324,34 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
   });
 
+  it('renders content-only MCP read output and advances the fallback cursor', async () => {
+    const app = createFakeApp();
+    let readCount = 0;
+    app.callServerTool.mockImplementation(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name !== 'terminal_read') return { structuredContent: {} };
+      readCount += 1;
+      const payload = readCount === 1
+        ? { output: 'content-only\r\n', events: [], next_cursor: 6, has_more: false, status: 'running', exit_code: null }
+        : { output: 'content-done\r\n', events: [], next_cursor: 7, has_more: false, status: 'exited', exit_code: 0 };
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    terminalSource().emitError();
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 6, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    await flushFrames();
+
+    expect(document.getElementById('terminal-output')?.textContent).toContain('content-only\ncontent-done\n');
+    expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
+  });
+
   it('does not report MCP live until the first fallback read succeeds', async () => {
     const app = createFakeApp();
     let resolveFirstRead: ((result: CallToolResult) => void) | undefined;
@@ -400,6 +428,21 @@ describe('terminal MCP App UI', () => {
       data: { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: { structuredContent: { session_id: 'session-1', status: 'running' } } },
     }));
     expect(toolResult).toHaveBeenCalledOnce();
+
+    const call = bridge.callServerTool({ name: 'terminal_read', arguments: { session_id: 'session-1', after: 3 } });
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+    }), '*');
+    const wrappedPayload = { output: 'wrapped\\r\\n', events: [], next_cursor: 9, has_more: false, status: 'running', exit_code: null };
+    window.dispatchEvent(new MessageEvent('message', {
+      source: window.parent,
+      data: {
+        jsonrpc: '2.0',
+        id: 2,
+        result: { result: { content: [{ type: 'text', text: JSON.stringify(wrappedPayload) }], structuredContent: wrappedPayload } },
+      },
+    }));
+    await expect(call).resolves.toEqual(expect.objectContaining({ structuredContent: wrappedPayload }));
     await bridge.close();
   });
 });

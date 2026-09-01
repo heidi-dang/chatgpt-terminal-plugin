@@ -81,7 +81,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.8.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.9.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -96,8 +96,9 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
 
   callServerTool(params: { name: string; arguments: Record<string, unknown> }): Promise<CallToolResult> {
     return this.request('tools/call', params).then((result) => {
-      if (!isCallToolResult(result)) throw new Error('Host returned an invalid tools/call result.');
-      return result;
+      const normalized = normalizeCallToolResult(result);
+      if (!normalized) throw new Error('Host returned an invalid tools/call result.');
+      return normalized;
     });
   }
 
@@ -145,7 +146,8 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
     if (method === 'ui/notifications/tool-result') {
-      if (isCallToolResult(params)) this.ontoolresult?.(params);
+      const result = normalizeCallToolResult(params);
+      if (result) this.ontoolresult?.(result);
       return;
     }
     if (method === 'ui/notifications/host-context-changed') {
@@ -217,8 +219,9 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
 }
 
 export function parseViewState(result: CallToolResult | null): TerminalViewState | null {
-  if (!result?.structuredContent || typeof result.structuredContent !== 'object') return null;
-  const value = result.structuredContent;
+  if (!result) return null;
+  const value = structuredPayload(result);
+  if (!value) return null;
   if (typeof value.session_id !== 'string' || typeof value.status !== 'string') return null;
   return {
     session_id: value.session_id,
@@ -323,8 +326,8 @@ function parseTerminalEvent(raw: string): TerminalEvent {
 }
 
 function parseTerminalReadResult(result: CallToolResult): TerminalReadResult | null {
-  const value = result.structuredContent;
-  if (!isRecord(value)) return null;
+  const value = structuredPayload(result);
+  if (!value) return null;
   const output = value.output;
   const nextCursor = value.next_cursor;
   const hasMore = value.has_more;
@@ -359,8 +362,10 @@ function isFinalStatus(status: string | undefined): boolean {
 
 function terminalErrorCode(result: CallToolResult): string | undefined {
   const terminalError = result._meta?.terminal_error;
-  if (!isRecord(terminalError)) return undefined;
-  return typeof terminalError.code === 'string' ? terminalError.code : undefined;
+  if (isRecord(terminalError) && typeof terminalError.code === 'string') return terminalError.code;
+  const text = firstTextContent(result);
+  const match = text?.match(/^([A-Z][A-Z0-9_]+):/);
+  return match?.[1];
 }
 
 export class TerminalViewer {
@@ -602,7 +607,7 @@ export class TerminalViewer {
         if (!read) throw new Error('Terminal read fallback returned an invalid result.');
 
         let sequenceGap = false;
-        if (read.events) {
+        if (read.events && read.events.length > 0) {
           for (const event of read.events) {
             if (this.acceptEvent(event) === 'gap') {
               sequenceGap = true;
@@ -849,12 +854,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
-function isCallToolResult(value: unknown): value is CallToolResult {
-  if (!isRecord(value)) return false;
-  if ('structuredContent' in value && value.structuredContent !== undefined && !isRecord(value.structuredContent)) return false;
-  if ('_meta' in value && value._meta !== undefined && !isRecord(value._meta)) return false;
-  if ('isError' in value && value.isError !== undefined && typeof value.isError !== 'boolean') return false;
-  return true;
+function normalizeCallToolResult(value: unknown): CallToolResult | null {
+  if (!isRecord(value)) return null;
+  let candidate = value;
+  if (!hasCallToolResultFields(candidate) && isRecord(candidate.result)) candidate = candidate.result;
+
+  const content = Array.isArray(candidate.content) ? candidate.content : undefined;
+  const structuredContent = isRecord(candidate.structuredContent)
+    ? candidate.structuredContent
+    : isRecord(candidate.structured_content)
+      ? candidate.structured_content
+      : undefined;
+  const meta = isRecord(candidate._meta) ? candidate._meta : undefined;
+  const isError = typeof candidate.isError === 'boolean'
+    ? candidate.isError
+    : typeof candidate.is_error === 'boolean'
+      ? candidate.is_error
+      : undefined;
+
+  if (!content && !structuredContent && !meta && isError === undefined) return null;
+  return {
+    ...(content ? { content } : {}),
+    ...(structuredContent ? { structuredContent } : {}),
+    ...(meta ? { _meta: meta } : {}),
+    ...(isError !== undefined ? { isError } : {}),
+  };
+}
+
+function hasCallToolResultFields(value: Record<string, unknown>): boolean {
+  return 'content' in value || 'structuredContent' in value || 'structured_content' in value || '_meta' in value || 'isError' in value || 'is_error' in value;
+}
+
+function firstTextContent(result: CallToolResult): string | undefined {
+  for (const item of result.content ?? []) {
+    if (isRecord(item) && item.type === 'text' && typeof item.text === 'string') return item.text;
+  }
+  return undefined;
+}
+
+function structuredPayload(result: CallToolResult): Record<string, unknown> | null {
+  if (isRecord(result.structuredContent)) return result.structuredContent;
+  const text = firstTextContent(result);
+  if (!text) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(error: unknown): string {
