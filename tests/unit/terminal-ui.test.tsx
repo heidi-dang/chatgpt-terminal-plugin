@@ -530,15 +530,17 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
-  it('closes the active terminal turn when the host tears down the widget', async () => {
+  it('releases widget resources on host teardown without ending the assistant turn', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
     app.ontoolresult?.(initialResult());
+    const source = terminalSource();
 
     await app.onteardown?.();
 
-    expect(app.callServerTool).toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+    expect(source.close).toHaveBeenCalledTimes(1);
+    expect(app.callServerTool).not.toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
   });
 
   it('hot reloads CSS without replacing the document or terminal SSE source', async () => {

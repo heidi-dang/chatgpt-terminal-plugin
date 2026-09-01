@@ -166,11 +166,11 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_turn_close',
     {
       title: 'Close terminal turn',
-      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface. The Terminal UI also calls it during host teardown.',
+      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface.',
       inputSchema: terminalSurfaceInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-      _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
+      _meta: { ui: { visibility: ['model'] } },
     },
     async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identityFromContext(ctx)))),
   );

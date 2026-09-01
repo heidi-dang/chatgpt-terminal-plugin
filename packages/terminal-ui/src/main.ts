@@ -538,15 +538,9 @@ export class TerminalViewer {
       const theme = context.theme;
       if (typeof theme === 'string') this.doc.documentElement.dataset.theme = theme;
     };
-    this.app.onteardown = async () => {
-      this.stopSurfaceSync();
-      try {
-        await this.callTool('terminal_turn_close', {});
-      } catch (error) {
-        console.error('[terminal-app] turn cleanup failed', error);
-      }
+    this.app.onteardown = () => {
       this.destroy();
-      return {};
+      return Promise.resolve({});
     };
     this.app.onerror = (error) => {
       console.error('[terminal-app]', error);

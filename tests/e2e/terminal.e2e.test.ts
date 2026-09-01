@@ -178,6 +178,11 @@ describe('terminal MCP end-to-end', () => {
     const refreshUi = refreshMeta?.ui as Record<string, unknown> | undefined;
     expect(refreshUi?.visibility).toEqual(['app']);
     expect(refreshMeta?.['openai/widgetAccessible']).toBe(true);
+    const turnCloseTool = listed.tools.find((tool) => tool.name === 'terminal_turn_close');
+    const turnCloseMeta = turnCloseTool?._meta as Record<string, unknown> | undefined;
+    const turnCloseUi = turnCloseMeta?.ui as Record<string, unknown> | undefined;
+    expect(turnCloseUi?.visibility).toEqual(['model']);
+    expect(turnCloseMeta?.['openai/widgetAccessible']).toBeUndefined();
     for (const toolName of ['terminal_read', 'terminal_status']) {
       const toolMeta = listed.tools.find((tool) => tool.name === toolName)?._meta as Record<string, unknown> | undefined;
       const toolUi = toolMeta?.ui as Record<string, unknown> | undefined;
