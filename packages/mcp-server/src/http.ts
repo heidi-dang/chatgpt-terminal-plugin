@@ -320,9 +320,17 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         sendEvent(event);
       });
 
+      // Batch replay events into a single write to reduce system calls during catch-up
+      const replayChunks: string[] = [];
       for (let index = record.eventHead; index < record.events.length; index += 1) {
         const event = record.events[index];
-        if (event && event.sequence > cursor) sendEvent(event);
+        if (event && event.sequence > cursor && event.sequence > lastSequence) {
+          replayChunks.push(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+          lastSequence = event.sequence;
+        }
+      }
+      if (replayChunks.length > 0 && !res.writableEnded && !res.destroyed) {
+        res.write(replayChunks.join(''));
       }
       replaying = false;
       pendingLive.sort((left, right) => left.sequence - right.sequence);
