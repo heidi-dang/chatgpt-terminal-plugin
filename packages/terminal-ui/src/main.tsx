@@ -486,11 +486,30 @@ export function TerminalApp(): React.JSX.Element {
     return () => source.close();
   }, [streamMeta?.url]);
 
-  if (error) return <div className="terminal-error">Terminal stream failed to connect: {error.message}</div>;
+  if (error) return (
+    <main className="terminal-shell" data-state="failed">
+      <header className="terminal-header">
+        <div className="terminal-identity">
+          <div className="terminal-kicker">CHATGPT LIVE TERMINAL</div>
+          <div className="terminal-machine-row">
+            <span className="terminal-machine">Connection Failed</span>
+            <span className="terminal-status" data-state="failed"><span className="state-dot" />OFFLINE</span>
+          </div>
+        </div>
+      </header>
+      <section className="terminal-frame" aria-label="Terminal connection error">
+        <div className="terminal-error">{error.message}</div>
+      </section>
+      <footer className="terminal-footer">
+        <span>—</span>
+        <span>DISCONNECTED</span>
+      </footer>
+    </main>
+  );
 
   const displayState = isFinalStatus(viewState?.status) ? viewState?.status ?? 'offline' : streamState;
   return (
-    <main className="terminal-shell">
+    <main className="terminal-shell" data-state={displayState}>
       <header className="terminal-header">
         <div className="terminal-identity">
           <div className="terminal-kicker">CHATGPT LIVE TERMINAL</div>
