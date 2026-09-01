@@ -141,7 +141,7 @@ After successful enrollment, remove the enrollment token from the persistent ser
 A trusted server administrator with local filesystem access can enroll a public device record without reading the bootstrap token by using the server-only admin CLI. This is not an HTTP endpoint and should be run as the OS account that owns the registry so ownership remains correct:
 
 ```bash
-sudo -u terminal-mcp node packages/mcp-server/dist/admin.js \
+sudo -u chatgpt-terminal node packages/mcp-server/dist/admin.js \
   enroll /var/lib/chatgpt-terminal/devices.json /path/to/device-enrollment.json
 ```
 

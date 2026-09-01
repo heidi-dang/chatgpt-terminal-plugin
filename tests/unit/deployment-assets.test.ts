@@ -14,6 +14,15 @@ describe('deployment assets', () => {
     expect(source).not.toMatch(/^ReadWritePaths=.*chatgpt-terminal/m);
   });
 
+  it('documents the same server OS account used by the shipped systemd unit', async () => {
+    const unit = await readFile(new URL('deploy/systemd/chatgpt-terminal-mcp.service.example', root), 'utf8');
+    const deployment = await readFile(new URL('docs/deployment.md', root), 'utf8');
+    const serviceUser = unit.match(/^User=(.+)$/m)?.[1];
+
+    expect(serviceUser).toBeTruthy();
+    expect(deployment).toContain(`sudo -u ${serviceUser} node packages/mcp-server/dist/admin.js`);
+  });
+
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
     const cases = [
       ['deploy/systemd/chatgpt-terminal-mcp.service.example', 'packages/mcp-server/dist/cli.js'],
