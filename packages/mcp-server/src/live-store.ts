@@ -231,6 +231,7 @@ export interface RedisClientLike {
   connect(): Promise<void>;
   quit(): Promise<void>;
   get(key: string): Promise<string | null>;
+  mGet?(keys: string[]): Promise<(string | null)[]>;
   set(key: string, value: string, options?: { EX?: number; XX?: boolean; NX?: boolean }): Promise<unknown>;
   del(key: string): Promise<unknown>;
   sAdd(key: string, member: string): Promise<unknown>;
@@ -387,12 +388,17 @@ export class RedisLiveStore implements LiveStore {
 
   async listSessionIdsByOwner(ownerId: string): Promise<string[]> {
     const ids = await this.client.sMembers(ownerSessionsKey(ownerId));
-    // Prune stale set members whose session keys expired.
+    if (ids.length === 0) return [];
+    // One MGET instead of N sequential GETs when pruning expired session index members.
+    const values = await this.mGetKeys(ids.map((id) => sessionKey(id)));
     const live: string[] = [];
-    for (const id of ids) {
-      const raw = await this.client.get(sessionKey(id));
-      if (raw) live.push(id);
-      else await this.client.sRem(ownerSessionsKey(ownerId), id);
+    const stale: string[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (values[i]) live.push(ids[i]!);
+      else stale.push(ids[i]!);
+    }
+    if (stale.length > 0) {
+      await Promise.all(stale.map((id) => this.client.sRem(ownerSessionsKey(ownerId), id)));
     }
     return live;
   }
@@ -451,13 +457,32 @@ export class RedisLiveStore implements LiveStore {
 
   async listAgentPresenceByOwner(ownerId: string): Promise<AgentPresence[]> {
     const ids = await this.client.sMembers(ownerAgentsKey(ownerId));
+    if (ids.length === 0) return [];
+    // Batch presence reads: 1 RTT instead of N for listAgents / multi-instance views.
+    const values = await this.mGetKeys(ids.map((id) => agentKey(id)));
     const out: AgentPresence[] = [];
-    for (const id of ids) {
-      const p = await this.getAgentPresence(id);
+    const stale: string[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const raw = values[i];
+      if (!raw) {
+        stale.push(ids[i]!);
+        continue;
+      }
+      const p = safeParseJson<AgentPresence>(raw);
       if (p) out.push(p);
-      else await this.client.sRem(ownerAgentsKey(ownerId), id);
+      else stale.push(ids[i]!);
+    }
+    if (stale.length > 0) {
+      await Promise.all(stale.map((id) => this.client.sRem(ownerAgentsKey(ownerId), id)));
     }
     return out;
+  }
+
+  private async mGetKeys(keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
+    if (this.client.mGet) return this.client.mGet(keys);
+    // Fallback for minimal test doubles without MGET.
+    return Promise.all(keys.map((key) => this.client.get(key)));
   }
 
   async publishSessionEvent(sessionId: string, event: TerminalEvent): Promise<void> {
