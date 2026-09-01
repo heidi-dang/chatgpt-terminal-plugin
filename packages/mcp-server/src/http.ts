@@ -4,7 +4,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { createMcpExpressApp, getOAuthProtectedResourceMetadataUrl, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
-import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema } from '@terminal/protocol';
+import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema, type TerminalEvent } from '@terminal/protocol';
 import { createOAuthMetadata, createTokenVerifier } from './auth.js';
 import { AuditLogger } from './audit.js';
 import type { ServerConfig } from './config.js';
@@ -13,7 +13,7 @@ import { AgentGateway } from './gateway.js';
 import { createTerminalMcpServer } from './mcp.js';
 import { TerminalService } from './service.js';
 import { StreamTokenService } from './stream-token.js';
-import { readTerminalUiDocument, watchTerminalUi } from './ui-runtime.js';
+import { readTerminalUiDocument, readTerminalUiStyles, watchTerminalUiStyles } from './ui-runtime.js';
 
 interface McpSession {
   transport: NodeStreamableHTTPServerTransport;
@@ -71,11 +71,11 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
   const uiReloadClients = new Set<Response>();
-  let terminalUiVersion = (await readTerminalUiDocument()).version;
-  const stopUiWatcher = watchTerminalUi((version) => {
-    if (version === terminalUiVersion) return;
-    terminalUiVersion = version;
-    const payload = `data: ${JSON.stringify({ version })}\n\n`;
+  let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
+  const stopUiWatcher = watchTerminalUiStyles((version) => {
+    if (version === terminalUiStyleVersion) return;
+    terminalUiStyleVersion = version;
+    const payload = `data: ${JSON.stringify({ version, kind: 'styles' })}\n\n`;
     for (const client of uiReloadClients) {
       if (!client.writableEnded && !client.destroyed) client.write(payload);
     }
@@ -102,20 +102,39 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
 
   app.get('/terminal-ui/runtime.html', async (_req, res) => {
     try {
-      const document = await readTerminalUiDocument();
-      terminalUiVersion = document.version;
+      const uiDoc = await readTerminalUiDocument();
       res.setHeader('content-type', 'text/html; charset=utf-8');
       res.setHeader('cache-control', 'no-store, max-age=0');
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
-      res.status(200).send(document.html);
+      // Security hardening headers for the served HTML runtime
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.setHeader('referrer-policy', 'no-referrer');
+      res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+      res.status(200).send(uiDoc.html);
     } catch (error) {
-      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.runtime_failed', error: errorMessage(error) }));
-      res.status(503).send('Terminal UI bundle is unavailable.');
+      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.runtime_html_failed', error: errorMessage(error) }));
+      res.status(503).send('Terminal UI runtime is unavailable.');
     }
   });
 
-  app.get('/terminal-ui/reload', (_req, res) => {
+  app.get('/terminal-ui/styles.css', async (_req, res) => {
+    try {
+      const styles = await readTerminalUiStyles();
+      terminalUiStyleVersion = styles.version;
+      res.setHeader('content-type', 'text/css; charset=utf-8');
+      res.setHeader('cache-control', 'no-store, max-age=0');
+      res.setHeader('access-control-allow-origin', '*');
+      res.setHeader('cross-origin-resource-policy', 'cross-origin');
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.status(200).send(styles.css);
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', event: 'terminal_ui.styles_failed', error: errorMessage(error) }));
+      res.status(503).send('Terminal UI stylesheet is unavailable.');
+    }
+  });
+
+  app.get('/terminal-ui/reload', (req, res) => {
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
@@ -125,7 +144,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     res.setHeader('x-accel-buffering', 'no');
     res.flushHeaders();
     uiReloadClients.add(res);
-    res.write(`data: ${JSON.stringify({ version: terminalUiVersion })}\n\n`);
+    res.write(`data: ${JSON.stringify({ version: terminalUiStyleVersion, kind: 'styles' })}\n\n`);
 
     const keepAlive = setInterval(() => {
       if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
@@ -307,9 +326,17 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         sendEvent(event);
       });
 
+      // Batch replay events into a single write to reduce system calls during catch-up
+      const replayChunks: string[] = [];
       for (let index = record.eventHead; index < record.events.length; index += 1) {
         const event = record.events[index];
-        if (event && event.sequence > cursor) sendEvent(event);
+        if (event && event.sequence > cursor && event.sequence > lastSequence) {
+          replayChunks.push(formatSse(event.sequence, event));
+          lastSequence = event.sequence;
+        }
+      }
+      if (replayChunks.length > 0 && !res.writableEnded && !res.destroyed) {
+        res.write(replayChunks.join(''));
       }
       replaying = false;
       pendingLive.sort((left, right) => left.sequence - right.sequence);
@@ -426,8 +453,12 @@ function isAllowedUpgradeHost(hostHeader: string | undefined, allowedHosts: read
   return allowedHosts.some((allowed) => allowed.toLowerCase() === hostname);
 }
 
-function writeSse(res: Response, sequence: number, event: any): void {
-  res.write(`id: ${sequence}\ndata: {"sequence":${sequence},"event_type":${JSON.stringify(event.event_type)},"data":${JSON.stringify(event.data)}}\n\n`);
+function formatSse(sequence: number, event: TerminalEvent): string {
+  return `id: ${sequence}\ndata: {"sequence":${sequence},"event_type":${JSON.stringify(event.event_type)},"data":${JSON.stringify(event.data)}}\n\n`;
+}
+
+function writeSse(res: Response, sequence: number, event: TerminalEvent): void {
+  res.write(formatSse(sequence, event));
 }
 
 export interface RateLimitBucket {

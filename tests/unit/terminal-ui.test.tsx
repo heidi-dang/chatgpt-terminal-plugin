@@ -275,6 +275,33 @@ describe('terminal MCP App UI', () => {
     expect(mocks.app.callServerTool.mock.calls.filter(([request]) => request.name === 'terminal_resize')).toHaveLength(1);
   });
 
+  it('hot reloads styles without replacing the document or terminal SSE connection', async () => {
+    const css = '.terminal-shell { outline: 1px solid transparent; }';
+    const fetchMock = vi.fn(async () => new Response(css, { status: 200, headers: { 'content-type': 'text/css' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const documentOpen = vi.spyOn(document, 'open');
+
+    const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
+    root = createRoot(document.getElementById('mount')!);
+    await act(async () => root?.render(<TerminalApp />));
+    await initializeSession();
+
+    const terminal = terminalSource();
+    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'));
+    expect(reload).toBeTruthy();
+
+    await act(async () => {
+      reload!.emit({ version: 'styles-v2', kind: 'styles' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('https://terminal.example/terminal-ui/styles.css?v=styles-v2', { cache: 'no-store' });
+    expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toBe(css);
+    expect(documentOpen).not.toHaveBeenCalled();
+    expect(terminal.close).not.toHaveBeenCalled();
+    documentOpen.mockRestore();
+  });
+
   it('contains dedicated iPhone responsive breakpoints and no toolbar surface', async () => {
     const css = await import('node:fs/promises').then(({ readFile }) => readFile(join(process.cwd(), 'packages/terminal-ui/src/styles.css'), 'utf8'));
     expect(css).toMatch(/@media\s*\(max-width:\s*560px\)/);

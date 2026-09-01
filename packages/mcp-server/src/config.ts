@@ -164,7 +164,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     requiredScopes: parsed.OAUTH_REQUIRED_SCOPES,
     advertisedScopes: parsed.OAUTH_ADVERTISED_SCOPES.length > 0 ? parsed.OAUTH_ADVERTISED_SCOPES : parsed.OAUTH_REQUIRED_SCOPES,
     oauthUserIdClaim: parsed.OAUTH_USER_ID_CLAIM,
-    streamTokenSecret: parsed.STREAM_TOKEN_SECRET ?? parsed.MCP_DEVELOPMENT_TOKEN ?? '',
+    streamTokenSecret: (() => {
+      if (parsed.STREAM_TOKEN_SECRET) return parsed.STREAM_TOKEN_SECRET;
+      if (parsed.MCP_DEVELOPMENT_TOKEN) {
+        if (parsed.NODE_ENV !== 'development' && parsed.NODE_ENV !== 'test') {
+          console.error(JSON.stringify({ level: 'warn', event: 'config.stream_token_fallback', message: 'STREAM_TOKEN_SECRET is not set; falling back to MCP_DEVELOPMENT_TOKEN for stream signing. Set a dedicated secret for production use.' }));
+        }
+        return parsed.MCP_DEVELOPMENT_TOKEN;
+      }
+      return '';
+    })(),
     streamTokenTtlSeconds: parsed.STREAM_TOKEN_TTL_SECONDS,
     maxReadBytes: parsed.TERMINAL_MAX_READ_BYTES,
     maxEventBytes: parsed.TERMINAL_MAX_EVENT_BYTES,

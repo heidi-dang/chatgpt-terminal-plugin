@@ -31,21 +31,6 @@ interface TerminalEvent {
   data: Record<string, unknown>;
 }
 
-interface HotReloadBootstrap {
-  viewState: TerminalViewState | null;
-  streamMeta: TerminalStreamMeta | null;
-  lastSequence: number;
-}
-
-declare global {
-  interface Window {
-    __TERMINAL_HOT_BOOTSTRAP__?: HotReloadBootstrap;
-  }
-}
-
-const hotBootstrap = window.__TERMINAL_HOT_BOOTSTRAP__;
-delete window.__TERMINAL_HOT_BOOTSTRAP__;
-
 export function parseViewState(result: CallToolResult | null): TerminalViewState | null {
   if (!result?.structuredContent || typeof result.structuredContent !== 'object') return null;
   const value = result.structuredContent as Record<string, unknown>;
@@ -117,8 +102,8 @@ function terminalErrorCode(result: CallToolResult): string | undefined {
 
 export function TerminalApp(): React.JSX.Element {
   const [toolResult, setToolResult] = useState<CallToolResult | null>(null);
-  const [viewState, setViewState] = useState<TerminalViewState | null>(hotBootstrap?.viewState ?? null);
-  const [streamOverride, setStreamOverride] = useState<TerminalStreamMeta | null>(hotBootstrap?.streamMeta ?? null);
+  const [viewState, setViewState] = useState<TerminalViewState | null>(null);
+  const [streamOverride, setStreamOverride] = useState<TerminalStreamMeta | null>(null);
   const [hostContext, setHostContext] = useState<McpUiHostContext>();
   const [streamState, setStreamState] = useState<'connecting' | 'live' | 'reconnecting' | 'offline'>('connecting');
   const terminalHostRef = useRef<HTMLDivElement>(null);
@@ -126,7 +111,7 @@ export function TerminalApp(): React.JSX.Element {
   const fitAddonRef = useRef<FitAddon | undefined>(undefined);
   const eventSourceRef = useRef<EventSource | undefined>(undefined);
   const hotReloadSourceRef = useRef<EventSource | undefined>(undefined);
-  const lastSequenceRef = useRef(hotBootstrap?.lastSequence ?? hotBootstrap?.viewState?.cursor ?? 0);
+  const lastSequenceRef = useRef(0);
   const refreshInFlightRef = useRef(false);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const reconnectAttemptRef = useRef(0);
@@ -134,10 +119,9 @@ export function TerminalApp(): React.JSX.Element {
   const fitFrameRef = useRef<number | undefined>(undefined);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
   const viewStateRef = useRef<TerminalViewState | null>(viewState);
-  const streamMetaRef = useRef<TerminalStreamMeta | null>(streamOverride);
-  const outputQueueRef = useRef<string[]>([]);
+  const outputQueueRef = useRef('');
   const outputFrameRef = useRef<number | undefined>(undefined);
-  const hotReloadingRef = useRef(false);
+  const hotReloadVersionRef = useRef<string | undefined>(undefined);
   const initialStreamMeta = useMemo(() => parseStreamMeta(toolResult), [toolResult]);
   const streamMeta = streamOverride ?? initialStreamMeta;
 
@@ -182,20 +166,21 @@ export function TerminalApp(): React.JSX.Element {
       window.cancelAnimationFrame(outputFrameRef.current);
       outputFrameRef.current = undefined;
     }
-    if (outputQueueRef.current.length === 0) return;
-    const output = outputQueueRef.current.join('');
-    outputQueueRef.current = [];
+    if (!outputQueueRef.current) return;
+    const output = outputQueueRef.current;
+    outputQueueRef.current = '';
     terminalRef.current?.write(output);
   }
 
   function queueTerminalOutput(text: string): void {
-    outputQueueRef.current.push(text);
+    // Use a single string accumulator instead of array + join to reduce allocations
+    outputQueueRef.current += text;
     if (outputFrameRef.current !== undefined) return;
     outputFrameRef.current = window.requestAnimationFrame(() => {
       outputFrameRef.current = undefined;
-      if (outputQueueRef.current.length === 0) return;
-      const output = outputQueueRef.current.join('');
-      outputQueueRef.current = [];
+      if (!outputQueueRef.current) return;
+      const output = outputQueueRef.current;
+      outputQueueRef.current = '';
       terminalRef.current?.write(output);
     });
   }
@@ -203,7 +188,10 @@ export function TerminalApp(): React.JSX.Element {
   function scheduleStreamReconnect(): void {
     const current = viewStateRef.current;
     if (!current || isFinalStatus(current.status) || reconnectTimerRef.current !== undefined) return;
-    const delayMs = Math.min(1000 * 2 ** reconnectAttemptRef.current, 15_000);
+    // Exponential backoff with ±25% jitter to avoid synchronized reconnect storms
+    const base = Math.min(1000 * 2 ** reconnectAttemptRef.current, 15_000);
+    const jitter = base * 0.25 * (2 * Math.random() - 1);
+    const delayMs = Math.min(15_000, Math.max(500, Math.round(base + jitter)));
     reconnectAttemptRef.current += 1;
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = undefined;
@@ -268,10 +256,6 @@ export function TerminalApp(): React.JSX.Element {
       setStreamState('offline');
     }
   }, [viewState]);
-
-  useEffect(() => {
-    streamMetaRef.current = streamMeta;
-  }, [streamMeta]);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -340,9 +324,7 @@ export function TerminalApp(): React.JSX.Element {
 
   useEffect(() => {
     if (!viewState) return;
-    if (!hotBootstrap || hotBootstrap.viewState?.session_id !== viewState.session_id) {
-      lastSequenceRef.current = viewState.cursor;
-    }
+    lastSequenceRef.current = viewState.cursor;
     lastResizeRef.current = undefined;
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
@@ -448,49 +430,61 @@ export function TerminalApp(): React.JSX.Element {
     const source = new EventSource(`${origin}/terminal-ui/reload`);
     hotReloadSourceRef.current = source;
     source.onmessage = (message) => {
-      if (hotReloadSourceRef.current !== source || hotReloadingRef.current) return;
+      if (hotReloadSourceRef.current !== source) return;
       try {
-        const payload = JSON.parse(String(message.data)) as { version?: unknown };
-        if (typeof payload.version !== 'string') return;
-        const currentVersion = document.querySelector<HTMLMetaElement>('meta[name="terminal-ui-version"]')?.content;
-        if (currentVersion === payload.version) return;
-        hotReloadingRef.current = true;
-        const runtimeUrl = `${origin}/terminal-ui/runtime.html?v=${encodeURIComponent(payload.version)}`;
-        void fetch(runtimeUrl, { cache: 'no-store' }).then(async (response) => {
-          if (!response.ok) throw new Error(`UI runtime reload failed with HTTP ${response.status}.`);
-          let html = await response.text();
-          const bootstrap: HotReloadBootstrap = {
-            viewState: viewStateRef.current,
-            streamMeta: streamMetaRef.current,
-            lastSequence: lastSequenceRef.current,
-          };
-          const serialized = JSON.stringify(bootstrap).replaceAll('<', '\\u003c');
-          const closeScriptTag = `${String.fromCharCode(60, 47)}script>`;
-          html = html.replace('</head>', `<script>window.__TERMINAL_HOT_BOOTSTRAP__=${serialized};${closeScriptTag}</head>`);
-          flushTerminalOutput();
-          source.close();
-          document.open();
-          document.write(html);
-          document.close();
+        const payload = JSON.parse(String(message.data)) as { version?: unknown; kind?: unknown };
+        if (payload.kind !== 'styles' || typeof payload.version !== 'string') return;
+        if (hotReloadVersionRef.current === payload.version) return;
+        hotReloadVersionRef.current = payload.version;
+        const styleUrl = `${origin}/terminal-ui/styles.css?v=${encodeURIComponent(payload.version)}`;
+        void fetch(styleUrl, { cache: 'no-store' }).then(async (response) => {
+          if (!response.ok) throw new Error(`UI stylesheet reload failed with HTTP ${response.status}.`);
+          const css = await response.text();
+          let liveStyles = document.querySelector<HTMLStyleElement>('#terminal-live-styles');
+          if (!liveStyles) {
+            liveStyles = document.createElement('style');
+            liveStyles.id = 'terminal-live-styles';
+            document.head.appendChild(liveStyles);
+          }
+          liveStyles.textContent = css;
         }).catch((reloadError) => {
-          hotReloadingRef.current = false;
-          console.error('[terminal-app] hot reload failed', reloadError);
+          if (hotReloadVersionRef.current === payload.version) hotReloadVersionRef.current = undefined;
+          console.error('[terminal-app] stylesheet hot reload failed', reloadError);
         });
       } catch (reloadError) {
         console.error('[terminal-app] invalid hot reload event', reloadError);
       }
     };
     source.onerror = () => {
-      // EventSource reconnects automatically; UI hot reload must never affect the PTY SSE stream.
+      // EventSource reconnects automatically; stylesheet reload never replaces the app document.
     };
     return () => source.close();
   }, [streamMeta?.url]);
 
-  if (error) return <div className="terminal-error">Terminal stream failed to connect: {error.message}</div>;
+  if (error) return (
+    <main className="terminal-shell" data-state="failed">
+      <header className="terminal-header">
+        <div className="terminal-identity">
+          <div className="terminal-kicker">CHATGPT LIVE TERMINAL</div>
+          <div className="terminal-machine-row">
+            <span className="terminal-machine">Connection Failed</span>
+            <span className="terminal-status" data-state="failed"><span className="state-dot" />OFFLINE</span>
+          </div>
+        </div>
+      </header>
+      <section className="terminal-frame" aria-label="Terminal connection error">
+        <div className="terminal-error">{error.message}</div>
+      </section>
+      <footer className="terminal-footer">
+        <span>—</span>
+        <span>DISCONNECTED</span>
+      </footer>
+    </main>
+  );
 
   const displayState = isFinalStatus(viewState?.status) ? viewState?.status ?? 'offline' : streamState;
   return (
-    <main className="terminal-shell">
+    <main className="terminal-shell" data-state={displayState}>
       <header className="terminal-header">
         <div className="terminal-identity">
           <div className="terminal-kicker">CHATGPT LIVE TERMINAL</div>
@@ -512,7 +506,7 @@ export function TerminalApp(): React.JSX.Element {
       <footer className="terminal-footer">
         <span>{viewState?.shell ?? 'shell'}</span>
         <span>SSE {streamState.toUpperCase()}</span>
-        {viewState?.exit_code != null ? <span className="terminal-exit">EXIT {viewState.exit_code}</span> : null}
+        {viewState?.exit_code != null ? <span className="terminal-exit" data-success={viewState.exit_code === 0 ? 'true' : 'false'}>EXIT {viewState.exit_code}</span> : null}
       </footer>
     </main>
   );

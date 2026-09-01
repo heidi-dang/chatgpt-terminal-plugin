@@ -60,7 +60,9 @@ export interface AgentGatewayOptions {
 }
 
 export class AgentGateway {
-  readonly webSocketServer = new WebSocketServer({ noServer: true });
+  // Limit individual WebSocket message size to prevent memory exhaustion from oversized payloads.
+  // Terminal events rarely exceed a few KB; 2 MB provides generous headroom while bounding risk.
+  readonly webSocketServer = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
   private readonly agents = new Map<string, AgentConnection>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, SessionRecord>();
@@ -539,6 +541,8 @@ export class AgentGateway {
       const duplicateIndex = record.eventHead + event.sequence - record.earliestSequence;
       const duplicate = record.events[duplicateIndex];
       if (duplicate?.sequence === event.sequence) {
+        // Replays are uncommon; preserve full content-integrity validation rather than
+        // trusting event_id alone as if it were a content hash.
         if (JSON.stringify(duplicate) !== JSON.stringify(event)) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Terminal event sequence was replayed with different content.');
         }
@@ -551,8 +555,9 @@ export class AgentGateway {
     }
     record.ownerId = ownerId;
     record.agentId = agentId;
-    const textPayload = (event.event_type === 'terminal.stdout' || event.event_type === 'terminal.stderr') ? event.data.text : undefined;
-    const eventBytes = typeof textPayload === 'string' ? Buffer.byteLength(textPayload) + 150 : Buffer.byteLength(JSON.stringify(event));
+    // Keep retained-byte accounting exact. Terminal output commonly contains ANSI/control
+    // bytes that expand when JSON-escaped, so raw text length can materially undercount memory.
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
     record.events.push(event);
     record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;

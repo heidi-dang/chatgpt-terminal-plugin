@@ -61,7 +61,11 @@ export class AgentGatewayClient {
       } catch (error) {
         if (this.stopped) break;
         this.authenticated = false;
-        const backoff = Math.min(1000 * 2 ** this.reconnectAttempt, this.options.reconnectMaxMs);
+        // Exponential backoff with ±25% jitter to prevent thundering herd on mass reconnect
+        const base = Math.min(1000 * 2 ** this.reconnectAttempt, this.options.reconnectMaxMs);
+        const jitter = base * 0.25 * (2 * Math.random() - 1);
+        const floor = Math.min(500, this.options.reconnectMaxMs);
+        const backoff = Math.min(this.options.reconnectMaxMs, Math.max(floor, Math.round(base + jitter)));
         this.reconnectAttempt += 1;
         console.error(JSON.stringify({ level: 'warn', event: 'agent.gateway_disconnected', error: errorMessage(error), retry_ms: backoff }));
         await delay(backoff);

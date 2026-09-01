@@ -470,6 +470,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       event_type: eventType,
       data,
     };
+    // Keep retained-byte accounting exact. Terminal output commonly contains ANSI/control
+    // bytes that expand when JSON-escaped, so raw text length can materially undercount memory.
     const eventBytes = Buffer.byteLength(JSON.stringify(event));
     managed.events.push(event);
     managed.eventSizes.push(eventBytes);

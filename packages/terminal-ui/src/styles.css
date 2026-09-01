@@ -84,6 +84,7 @@ body { background: transparent; color: #f0f6fc; }
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.08em;
+  transition: color 0.25s ease, background 0.25s ease, border-color 0.25s ease;
 }
 
 .state-dot {
@@ -92,15 +93,30 @@ body { background: transparent; color: #f0f6fc; }
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
+  transition: box-shadow 0.25s ease;
 }
 .terminal-status[data-state="live"] { color: #56d364; background: rgba(46, 160, 67, 0.09); border-color: rgba(63,185,80,0.17); }
-.terminal-status[data-state="live"] .state-dot { box-shadow: 0 0 12px rgba(86,211,100,0.75); }
+.terminal-status[data-state="live"] .state-dot { box-shadow: 0 0 12px rgba(86,211,100,0.75); animation: pulse-live 2s ease-in-out infinite; }
 .terminal-status[data-state="reconnecting"],
 .terminal-status[data-state="connecting"] { color: #d29922; }
+.terminal-status[data-state="reconnecting"] .state-dot,
+.terminal-status[data-state="connecting"] .state-dot { animation: pulse-reconnect 1.2s ease-in-out infinite; }
 .terminal-status[data-state="closed"],
 .terminal-status[data-state="exited"],
 .terminal-status[data-state="failed"],
 .terminal-status[data-state="offline"] { color: #8c959f; }
+
+/* Subtle glow pulse for the live connection indicator */
+@keyframes pulse-live {
+  0%, 100% { box-shadow: 0 0 8px rgba(86,211,100,0.55); }
+  50% { box-shadow: 0 0 16px rgba(86,211,100,0.85); }
+}
+
+/* Faster pulse for reconnecting/connecting states to indicate activity */
+@keyframes pulse-reconnect {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 
 .terminal-path {
   margin-top: 5px;
@@ -130,6 +146,17 @@ body { background: transparent; color: #f0f6fc; }
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(86,211,100,0.32), rgba(56,139,253,0.25), transparent);
   pointer-events: none;
+  transition: background 0.3s ease;
+}
+/* State-reactive glow line: amber during reconnect, dimmed when offline */
+[data-state="reconnecting"] .terminal-frame::before,
+[data-state="connecting"] .terminal-frame::before {
+  background: linear-gradient(90deg, transparent, rgba(210,153,34,0.4), rgba(210,153,34,0.2), transparent);
+}
+[data-state="closed"] .terminal-frame::before,
+[data-state="exited"] .terminal-frame::before,
+[data-state="failed"] .terminal-frame::before {
+  background: linear-gradient(90deg, transparent, rgba(140,149,159,0.15), transparent);
 }
 
 .terminal-host {
@@ -138,7 +165,9 @@ body { background: transparent; color: #f0f6fc; }
   min-height: 350px;
 }
 .terminal-host .xterm { height: 100%; }
-.terminal-host .xterm-viewport { background: transparent !important; scrollbar-width: thin; scrollbar-color: rgba(139,148,158,0.25) transparent; }
+.terminal-host:focus-within { outline: 1px solid rgba(86,211,100,0.2); outline-offset: -1px; }
+.terminal-host .xterm-viewport { background: transparent !important; scrollbar-width: thin; scrollbar-color: rgba(139,148,158,0.35) transparent; }
+.terminal-host .xterm-viewport:hover { scrollbar-color: rgba(139,148,158,0.5) transparent; }
 .terminal-host .xterm-screen { padding-bottom: 4px; }
 
 .terminal-footer {
@@ -157,8 +186,15 @@ body { background: transparent; color: #f0f6fc; }
   letter-spacing: 0.055em;
   white-space: nowrap;
 }
-.terminal-footer span:nth-child(2) { color: #3fb950; }
+.terminal-footer span:nth-child(2) { color: #3fb950; transition: color 0.2s ease; }
+[data-state="reconnecting"] .terminal-footer span:nth-child(2),
+[data-state="connecting"] .terminal-footer span:nth-child(2) { color: #d29922; }
+[data-state="closed"] .terminal-footer span:nth-child(2),
+[data-state="exited"] .terminal-footer span:nth-child(2),
+[data-state="failed"] .terminal-footer span:nth-child(2) { color: #8c959f; }
 .terminal-exit { margin-left: auto; }
+.terminal-exit[data-success="true"] { color: #56d364; }
+.terminal-exit[data-success="false"] { color: #ff7b72; }
 
 .terminal-error {
   padding: 14px;
@@ -184,6 +220,12 @@ body { background: transparent; color: #f0f6fc; }
   .terminal-frame { min-height: 430px; padding: 9px 0 6px 8px; }
   .terminal-host { min-height: 420px; }
   .terminal-footer { gap: 8px; min-height: 28px; padding-inline: 10px; font-size: 8px; }
+}
+
+/* Respect user preference for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .state-dot { animation: none !important; }
+  .terminal-status { transition: none !important; }
 }
 
 @media (max-width: 390px) {

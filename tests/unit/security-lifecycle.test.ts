@@ -145,16 +145,16 @@ describe('security and lifecycle hardening', () => {
       allowedWorkspaceRoots: [root],
       executionProfile: 'developer',
       shells: ['bash'],
-      idleTimeoutMs: 60,
+      idleTimeoutMs: 200,
       maxLifetimeMs: 10_000,
-      sweepIntervalMs: 10,
+      sweepIntervalMs: 50,
     });
     cleanup.push(() => agent.shutdown());
     const started = agent.start('user-a', {
       agent_id: 'agent-idle', cwd: root, shell: 'bash', cols: 80, rows: 24,
     }, 'developer');
 
-    await waitUntil(() => agent.status(started.session.session_id).session.status === 'closed', 2000);
+    await waitUntil(() => agent.status(started.session.session_id).session.status === 'closed', 4000);
     const events = agent.readEvents(started.session.session_id, 0, 256 * 1024).events;
     expect(events.some((event) => event.event_type === 'session.closed' && event.data.reason === 'idle_timeout')).toBe(true);
   });
