@@ -84,6 +84,7 @@ body { background: transparent; color: #f0f6fc; }
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.08em;
+  transition: color 0.25s ease, background 0.25s ease, border-color 0.25s ease;
 }
 
 .state-dot {
@@ -92,15 +93,30 @@ body { background: transparent; color: #f0f6fc; }
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 0 0 3px rgba(255,255,255,0.03);
+  transition: box-shadow 0.25s ease;
 }
 .terminal-status[data-state="live"] { color: #56d364; background: rgba(46, 160, 67, 0.09); border-color: rgba(63,185,80,0.17); }
-.terminal-status[data-state="live"] .state-dot { box-shadow: 0 0 12px rgba(86,211,100,0.75); }
+.terminal-status[data-state="live"] .state-dot { box-shadow: 0 0 12px rgba(86,211,100,0.75); animation: pulse-live 2s ease-in-out infinite; }
 .terminal-status[data-state="reconnecting"],
 .terminal-status[data-state="connecting"] { color: #d29922; }
+.terminal-status[data-state="reconnecting"] .state-dot,
+.terminal-status[data-state="connecting"] .state-dot { animation: pulse-reconnect 1.2s ease-in-out infinite; }
 .terminal-status[data-state="closed"],
 .terminal-status[data-state="exited"],
 .terminal-status[data-state="failed"],
 .terminal-status[data-state="offline"] { color: #8c959f; }
+
+/* Subtle glow pulse for the live connection indicator */
+@keyframes pulse-live {
+  0%, 100% { box-shadow: 0 0 8px rgba(86,211,100,0.55); }
+  50% { box-shadow: 0 0 16px rgba(86,211,100,0.85); }
+}
+
+/* Faster pulse for reconnecting/connecting states to indicate activity */
+@keyframes pulse-reconnect {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 
 .terminal-path {
   margin-top: 5px;
