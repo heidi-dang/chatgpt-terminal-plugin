@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { codeCancelInputSchema, codeExecuteInputSchema } from './code-block.js';
+import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
 
 export const terminalSessionStatusSchema = z.enum([
   'creating',
@@ -94,6 +96,7 @@ export const terminalErrorCodeSchema = z.enum([
   'PTY_CREATE_FAILED',
   'AGENT_TIMEOUT',
   'OUTPUT_LIMIT_REACHED',
+  'REQUEST_CANCELLED',
   'STREAM_TOKEN_EXPIRED',
   'SESSION_LIMIT_REACHED',
   'INVALID_ARGUMENT',
@@ -370,6 +373,46 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('file.search'),
     input: terminalSearchFilesInputSchema,
   }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('code.execute'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: codeExecuteInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('code.cancel'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: codeCancelInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('lsp.start'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: lspStartInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('lsp.request'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: lspRequestInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('lsp.stop'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: lspStopInputSchema,
+  }),
 ]);
 export type AgentCommand = z.infer<typeof agentCommandSchema>;
 
@@ -454,4 +497,5 @@ export const terminalStreamRefreshOutputSchema = z.object({
 });
 export type TerminalStreamRefreshOutput = z.infer<typeof terminalStreamRefreshOutputSchema>;
 
-
+export * from './code-block.js';
+export * from './lsp.js';

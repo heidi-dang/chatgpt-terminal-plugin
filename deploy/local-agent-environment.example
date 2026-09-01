@@ -25,3 +25,7 @@ TERMINAL_SWEEP_INTERVAL_MS=30000
 # AGENT_OWNER_ID=oauth-subject-for-this-user
 # AGENT_ENROLLMENT_TOKEN=replace-with-bootstrap-administrator-secret
 # AGENT_ROTATE_KEY=0
+
+# Optional administrator-controlled LSP allowlist. Remote MCP callers can select only these IDs.
+# Example: {"typescript":{"command":"typescript-language-server","args":["--stdio"]}}
+TERMINAL_LSP_SERVERS_JSON={}

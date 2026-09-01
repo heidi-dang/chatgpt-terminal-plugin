@@ -91,6 +91,11 @@ The local agent creates a persistent Ed25519 identity on first run. Its private 
 | `terminal_list_files` | List bounded directory entries without following symlink metadata. |
 | `terminal_write_file` | Write a bounded file through the agent workspace policy; denied for read-only identities. |
 | `terminal_search_files` | Search workspace text files with bounded results, file count, and per-file size. |
+| `terminal_execute_code_block` | Execute bounded code through the strict `bash`/`python3`/`node`/`typescript` runtime allowlist on an explicitly selected agent. |
+| `terminal_cancel_code` | Cancel an owned running code execution by UUID. |
+| `terminal_lsp_start` | Start an administrator-configured LSP server ID inside an allowed workspace root. |
+| `terminal_lsp_request` | Send one bounded, ownership-checked JSON-RPC request to an owned LSP process. |
+| `terminal_lsp_stop` | Stop an owned LSP process. |
 | `terminal_stream_refresh` | Issue a new short-lived UI stream capability. |
 | `terminal_close` | Terminate and dispose the PTY. |
 

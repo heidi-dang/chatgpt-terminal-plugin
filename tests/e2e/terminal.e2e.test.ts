@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -22,6 +23,22 @@ describe('terminal MCP end-to-end', () => {
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, 'workspace');
     await mkdir(workspace);
+
+    const lspScript = join(root, 'echo-lsp.cjs');
+    await writeFile(lspScript, String.raw`
+      let buffer = Buffer.alloc(0);
+      process.stdin.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); drain(); });
+      function send(msg) { const body = JSON.stringify(msg); process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body); }
+      function drain() {
+        for (;;) {
+          const end = buffer.indexOf('\r\n\r\n'); if (end < 0) return;
+          const match = /Content-Length:\s*(\d+)/i.exec(buffer.subarray(0, end).toString('ascii')); if (!match) return;
+          const length = Number(match[1]); const start = end + 4; if (buffer.length < start + length) return;
+          const msg = JSON.parse(buffer.subarray(start, start + length).toString('utf8')); buffer = buffer.subarray(start + length);
+          if (msg.id !== undefined) send({ jsonrpc: '2.0', id: msg.id, result: { method: msg.method, value: msg.params?.value } });
+        }
+      }
+    `, 'utf8');
 
     const port = await getFreePort();
     const publicUrl = `http://127.0.0.1:${port}/mcp`;
@@ -84,6 +101,7 @@ describe('terminal MCP end-to-end', () => {
       allowedWorkspaceRoots: [workspace],
       executionProfile: 'owner-full',
       shells: ['bash'],
+      lspServers: { echo: { command: process.execPath, args: [lspScript] } },
       bufferHighWaterBytes: 1024 * 1024,
       maxEventBytes: 64 * 1024,
       idleTimeoutMs: 60_000,
@@ -131,6 +149,11 @@ describe('terminal MCP end-to-end', () => {
       'terminal_list_files',
       'terminal_write_file',
       'terminal_search_files',
+      'terminal_execute_code_block',
+      'terminal_cancel_code',
+      'terminal_lsp_start',
+      'terminal_lsp_request',
+      'terminal_lsp_stop',
     ]) expect(toolNames.has(expected)).toBe(true);
 
     const surfaceTool = listed.tools.find((tool) => tool.name === 'terminal_surface');
@@ -201,6 +224,64 @@ describe('terminal MCP end-to-end', () => {
     const surface = structured(await client.callTool({ name: 'terminal_surface', arguments: {} }));
     const surfaceId = stringField(surface, 'surface_id');
     expect(surface.surface_active).toBe(false);
+    const codeExecutionId = randomUUID();
+    const codeResult = structured(await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, execution_id: codeExecutionId, runtime: 'node', cwd: workspace,
+        code: `process.stdout.write('__CODE_E2E__|' + process.cwd())`, timeout_ms: 5_000,
+      },
+    }));
+    expect(codeResult.execution_id).toBe(codeExecutionId);
+    expect(codeResult.stdout).toContain(`__CODE_E2E__|${workspace}`);
+    expect(codeResult.exit_code).toBe(0);
+
+    const explicitCancelId = randomUUID();
+    const explicitRunning = client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, execution_id: explicitCancelId, runtime: 'node', cwd: workspace,
+        code: 'setTimeout(() => {}, 30_000)', timeout_ms: 30_000,
+      },
+    }, { timeout: 35_000 });
+    await delay(100);
+    const explicitCancel = structured(await client.callTool({
+      name: 'terminal_cancel_code', arguments: { agent_id: identity.agentId, execution_id: explicitCancelId },
+    }));
+    expect(explicitCancel).toMatchObject({ execution_id: explicitCancelId, cancelled: true });
+    const explicitCancelledResult = await explicitRunning;
+    expect(explicitCancelledResult.isError).toBe(true);
+    expect((explicitCancelledResult._meta?.terminal_error as { code?: string } | undefined)?.code).toBe('REQUEST_CANCELLED');
+
+    const abortMarker = join(workspace, 'abort-should-not-exist.txt');
+    const abortExecutionId = randomUUID();
+    const controller = new AbortController();
+    const abortedRunning = client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, execution_id: abortExecutionId, runtime: 'node', cwd: workspace,
+        code: `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(abortMarker)}, 'leaked'), 700); setTimeout(() => {}, 30_000)`,
+        timeout_ms: 30_000,
+      },
+    }, { signal: controller.signal, timeout: 35_000 });
+    await delay(100);
+    controller.abort();
+    await expect(abortedRunning).rejects.toThrow();
+    await delay(900);
+    await expect(access(abortMarker)).rejects.toBeTruthy();
+
+    const lspStarted = structured(await client.callTool({
+      name: 'terminal_lsp_start', arguments: { agent_id: identity.agentId, server_id: 'echo', root: workspace },
+    }));
+    const lspId = stringField(lspStarted, 'lsp_id');
+    const lspResponse = structured(await client.callTool({
+      name: 'terminal_lsp_request',
+      arguments: { agent_id: identity.agentId, lsp_id: lspId, method: 'e2e/echo', params: { value: 42 } },
+    }));
+    expect(lspResponse.result).toEqual({ method: 'e2e/echo', value: 42 });
+    expect(structured(await client.callTool({
+      name: 'terminal_lsp_stop', arguments: { agent_id: identity.agentId, lsp_id: lspId },
+    }))).toMatchObject({ lsp_id: lspId, stopped: true });
 
     const startedResult = await client.callTool({
       name: 'terminal_start',
@@ -357,7 +438,7 @@ describe('terminal MCP end-to-end', () => {
     expect(transcript).toContain('terminal.stdout');
     expect(transcript).toContain('command.input');
     expect(transcript).toContain(sessionId);
-  }, 25_000);
+  }, 40_000);
 });
 
 async function readUntil(

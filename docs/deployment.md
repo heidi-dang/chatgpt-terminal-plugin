@@ -109,6 +109,7 @@ AGENT_GATEWAY_URL=wss://terminal.example.com/agent
 AGENT_IDENTITY_PATH=<owner-only local path>
 ALLOWED_WORKSPACE_ROOTS=<comma-separated roots>
 EXECUTION_PROFILE=developer
+TERMINAL_LSP_SERVERS_JSON={}
 ```
 
 For the first enrollment, additionally configure:

@@ -5,10 +5,20 @@ import { constants, readlinkSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
+import { CodeBlockExecutor } from './code-block-executor.js';
+import { LspManager, type LspServerDefinition } from './lsp-manager.js';
 import {
   TerminalProtocolError,
   type Agent,
+  type CodeCancelOutput,
+  type CodeExecuteInput,
+  type CodeExecuteOutput,
   type ExecutionProfile,
+  type LspRequestInput,
+  type LspRequestOutput,
+  type LspStartInput,
+  type LspStartOutput,
+  type LspStopOutput,
   type TerminalEvent,
   type TerminalEventActor,
   type TerminalEventType,
@@ -21,6 +31,7 @@ export interface LocalTerminalAgentOptions {
   displayName?: string;
   allowedWorkspaceRoots: string[];
   executionProfile: ExecutionProfile;
+  lspServers?: Readonly<Record<string, LspServerDefinition>>;
   shells?: string[];
   bufferHighWaterBytes?: number;
   maxEventBytes?: number;
@@ -64,6 +75,12 @@ export interface TerminalAgentApi {
   listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
   writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
   searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
+  executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput>;
+  cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput;
+  startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput>;
+  requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput>;
+  stopLsp(userId: string, lspId: string, requestedProfile: ExecutionProfile): LspStopOutput;
+  stopProcessFeatures(): void;
   onEvent(listener: (event: TerminalEvent) => void): () => void;
   shutdown(): void;
 }
@@ -75,7 +92,7 @@ const CONTROL_PLANE_SECRET_ENV = new Set([
   'OAUTH_CLIENT_SECRET',
 ]);
 
-function cleanEnvironment(): Record<string, string> {
+export function cleanEnvironment(): Record<string, string> {
   return Object.fromEntries(
     Object.entries(process.env).filter(
       (entry): entry is [string, string] => typeof entry[1] === 'string' && !CONTROL_PLANE_SECRET_ENV.has(entry[0]),
@@ -246,6 +263,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly agent: Agent;
   private readonly workspacePolicy: WorkspacePolicy;
+  private readonly executionWorkspacePolicy: WorkspacePolicy;
+  private readonly codeExecutor: CodeBlockExecutor;
+  private readonly lspManager: LspManager;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -276,6 +296,11 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.sweepTimer = setInterval(() => this.sweepExpiredSessions(), options.sweepIntervalMs ?? 30_000);
     this.sweepTimer.unref();
     this.workspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, options.executionProfile);
+    // Code and LSP execution are intentionally workspace-contained even for owner-full.
+    this.executionWorkspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, 'developer');
+    const environment = cleanEnvironment();
+    this.codeExecutor = new CodeBlockExecutor({ environment });
+    this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
   }
 
   describe(): Agent {
@@ -675,6 +700,45 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return { pattern, matches, truncated, files_searched: filesSearched };
   }
 
+  async executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    const fallbackRoot = this.options.allowedWorkspaceRoots[0];
+    const requestedCwd = input.cwd ?? fallbackRoot;
+    if (!requestedCwd) {
+      throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace root is configured for code execution.');
+    }
+    const cwd = this.executionWorkspacePolicy.resolveCwd(requestedCwd);
+    return this.codeExecutor.execute(userId, input, cwd);
+  }
+
+  cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    return this.codeExecutor.cancel(userId, executionId);
+  }
+
+  async startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput> {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    const root = this.executionWorkspacePolicy.resolveCwd(input.root);
+    return this.lspManager.start(userId, input, root);
+  }
+
+  requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput> {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    return this.lspManager.request(userId, input);
+  }
+
+  stopLsp(userId: string, lspId: string, requestedProfile: ExecutionProfile): LspStopOutput {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    return this.lspManager.stop(userId, lspId);
+  }
+
+  private assertProcessExecutionAllowed(requestedProfile: ExecutionProfile): void {
+    const effectiveProfile = restrictiveExecutionProfile(this.options.executionProfile, requestedProfile);
+    if (effectiveProfile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'The effective execution profile does not allow process execution.');
+    }
+  }
+
   private resolveFilePath(managed: ManagedSession, filePath: string): string {
     const absolute = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
     return this.workspacePolicy.resolveExistingPath(absolute);
@@ -685,8 +749,14 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return () => this.eventEmitter.off('terminal-event', listener);
   }
 
+  stopProcessFeatures(): void {
+    this.codeExecutor.shutdown();
+    this.lspManager.stopAll();
+  }
+
   shutdown(): void {
     clearInterval(this.sweepTimer);
+    this.stopProcessFeatures();
     for (const managed of this.sessions.values()) {
       if (managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'closing') continue;
       this.closeManaged(managed, 'system', 'agent_shutdown');

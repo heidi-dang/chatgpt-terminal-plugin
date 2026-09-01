@@ -1,6 +1,11 @@
 import {
   TerminalProtocolError,
   terminalListAgentsOutputSchema,
+  terminalCancelCodeToolSchema,
+  terminalExecuteCodeBlockToolSchema,
+  terminalLspRequestSchema,
+  terminalLspStartSchema,
+  terminalLspStopSchema,
   terminalMutationOutputSchema,
   terminalReadInputSchema,
   terminalSessionIdInputSchema,
@@ -9,7 +14,17 @@ import {
   terminalStatusOutputSchema,
   terminalWriteInputSchema,
   terminalResizeInputSchema,
+  type CodeCancelOutput,
+  type CodeExecuteOutput,
   type ExecutionProfile,
+  type LspRequestOutput,
+  type LspStartOutput,
+  type LspStopOutput,
+  type TerminalCancelCodeToolArgs,
+  type TerminalExecuteCodeBlockToolArgs,
+  type TerminalLspRequestArgs,
+  type TerminalLspStartArgs,
+  type TerminalLspStopArgs,
   type TerminalListAgentsOutput,
   type TerminalMutationOutput,
   type TerminalReadInput,
@@ -245,6 +260,68 @@ export class TerminalService {
       input: { path: input.path, bytes: Buffer.byteLength(input.content) },
     });
     return this.gateway.writeFile(identity.userId, input.session_id, input.path, input.content, input.create_directories);
+  }
+
+  async executeCode(identity: RequestIdentity, rawInput: TerminalExecuteCodeBlockToolArgs): Promise<CodeExecuteOutput> {
+    const input = terminalExecuteCodeBlockToolSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_execute_code_block', {
+      agent_id: input.agent_id,
+      runtime: input.runtime,
+      cwd: input.cwd,
+      timeout_ms: input.timeout_ms,
+      code_bytes: Buffer.byteLength(input.code),
+    });
+    const output = await this.gateway.executeCode(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_execute_code_block', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { runtime: input.runtime, cwd: input.cwd, timeout_ms: input.timeout_ms, code_bytes: Buffer.byteLength(input.code) },
+      output_metadata: { execution_id: output.execution_id, exit_code: output.exit_code, timed_out: output.timed_out, stdout_bytes: Buffer.byteLength(output.stdout), stderr_bytes: Buffer.byteLength(output.stderr) },
+    });
+    return output;
+  }
+
+  async cancelCode(identity: RequestIdentity, rawInput: TerminalCancelCodeToolArgs): Promise<CodeCancelOutput> {
+    const input = terminalCancelCodeToolSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_cancel_code', { agent_id: input.agent_id, execution_id: input.execution_id });
+    const output = await this.gateway.cancelCode(identity.userId, input.agent_id, input.execution_id, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_cancel_code', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { execution_id: input.execution_id }, output_metadata: { cancelled: output.cancelled },
+    });
+    return output;
+  }
+
+  async startLsp(identity: RequestIdentity, rawInput: TerminalLspStartArgs): Promise<LspStartOutput> {
+    const input = terminalLspStartSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_lsp_start', { agent_id: input.agent_id, server_id: input.server_id, root: input.root });
+    const output = await this.gateway.startLsp(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_lsp_start', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { server_id: input.server_id, root: input.root }, output_metadata: { lsp_id: output.lsp_id },
+    });
+    return output;
+  }
+
+  async requestLsp(identity: RequestIdentity, rawInput: TerminalLspRequestArgs): Promise<LspRequestOutput> {
+    const input = terminalLspRequestSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_lsp_request', { agent_id: input.agent_id, lsp_id: input.lsp_id, method: input.method });
+    const output = await this.gateway.requestLsp(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_lsp_request', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { lsp_id: input.lsp_id, method: input.method },
+    });
+    return output;
+  }
+
+  async stopLsp(identity: RequestIdentity, rawInput: TerminalLspStopArgs): Promise<LspStopOutput> {
+    const input = terminalLspStopSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_lsp_stop', { agent_id: input.agent_id, lsp_id: input.lsp_id });
+    const output = await this.gateway.stopLsp(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_lsp_stop', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { lsp_id: input.lsp_id }, output_metadata: { stopped: output.stopped },
+    });
+    return output;
   }
 
   private async assertMutationAllowed(identity: RequestIdentity, action: string, input?: unknown): Promise<void> {
