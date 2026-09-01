@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentGatewayClient } from '../../packages/local-agent/src/gateway-client.js';
 import { LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
@@ -45,6 +45,41 @@ describe('AgentGatewayClient lifecycle', () => {
     expect(output.exit_code).toBe(0);
   });
 
+
+
+  it('closes a socket that fails gateway authentication before reconnecting', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-auth-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-auth', allowedWorkspaceRoots: [root], executionProfile: 'owner-full', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate gateway-client auth test port.');
+    server.once('connection', (socket) => {
+      socket.send(JSON.stringify({ type: 'auth.accepted', server_time: new Date().toISOString() }));
+    });
+    const client = new AgentGatewayClient(agent, {
+      url: `ws://127.0.0.1:${address.port}/`, identity: { deviceId: 'device-auth-test' } as never,
+      heartbeatMs: 1_000, reconnectMaxMs: 500, outboundHighWaterBytes: 1024 * 1024,
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup.push(() => errorSpy.mockRestore());
+    const run = client.start();
+    let rejectedSocketWasOpen = true;
+    try {
+      await vi.waitFor(() => expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('agent.gateway_disconnected')));
+      rejectedSocketWasOpen = (client as unknown as { socket?: WebSocket }).socket?.readyState === WebSocket.OPEN;
+    } finally {
+      client.stop();
+      await run;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+
+    expect(rejectedSocketWasOpen).toBe(false);
+  });
 
   it('stops promptly while waiting in reconnect backoff', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-stop-'));

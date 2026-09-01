@@ -99,7 +99,16 @@ export class AgentGatewayClient {
       },
     });
     this.socket = socket;
-    await this.authenticateSocket(socket);
+    try {
+      await this.authenticateSocket(socket);
+    } catch (error) {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'device authentication failed');
+      else if (socket.readyState === WebSocket.CONNECTING) {
+        socket.once('error', () => undefined);
+        socket.terminate();
+      }
+      throw error;
+    }
     this.authenticated = true;
 
     socket.on('message', (data) => {
