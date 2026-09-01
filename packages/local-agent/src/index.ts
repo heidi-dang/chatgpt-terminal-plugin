@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { readlinkSync, realpathSync } from 'node:fs';
-import { mkdir, open, readdir, stat, writeFile } from 'node:fs/promises';
+import { constants, readlinkSync, realpathSync } from 'node:fs';
+import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
 import {
@@ -99,9 +99,10 @@ function errorMsg(error: unknown): string {
 function matchGlob(filename: string, pattern: string): boolean {
   // Handle {a,b} alternation
   const braceMatch = pattern.match(/^(.*)\.\{([^}]+)\}$/);
-  if (braceMatch) {
-    const extensions = braceMatch[2].split(',');
-    return extensions.some(ext => filename.endsWith('.' + ext));
+  const extensionGroup = braceMatch?.[2];
+  if (extensionGroup) {
+    const extensions = extensionGroup.split(',');
+    return extensions.some((ext) => filename.endsWith('.' + ext));
   }
   // Handle simple *.ext
   if (pattern.startsWith('*.')) {
@@ -176,9 +177,38 @@ export class WorkspacePolicy {
     return candidate;
   }
 
-  assertAllowed(path: string): void {
-    if (this.profile === 'owner-full') return;
+  resolveExistingPath(path: string): string {
     const canonical = canonicalWorkspacePath(path);
+    this.assertCanonicalAllowed(canonical);
+    return canonical;
+  }
+
+  resolveWritablePath(path: string): string {
+    const absolute = resolve(path);
+    if (this.profile === 'owner-full') return absolute;
+    if (this.roots.length === 0) {
+      throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace roots are configured.');
+    }
+
+    let ancestor = dirname(absolute);
+    while (true) {
+      try {
+        const canonicalAncestor = realpathSync(ancestor);
+        this.assertCanonicalAllowed(canonicalAncestor);
+        return resolve(canonicalAncestor, relative(ancestor, absolute));
+      } catch (error) {
+        if (error instanceof TerminalProtocolError) throw error;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) {
+          throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Writable path has no resolvable allowed ancestor.');
+        }
+        ancestor = parent;
+      }
+    }
+  }
+
+  private assertCanonicalAllowed(canonical: string): void {
+    if (this.profile === 'owner-full') return;
     if (this.roots.length === 0) {
       throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace roots are configured.');
     }
@@ -465,7 +495,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       for (const dirent of dirents.slice(0, maxEntries)) {
         try {
           const entryPath = resolve(resolved, dirent.name);
-          const info = await stat(entryPath).catch(() => null);
+          const info = await lstat(entryPath).catch(() => null);
           entries.push({
             name: dirent.name,
             type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : dirent.isFile() ? 'file' : 'other',
@@ -492,11 +522,36 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     if (managed.metadata.execution_profile === 'read-only') {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'File writes are not permitted under the read-only execution profile.');
     }
-    const resolved = this.resolveFilePath(managed, filePath);
+    const requested = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
+    let resolved = this.workspacePolicy.resolveWritablePath(requested);
     try {
       if (createDirectories) await mkdir(dirname(resolved), { recursive: true });
+      const canonicalParent = this.workspacePolicy.resolveExistingPath(dirname(resolved));
+      resolved = resolve(canonicalParent, basename(resolved));
+
+      const targetInfo = await lstat(resolved).catch((error: unknown) => {
+        if (isFileNotFound(error)) return null;
+        throw error;
+      });
+      if (targetInfo?.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to write through a symbolic link.');
+      }
+      if (targetInfo && !targetInfo.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Write target is not a regular file.');
+      }
+
       const buffer = Buffer.from(content, 'utf8');
-      await writeFile(resolved, buffer, { mode: 0o644 });
+      const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+      const handle = await open(resolved, constants.O_WRONLY | constants.O_CREAT | noFollow, 0o644);
+      try {
+        if (process.platform === 'linux') {
+          this.workspacePolicy.resolveExistingPath(`/proc/self/fd/${handle.fd}`);
+        }
+        await handle.truncate(0);
+        await handle.writeFile(buffer);
+      } finally {
+        await handle.close();
+      }
       return {
         path: relative(managed.metadata.cwd, resolved) || resolved,
         bytes_written: buffer.length,
@@ -531,6 +586,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }> = [];
     let filesSearched = 0;
     let truncated = false;
+    const maxFilesSearched = 10_000;
 
     const walk = async (dir: string): Promise<void> => {
       if (truncated) return;
@@ -548,6 +604,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
         if (dirent.isDirectory()) {
           await walk(entryPath);
         } else if (dirent.isFile()) {
+          if (filesSearched >= maxFilesSearched) {
+            truncated = true;
+            return;
+          }
           // Apply include filter (simple glob: *.ts, *.js etc)
           if (include && !matchGlob(dirent.name, include)) continue;
           filesSearched += 1;
@@ -616,11 +676,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   }
 
   private resolveFilePath(managed: ManagedSession, filePath: string): string {
-    // Resolve relative to the session's current working directory
     const absolute = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
-    // Enforce workspace roots (same policy as PTY creation)
-    this.workspacePolicy.assertAllowed(absolute);
-    return absolute;
+    return this.workspacePolicy.resolveExistingPath(absolute);
   }
 
   onEvent(listener: (event: TerminalEvent) => void): () => void {

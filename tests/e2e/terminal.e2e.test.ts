@@ -123,6 +123,11 @@ describe('terminal MCP end-to-end', () => {
       'terminal_status',
       'terminal_stream_refresh',
       'terminal_close',
+      'terminal_session_transcript',
+      'terminal_read_file',
+      'terminal_list_files',
+      'terminal_write_file',
+      'terminal_search_files',
     ]) expect(toolNames.has(expected)).toBe(true);
 
     const startTool = listed.tools.find((tool) => tool.name === 'terminal_start');
@@ -186,8 +191,49 @@ describe('terminal MCP end-to-end', () => {
     const sessionId = stringField(started, 'session_id');
     let cursor = numberField(started, 'cursor');
 
+    const writtenFile = structured(await client.callTool({
+      name: 'terminal_write_file',
+      arguments: { session_id: sessionId, path: 'structured/e2e.txt', content: 'alpha\nneedle\nomega\n', create_directories: true },
+    }));
+    expect(writtenFile.path).toBe('structured/e2e.txt');
+    expect(writtenFile.bytes_written).toBe(Buffer.byteLength('alpha\nneedle\nomega\n'));
+
+    const readFileTool = structured(await client.callTool({
+      name: 'terminal_read_file', arguments: { session_id: sessionId, path: 'structured/e2e.txt', max_bytes: 65536 },
+    }));
+    expect(readFileTool.content).toBe('alpha\nneedle\nomega\n');
+    expect(readFileTool.truncated).toBe(false);
+
+    const listedFiles = structured(await client.callTool({
+      name: 'terminal_list_files', arguments: { session_id: sessionId, path: 'structured', max_entries: 20 },
+    }));
+    expect(listedFiles.entries).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'e2e.txt', type: 'file' })]));
+
+    const searchedFiles = structured(await client.callTool({
+      name: 'terminal_search_files', arguments: { session_id: sessionId, pattern: 'needle', path: '.', include: '*.txt', max_results: 20, context_lines: 1 },
+    }));
+    expect(searchedFiles.matches).toEqual(expect.arrayContaining([expect.objectContaining({ file: 'structured/e2e.txt', line: 2, text: 'needle' })]));
+
     await client.callTool({ name: 'terminal_write', arguments: { session_id: sessionId, text: "printf '__HELLO__\\n'\r" } });
     ({ cursor } = await readUntil(client, sessionId, cursor, '__HELLO__'));
+
+    const transcriptView = structured(await client.callTool({
+      name: 'terminal_session_transcript', arguments: { session_id: sessionId, max_entries: 100, after_sequence: 0, include_output: true },
+    }));
+    expect(transcriptView.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'command' }),
+      expect.objectContaining({ type: 'output' }),
+    ]));
+    expect(transcriptView.next_sequence).toEqual(expect.any(Number));
+
+    const metricStatus = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: sessionId } }));
+    expect(metricStatus.uptime_seconds).toEqual(expect.any(Number));
+    expect(metricStatus.total_events).toEqual(expect.any(Number));
+    expect(metricStatus.total_output_bytes).toEqual(expect.any(Number));
+    expect(metricStatus.command_count).toEqual(expect.any(Number));
+    expect(Number(metricStatus.total_events)).toBeGreaterThan(0);
+    expect(Number(metricStatus.total_output_bytes)).toBeGreaterThan(0);
+    expect(Number(metricStatus.command_count)).toBeGreaterThan(0);
 
     await client.callTool({
       name: 'terminal_write',

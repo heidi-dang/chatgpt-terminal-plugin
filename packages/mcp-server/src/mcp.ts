@@ -310,7 +310,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.searchFiles(identityFromContext(ctx), input);
+      const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
   );

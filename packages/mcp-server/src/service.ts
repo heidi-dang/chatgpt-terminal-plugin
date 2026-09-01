@@ -224,7 +224,7 @@ export class TerminalService {
     return this.gateway.listFiles(identity.userId, input.session_id, input.path, input.max_entries);
   }
 
-  async searchFiles(identity: RequestIdentity, input: { session_id: string; pattern: string; path: string; include?: string; max_results: number; context_lines: number }): Promise<unknown> {
+  async searchFiles(identity: RequestIdentity, input: { session_id: string; pattern: string; path: string; include?: string | undefined; max_results: number; context_lines: number }): Promise<unknown> {
     await this.audit.record({
       action: 'file_search',
       ...auditIdentity(identity),
