@@ -185,6 +185,32 @@ describe('terminal MCP App UI', () => {
     expect(source.close).toHaveBeenCalled();
   });
 
+  it('does not yank a user-scrolled transcript back to the live tail', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    const output = document.getElementById('terminal-output') as HTMLElement;
+    Object.defineProperties(output, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    output.scrollTop = 100;
+
+    const source = terminalSource();
+    source.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'while-reading\r\n' } });
+    await flushFrames();
+    expect(output.scrollTop).toBe(100);
+
+    output.scrollTop = 800;
+    source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'while-following\r\n' } });
+    await flushFrames();
+    expect(output.scrollTop).toBe(1000);
+    viewer.destroy();
+  });
+
   it('tracks cwd, drains queued output, and closes only on the final lifecycle event', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);

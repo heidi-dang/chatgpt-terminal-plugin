@@ -980,14 +980,16 @@ export class TerminalViewer {
       this.outputFrame = undefined;
     }
     if (!this.outputQueue) return;
+    const output = this.output;
     if (!this.hasLiveOutput) {
-      this.output.textContent = '';
+      output.textContent = '';
       this.hasLiveOutput = true;
     }
-    appendRichTerminalText(this.output, this.outputQueue, true);
+    const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+    appendRichTerminalText(output, this.outputQueue, true);
     this.outputQueue = '';
     this.trimOutput();
-    this.output.scrollTop = this.output.scrollHeight;
+    if (follow) output.scrollTop = output.scrollHeight;
   }
 
   private trimOutput(): void {
