@@ -128,28 +128,29 @@ describe('terminal MCP end-to-end', () => {
     const startTool = listed.tools.find((tool) => tool.name === 'terminal_start');
     const startMeta = startTool?._meta as Record<string, unknown> | undefined;
     const startUi = startMeta?.ui as Record<string, unknown> | undefined;
-    expect(startUi?.resourceUri).toBe('ui://terminal/v5.html');
-    expect(startMeta?.['openai/outputTemplate']).toBe('ui://terminal/v5.html');
+    expect(startUi?.resourceUri).toBe('ui://terminal/v6.html');
+    expect(startMeta?.['openai/outputTemplate']).toBe('ui://terminal/v6.html');
     const refreshTool = listed.tools.find((tool) => tool.name === 'terminal_stream_refresh');
     const refreshUi = (refreshTool?._meta as Record<string, unknown> | undefined)?.ui as Record<string, unknown> | undefined;
     expect(refreshUi?.visibility).toEqual(['app']);
 
-    const resourceResult = await client.readResource({ uri: 'ui://terminal/v5.html' });
+    const resourceResult = await client.readResource({ uri: 'ui://terminal/v6.html' });
     const uiResource = resourceResult.contents[0] as {
       mimeType?: string;
       text?: string;
       _meta?: { ui?: { csp?: { connectDomains?: string[] }; permissions?: Record<string, unknown> } };
     } | undefined;
     expect(uiResource?.mimeType).toBe('text/html;profile=mcp-app');
-    expect(uiResource?.text).toContain('<div id="root"></div>');
+    expect(uiResource?.text).toContain('data-terminal-static-shell');
+    expect(uiResource?.text).toContain('CHATGPT LIVE TERMINAL');
+    expect(uiResource?.text).toContain('Terminal UI ready.');
+    expect(uiResource?.text).not.toContain('<div id="root"></div>');
     expect(uiResource?._meta?.ui?.csp?.connectDomains).toEqual([baseUrl]);
     expect(uiResource?._meta?.ui?.permissions).toBeUndefined();
     expect(uiResource?.text).toMatch(/meta name="terminal-ui-version" content="[^"]+"/);
 
     const runtimeUiResponse = await fetch(`${baseUrl}/terminal-ui/runtime.html`, { cache: 'no-store' });
-    expect(runtimeUiResponse.status).toBe(200);
-    expect(runtimeUiResponse.headers.get('cache-control')).toContain('no-store');
-    expect(await runtimeUiResponse.text()).toMatch(/meta name="terminal-ui-version" content="[^"]+"/);
+    expect(runtimeUiResponse.status).toBe(404);
     const reloadResponse = await fetch(`${baseUrl}/terminal-ui/reload`, { headers: { accept: 'text/event-stream' } });
     expect(reloadResponse.status).toBe(200);
     expect(reloadResponse.headers.get('content-type')).toContain('text/event-stream');

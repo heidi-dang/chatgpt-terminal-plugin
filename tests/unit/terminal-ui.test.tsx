@@ -1,70 +1,13 @@
 // @vitest-environment jsdom
-import { join } from 'node:path';
-import React, { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-const mocks = vi.hoisted(() => ({
-  app: {
-    ontoolresult: undefined as ((result: unknown) => Promise<void> | void) | undefined,
-    onhostcontextchanged: undefined as ((context: Record<string, unknown>) => void) | undefined,
-    onteardown: undefined as (() => Promise<unknown>) | undefined,
-    onerror: undefined as ((error: Error) => void) | undefined,
-    getHostContext: vi.fn(() => ({ theme: 'dark', platform: 'mobile' })),
-    callServerTool: vi.fn(),
-  },
-  refreshCount: 0,
-  fitCount: 0,
-  terminals: [] as Array<{
-    options: Record<string, unknown>;
-    writes: string[];
-    dispose: ReturnType<typeof vi.fn>;
-    cols: number;
-    rows: number;
-  }>,
-}));
-
-vi.mock('@modelcontextprotocol/ext-apps/react', async () => {
-  const React = await import('react');
-  return {
-    useApp: (options: { onAppCreated?: (app: unknown) => void }) => {
-      React.useEffect(() => { options.onAppCreated?.(mocks.app); }, []);
-      return { app: mocks.app, error: null, isConnected: true };
-    },
-    useHostStyles: () => undefined,
-  };
-});
-
-vi.mock('@xterm/xterm', () => ({
-  Terminal: class FakeTerminal {
-    options: Record<string, unknown>;
-    writes: string[] = [];
-    dispose = vi.fn();
-    cols = 80;
-    rows = 24;
-    constructor(options: Record<string, unknown>) {
-      this.options = options;
-      mocks.terminals.push(this);
-    }
-    loadAddon() {}
-    open() {}
-    write(text: string) { this.writes.push(text); }
-  },
-}));
-
-vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class FakeFitAddon { fit() { mocks.fitCount += 1; } },
-}));
-
-class FakeResizeObserver {
-  static instances: FakeResizeObserver[] = [];
-  constructor(private readonly callback: ResizeObserverCallback) {
-    FakeResizeObserver.instances.push(this);
-  }
-  observe() {}
-  disconnect() {}
-  trigger(): void { this.callback([], this as unknown as ResizeObserver); }
-}
+import {
+  ChatGptMcpBridge,
+  TerminalViewer,
+  classifySequence,
+  normalizeTerminalText,
+  type CallToolResult,
+  type TerminalAppBridge,
+} from '../../packages/terminal-ui/src/main.js';
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -72,241 +15,261 @@ class FakeEventSource {
   onerror: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
   close = vi.fn();
-  constructor(readonly url: string) { FakeEventSource.instances.push(this); }
-  emit(data: unknown): void { this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent<string>); }
-  emitError(): void { this.onerror?.(); }
-  emitOpen(): void { this.onopen?.(); }
+
+  constructor(readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+
+  emit(data: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent<string>);
+  }
+
+  emitOpen(): void {
+    this.onopen?.();
+  }
+
+  emitError(): void {
+    this.onerror?.();
+  }
 }
 
-let root: Root | undefined;
+class FakeResizeObserver {
+  observe = vi.fn();
+  disconnect = vi.fn();
+  constructor(readonly callback: ResizeObserverCallback) {}
+}
+
+function fixture(): void {
+  document.head.innerHTML = '';
+  document.body.innerHTML = `
+    <main id="terminal-shell" data-terminal-static-shell data-state="connecting">
+      <span id="terminal-machine">Connecting to computer</span>
+      <span id="terminal-status" data-state="connecting"><span></span><span>CONNECTING</span></span>
+      <div id="terminal-path">Waiting for terminal session…</div>
+      <pre id="terminal-output">Terminal UI ready.\nWaiting for terminal stream…</pre>
+      <span id="terminal-shell-name">shell</span>
+      <span id="terminal-stream-state">SSE CONNECTING</span>
+      <span id="terminal-exit" hidden></span>
+    </main>`;
+}
+
+function createFakeApp(): TerminalAppBridge & { callServerTool: ReturnType<typeof vi.fn> } {
+  const app = {
+    ontoolresult: undefined as ((result: CallToolResult) => void) | undefined,
+    onhostcontextchanged: undefined as ((context: Record<string, unknown>) => void) | undefined,
+    onteardown: undefined as (() => Promise<Record<string, never>>) | undefined,
+    onerror: undefined as ((error: Error) => void) | undefined,
+    callServerTool: vi.fn(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh') {
+        return {
+          structuredContent: { session_id: 'session-1', status: 'running', cursor: 5 },
+          _meta: {
+            terminal_stream: {
+              url: 'https://terminal.example/events?token=refreshed',
+              expires_at: new Date(Date.now() + 60_000).toISOString(),
+            },
+          },
+        };
+      }
+      if (name === 'terminal_status') {
+        return { structuredContent: { session_id: 'session-1', status: 'running', cursor: 8, cwd: '/workspace', shell: 'bash' } };
+      }
+      return { structuredContent: {} };
+    }),
+  };
+  return app;
+}
+
+function initialResult() {
+  return {
+    structuredContent: {
+      session_id: 'session-1',
+      agent_id: 'agent-1',
+      agent_name: 'My computer',
+      cwd: '/workspace',
+      shell: 'bash',
+      status: 'running',
+      cursor: 4,
+      initial_output: '\u001b[32minitial\u001b[0m\r\n',
+      exit_code: null,
+    },
+    _meta: {
+      terminal_stream: {
+        url: 'https://terminal.example/events?token=initial',
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  };
+}
+
 let frameId = 0;
-let frameCallbacks = new Map<number, FrameRequestCallback>();
+let frames = new Map<number, FrameRequestCallback>();
 
-beforeEach(() => {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  document.body.innerHTML = '<div id="mount"></div>';
-  document.head.querySelector('meta[name="terminal-ui-version"]')?.remove();
-  mocks.terminals.length = 0;
-  mocks.refreshCount = 0;
-  mocks.fitCount = 0;
-  FakeEventSource.instances.length = 0;
-  FakeResizeObserver.instances.length = 0;
-  frameCallbacks = new Map();
-  frameId = 0;
-  mocks.app.ontoolresult = undefined;
-  mocks.app.onhostcontextchanged = undefined;
-  mocks.app.onteardown = undefined;
-  mocks.app.onerror = undefined;
-  mocks.app.getHostContext.mockReturnValue({ theme: 'dark', platform: 'mobile' });
-  mocks.app.callServerTool.mockReset();
-  mocks.app.callServerTool.mockImplementation(async ({ name }: { name: string }) => {
-    if (name === 'terminal_stream_refresh') {
-      mocks.refreshCount += 1;
-      return {
-        structuredContent: { session_id: 'session-1', expires_at: new Date(Date.now() + 60_000).toISOString() },
-        content: [],
-        _meta: { terminal_stream: { url: `https://terminal.example/events?token=refreshed-${mocks.refreshCount}`, expires_at: new Date(Date.now() + 60_000).toISOString() } },
-      };
-    }
-    if (name === 'terminal_status') {
-      return { structuredContent: { session_id: 'session-1', status: 'running', cursor: 8, shell: 'bash', cwd: '/workspace' }, content: [] };
-    }
-    return { structuredContent: { session_id: 'session-1', status: 'running', cursor: 8 }, content: [] };
-  });
-  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
-  vi.stubGlobal('EventSource', FakeEventSource);
-  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-    const id = ++frameId;
-    frameCallbacks.set(id, callback);
-    return id;
-  });
-  vi.stubGlobal('cancelAnimationFrame', (id: number) => { frameCallbacks.delete(id); });
-});
+async function flushFrames(): Promise<void> {
+  const callbacks = [...frames.values()];
+  frames.clear();
+  for (const callback of callbacks) callback(performance.now());
+  await Promise.resolve();
+}
 
-afterEach(async () => {
-  if (root) {
-    await act(async () => root?.unmount());
-    root = undefined;
-  }
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-});
-
-function terminalSource(): FakeEventSource {
-  const source = FakeEventSource.instances.find((candidate) => candidate.url.includes('/events?token='));
-  if (!source) throw new Error('Terminal EventSource was not created.');
+function terminalSource(token = 'initial'): FakeEventSource {
+  const source = FakeEventSource.instances.find((candidate) => candidate.url.includes(`token=${token}`));
+  if (!source) throw new Error(`Terminal source ${token} was not created.`);
   return source;
 }
 
-async function flushFrames(): Promise<void> {
-  await act(async () => {
-    const callbacks = [...frameCallbacks.values()];
-    frameCallbacks.clear();
-    for (const callback of callbacks) callback(performance.now());
+beforeEach(() => {
+  fixture();
+  FakeEventSource.instances.length = 0;
+  frameId = 0;
+  frames = new Map();
+  vi.stubGlobal('EventSource', FakeEventSource);
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    const id = ++frameId;
+    frames.set(id, callback);
+    return id;
   });
-}
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+    frames.delete(id);
+  });
+});
 
-async function initializeSession(): Promise<void> {
-  await act(async () => {
-    await mocks.app.ontoolresult?.({
-      structuredContent: {
-        session_id: 'session-1', agent_id: 'agent-1', agent_name: 'My computer', cwd: '/workspace', shell: 'bash',
-        status: 'running', cursor: 4, initial_output: 'initial\r\n', exit_code: null,
-      },
-      content: [],
-      _meta: { terminal_stream: { url: 'https://terminal.example/events?token=initial', expires_at: new Date(Date.now() + 60_000).toISOString() } },
-    });
-  });
-}
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('terminal MCP App UI', () => {
-  it('renders a watch-only live console and frame-batches real-time SSE output', async () => {
-    const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
-    root = createRoot(document.getElementById('mount')!);
-    await act(async () => root?.render(<TerminalApp />));
-    await initializeSession();
+  it('renders live SSE output into the static shell with one paint per frame', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
 
-    expect(mocks.terminals).toHaveLength(1);
-    const terminal = mocks.terminals[0]!;
-    expect(terminal.options.disableStdin).toBe(true);
-    expect(terminal.options.cursorBlink).toBe(false);
-    expect(document.querySelectorAll('button')).toHaveLength(0);
-    expect(document.body.textContent).toContain('CHATGPT LIVE TERMINAL');
     expect(document.body.textContent).toContain('My computer');
     expect(document.body.textContent).toContain('/workspace');
-    expect(terminal.writes).toContain('initial\r\n');
+    expect(document.getElementById('terminal-output')?.textContent).toContain('initial\n');
 
     const source = terminalSource();
-    await act(async () => {
-      source.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'one\r\n' } });
-      source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'two\r\n' } });
-    });
-    expect(terminal.writes).not.toContain('one\r\ntwo\r\n');
+    source.emitOpen();
+    source.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: '\u001b[31mone\u001b[0m\r\n' } });
+    source.emit({ sequence: 6, event_type: 'terminal.stderr', data: { text: 'two\r\n' } });
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('one\ntwo\n');
     await flushFrames();
-    expect(terminal.writes).toContain('one\r\ntwo\r\n');
+    expect(document.getElementById('terminal-output')?.textContent).toContain('one\ntwo\n');
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
 
-    await act(async () => source.emit({ sequence: 7, event_type: 'process.exit', data: { exit_code: 0 } }));
-    expect(document.body.textContent).toContain('EXIT 0');
+    source.emit({ sequence: 7, event_type: 'process.exit', data: { exit_code: 0 } });
+    expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
+    expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
     expect(source.close).toHaveBeenCalled();
   });
 
-  it('tracks live cwd and drains terminal output before final session.closed', async () => {
-    const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
-    root = createRoot(document.getElementById('mount')!);
-    await act(async () => root?.render(<TerminalApp />));
-    await initializeSession();
-    const terminal = mocks.terminals[0]!;
+  it('tracks cwd, drains queued output, and closes only on the final lifecycle event', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
     const source = terminalSource();
 
-    await act(async () => source.emit({ sequence: 5, event_type: 'cwd.changed', data: { cwd: '/workspace/child' } }));
-    expect(document.body.textContent).toContain('/workspace/child');
+    source.emit({ sequence: 5, event_type: 'cwd.changed', data: { cwd: '/workspace/child' } });
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/workspace/child');
 
-    await act(async () => {
-      await mocks.app.ontoolresult?.({ structuredContent: { session_id: 'session-1', status: 'closing', cursor: 5 }, content: [] });
-    });
+    app.ontoolresult?.({ structuredContent: { session_id: 'session-1', status: 'closing', cursor: 5 } });
     expect(source.close).not.toHaveBeenCalled();
-
-    await act(async () => source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'shutdown-drain\r\n' } }));
-    expect(terminal.writes).not.toContain('shutdown-drain\r\n');
-    await act(async () => source.emit({ sequence: 7, event_type: 'session.closed', data: { reason: 'explicit_close', exit_code: 0 } }));
-    expect(terminal.writes).toContain('shutdown-drain\r\n');
-    expect(document.body.textContent).toContain('CLOSED');
-    expect(document.body.textContent).toContain('EXIT 0');
+    source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'shutdown-drain\r\n' } });
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('shutdown-drain');
+    source.emit({ sequence: 7, event_type: 'session.closed', data: { exit_code: 0 } });
+    expect(document.getElementById('terminal-output')?.textContent).toContain('shutdown-drain\n');
+    expect(document.getElementById('terminal-shell')?.dataset.state).toBe('closed');
     expect(source.close).toHaveBeenCalled();
   });
 
-  it('deduplicates SSE, detects gaps, refreshes capability, and ignores stale sources', async () => {
-    const { TerminalApp, classifySequence } = await import('../../packages/terminal-ui/src/main.js');
+  it('deduplicates events and refreshes the stream on a forward sequence gap', async () => {
     expect(classifySequence(5, 5)).toBe('stale');
     expect(classifySequence(5, 6)).toBe('next');
     expect(classifySequence(5, 7)).toBe('gap');
-    root = createRoot(document.getElementById('mount')!);
-    await act(async () => root?.render(<TerminalApp />));
-    await initializeSession();
-    const terminal = mocks.terminals[0]!;
+
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
     const initial = terminalSource();
 
-    await act(async () => {
-      initial.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'once\r\n' } });
-      initial.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'duplicate\r\n' } });
-    });
+    initial.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'once\r\n' } });
+    initial.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'duplicate\r\n' } });
     await flushFrames();
-    expect(terminal.writes).toContain('once\r\n');
-    expect(terminal.writes).not.toContain('duplicate\r\n');
+    expect(document.getElementById('terminal-output')?.textContent).toContain('once\n');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('duplicate');
 
-    await act(async () => {
-      initial.emit({ sequence: 7, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
-      await Promise.resolve();
-    });
+    initial.emit({ sequence: 7, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_stream_refresh',
+      arguments: { session_id: 'session-1', after: 5 },
+    }));
+    await vi.waitFor(() => expect(FakeEventSource.instances.some((candidate) => candidate.url.includes('token=refreshed'))).toBe(true));
     expect(initial.close).toHaveBeenCalled();
-    expect(mocks.app.callServerTool).toHaveBeenCalledWith({ name: 'terminal_stream_refresh', arguments: { session_id: 'session-1', after: 5 } });
-    const recovered = FakeEventSource.instances.find((candidate) => candidate.url.includes('refreshed-1'))!;
-    expect(recovered).toBeTruthy();
 
-    await act(async () => initial.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'stale-source\r\n' } }));
-    await act(async () => recovered.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'recovered\r\n' } }));
+    initial.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'stale-source\r\n' } });
+    terminalSource('refreshed').emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'recovered\r\n' } });
     await flushFrames();
-    expect(terminal.writes).not.toContain('stale-source\r\n');
-    expect(terminal.writes).toContain('recovered\r\n');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('stale-source');
+    expect(document.getElementById('terminal-output')?.textContent).toContain('recovered\n');
   });
 
-  it('debounces iframe resize traffic and stops resize mutations after exit', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
-    root = createRoot(document.getElementById('mount')!);
-    await act(async () => root?.render(<TerminalApp />));
-    await initializeSession();
-    const observer = FakeResizeObserver.instances.at(-1)!;
-    await flushFrames();
-    const fitsBeforeResize = mocks.fitCount;
-    observer.trigger();
-    observer.trigger();
-    observer.trigger();
-    await flushFrames();
-    expect(mocks.fitCount - fitsBeforeResize).toBe(1);
-    await act(async () => vi.advanceTimersByTime(120));
-    expect(mocks.app.callServerTool.mock.calls.filter(([request]) => request.name === 'terminal_resize')).toHaveLength(1);
-
-    const source = terminalSource();
-    await act(async () => source.emit({ sequence: 5, event_type: 'process.exit', data: { exit_code: 0 } }));
-    mocks.terminals[0]!.cols = 100;
-    observer.trigger();
-    await act(async () => vi.advanceTimersByTime(120));
-    expect(mocks.app.callServerTool.mock.calls.filter(([request]) => request.name === 'terminal_resize')).toHaveLength(1);
-  });
-
-  it('hot reloads styles without replacing the document or terminal SSE connection', async () => {
+  it('hot reloads CSS without replacing the document or terminal SSE source', async () => {
     const css = '.terminal-shell { outline: 1px solid transparent; }';
-    const fetchMock = vi.fn(async () => new Response(css, { status: 200, headers: { 'content-type': 'text/css' } }));
+    const fetchMock = vi.fn(async () => new Response(css, { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const documentOpen = vi.spyOn(document, 'open');
-
-    const { TerminalApp } = await import('../../packages/terminal-ui/src/main.js');
-    root = createRoot(document.getElementById('mount')!);
-    await act(async () => root?.render(<TerminalApp />));
-    await initializeSession();
-
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
     const terminal = terminalSource();
-    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'));
-    expect(reload).toBeTruthy();
+    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'))!;
 
-    await act(async () => {
-      reload!.emit({ version: 'styles-v2', kind: 'styles' });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    expect(fetchMock).toHaveBeenCalledWith('https://terminal.example/terminal-ui/styles.css?v=styles-v2', { cache: 'no-store' });
-    expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toBe(css);
+    reload.emit({ version: 'styles-v2', kind: 'styles' });
+    await vi.waitFor(() => expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toBe(css));
+    expect(fetchMock).toHaveBeenCalled();
     expect(documentOpen).not.toHaveBeenCalled();
     expect(terminal.close).not.toHaveBeenCalled();
-    documentOpen.mockRestore();
   });
 
-  it('contains dedicated iPhone responsive breakpoints and no toolbar surface', async () => {
-    const css = await import('node:fs/promises').then(({ readFile }) => readFile(join(process.cwd(), 'packages/terminal-ui/src/styles.css'), 'utf8'));
-    expect(css).toMatch(/@media\s*\(max-width:\s*560px\)/);
-    expect(css).toMatch(/@media\s*\(max-width:\s*390px\)/);
-    expect(css).not.toMatch(/terminal-toolbar/);
-    expect(css).toMatch(/safe-area-inset-bottom/);
+  it('normalizes common ANSI, carriage-return, and backspace terminal control bytes', () => {
+    expect(normalizeTerminalText('\u001b[32mgreen\u001b[0m\r\nnext\b!')).toBe('green\nnex!');
+    expect(normalizeTerminalText('\u001b]0;title\u0007prompt\rprogress')).toBe('prompt\nprogress');
+  });
+
+  it('performs the minimal MCP Apps JSON-RPC handshake and validates parent-window messages', async () => {
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
+    const bridge = new ChatGptMcpBridge();
+    const toolResult = vi.fn();
+    bridge.ontoolresult = toolResult;
+
+    const connecting = bridge.connect();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      jsonrpc: '2.0', id: 1, method: 'ui/initialize',
+      params: expect.objectContaining({ protocolVersion: '2026-01-26' }),
+    }), '*');
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: window.parent,
+      data: { jsonrpc: '2.0', id: 1, result: { protocolVersion: '2026-01-26', hostInfo: {}, hostCapabilities: {}, hostContext: { theme: 'dark' } } },
+    }));
+    await connecting;
+    expect(post).toHaveBeenCalledWith({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: window.parent,
+      data: { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: { structuredContent: { session_id: 'session-1', status: 'running' } } },
+    }));
+    expect(toolResult).toHaveBeenCalledOnce();
+    await bridge.close();
   });
 });

@@ -36,7 +36,7 @@ The model-visible and UI-visible output paths are deliberately separate:
 - `packages/protocol` — shared Zod schemas, events, errors, cursors, gateway messages.
 - `packages/local-agent` — device identity, outbound gateway connection, PTY lifecycle, workspace enforcement.
 - `packages/mcp-server` — OAuth/JWT verification, MCP tools, device registry, gateway, SSE, audit and transcript handling.
-- `packages/terminal-ui` — React/xterm.js MCP App, responsive theme-aware terminal UI.
+- `packages/terminal-ui` — static-first vanilla MCP App, lightweight responsive watch-only terminal UI.
 - `tests/unit` — PTY, device security, authorization, lifecycle, redaction and UI tests.
 - `tests/e2e` — actual MCP v2 client → server → signed agent → real PTY acceptance test.
 

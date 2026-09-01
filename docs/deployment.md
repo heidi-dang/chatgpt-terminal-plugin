@@ -33,11 +33,11 @@ pnpm build
 pnpm test:e2e
 ```
 
-The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v3.html` MCP App resource.
+The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v6.html` MCP App resource. The terminal UI build also enforces a 30,000-byte single-file mobile bundle budget; override `TERMINAL_UI_MAX_BUNDLE_BYTES` only for an intentional, reviewed budget change.
 
 ### Live UI hot reload
 
-The v3 terminal widget is watch-only and keeps its real PTY output on the terminal SSE stream. It also opens a separate `/terminal-ui/reload` SSE channel for UI-only updates. The MCP server watches the deployed `packages/terminal-ui/dist/index.html`; replacing that built file causes the mounted widget to fetch `/terminal-ui/runtime.html` with `no-store` and reload its own document while preserving the active terminal session, stream capability and last accepted terminal cursor. No ChatGPT connector refresh is required for HTML/CSS/JS-only v3 UI tweaks. Tool schemas, MCP resources, authentication metadata or a future resource-URI version change still require the normal connector rescan/refresh process.
+The v6 terminal widget is static-first and watch-only. Real PTY output stays on the terminal SSE stream, while a separate `/terminal-ui/reload` SSE channel is used only for stylesheet updates. The mounted document is never replaced and there is no `/terminal-ui/runtime.html` route. CSS-only changes can refresh without disturbing the active session, stream capability, or last accepted terminal cursor. HTML/JavaScript changes require a new MCP App resource version and the normal connector rescan/refresh process.
 
 ## Server environment
 
