@@ -97,6 +97,7 @@ The local agent creates a persistent Ed25519 identity on first run. Its private 
 | `terminal_lsp_request` | Send one bounded, ownership-checked JSON-RPC request to an owned LSP process. |
 | `terminal_lsp_stop` | Stop an owned LSP process. |
 | `terminal_stream_refresh` | Issue a new short-lived UI stream capability. |
+| `terminal_reload_agent` | Optional owner-full reload of an administrator-installed trusted server extension by strict ID; omitted unless `MCP_EXTENSION_ROOT` is configured. |
 | `terminal_close` | Terminate and dispose the PTY. |
 
 ## Execution profiles
@@ -133,6 +134,7 @@ Reverse-proxy and systemd examples are under `deploy/`.
 - `docs/architecture.md`
 - `docs/protocol.md`
 - `docs/security.md`
+- `docs/trusted-extensions.md`
 - `docs/deployment.md`
 - `docs/chatgpt-integration.md`
 

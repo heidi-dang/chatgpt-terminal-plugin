@@ -236,7 +236,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
           return;
         }
 
-        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry });
+        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry, audit });
         const transport = new NodeStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {

@@ -106,6 +106,13 @@ LSP callers cannot supply executable paths or arbitrary command arguments. They 
 
 Control-plane credentials are removed from both PTY and structured-process environments. These controls constrain the plugin execution surface but do not replace host OS isolation; run the local agent under a dedicated least-privilege account when stronger containment is required.
 
+
+## Trusted server extensions
+
+Trusted server extensions are disabled by default. The MCP reload tool exists only when `MCP_EXTENSION_ROOT` is configured as an absolute administrator-controlled path, and only an authenticated `owner-full` identity may invoke it. The caller supplies a strict extension ID, not a server-side filename. The loader accepts only one regular `.js`/`.mjs` file directly beneath the configured root, rejects symlinks/canonical escapes/oversized or ambiguous modules, and records allow/deny audit events.
+
+Extensions receive a narrow, time-bounded registrar for tools, prompts, and resources rather than the live `McpServer`. Registration handles are tracked for cleanup and the registrar is sealed after the initial callback so it cannot be retained as ongoing registration authority. This controls MCP-surface mutation but is not a JavaScript sandbox: installed extensions execute as trusted server code with the server process's OS privileges. Protect the root with filesystem ownership/permissions and never make it writable from terminal workspaces, uploads, CI jobs, or other untrusted code. See `docs/trusted-extensions.md`.
+
 ## Rate, size and lifecycle limits
 
 Configured controls include:

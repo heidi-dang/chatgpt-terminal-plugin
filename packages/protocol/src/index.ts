@@ -200,6 +200,18 @@ export type TerminalStatusOutput = z.infer<typeof terminalStatusOutputSchema>;
 export const terminalListAgentsOutputSchema = z.object({ agents: z.array(agentSchema) });
 export type TerminalListAgentsOutput = z.infer<typeof terminalListAgentsOutputSchema>;
 
+export const terminalReloadAgentInputSchema = z.object({
+  extension_id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+});
+export type TerminalReloadAgentInput = z.infer<typeof terminalReloadAgentInputSchema>;
+
+export const terminalReloadAgentOutputSchema = z.object({
+  extension_id: z.string(),
+  status: z.literal('loaded'),
+  registration_count: z.number().int().nonnegative(),
+});
+export type TerminalReloadAgentOutput = z.infer<typeof terminalReloadAgentOutputSchema>;
+
 export const agentSessionSnapshotSchema = z.object({
   session: terminalSessionSchema,
   cursor: z.number().int().nonnegative(),

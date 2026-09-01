@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 
 const positiveInt = (fallback: number, max = Number.MAX_SAFE_INTEGER) =>
@@ -79,6 +80,8 @@ const configSchema = z.object({
   TERMINAL_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
   AGENT_REQUEST_TIMEOUT_MS: positiveInt(15_000, 120_000),
   REQUESTS_PER_MINUTE: positiveInt(120, 10_000),
+  MCP_EXTENSION_ROOT: optionalString,
+  MCP_EXTENSION_MAX_BYTES: positiveInt(262_144, 4 * 1024 * 1024),
   AUDIT_LOG_PATH: optionalString,
   TRANSCRIPT_LOG_PATH: optionalString,
   TRANSCRIPT_RETENTION_DAYS: positiveInt(7, 3650),
@@ -136,6 +139,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     }
   }
 
+  if (parsed.MCP_EXTENSION_ROOT && !isAbsolute(parsed.MCP_EXTENSION_ROOT)) {
+    throw new Error('MCP_EXTENSION_ROOT must be an absolute administrator-controlled path.');
+  }
+
   if (parsed.MCP_AUTH_MODE === 'development' && !parsed.MCP_DEVELOPMENT_TOKEN) {
     throw new Error('Development auth requires MCP_DEVELOPMENT_TOKEN.');
   }
@@ -188,6 +195,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     terminalSweepIntervalMs: parsed.TERMINAL_SWEEP_INTERVAL_MS,
     agentRequestTimeoutMs: parsed.AGENT_REQUEST_TIMEOUT_MS,
     requestsPerMinute: parsed.REQUESTS_PER_MINUTE,
+    extensionRoot: parsed.MCP_EXTENSION_ROOT,
+    extensionMaxBytes: parsed.MCP_EXTENSION_MAX_BYTES,
     auditLogPath: parsed.AUDIT_LOG_PATH,
     transcriptLogPath: parsed.TRANSCRIPT_LOG_PATH,
     transcriptRetentionDays: parsed.TRANSCRIPT_RETENTION_DAYS,

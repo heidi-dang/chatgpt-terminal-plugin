@@ -66,6 +66,15 @@ describe('server configuration invariants', () => {
     expect(config.oauthTokenEndpoint).toBeUndefined();
   });
 
+  it('keeps trusted extensions disabled by default and requires an absolute admin root', () => {
+    const disabled = loadConfig(productionEnv());
+    expect(disabled.extensionRoot).toBeUndefined();
+    expect(() => loadConfig(productionEnv({ MCP_EXTENSION_ROOT: 'relative/extensions' })))
+      .toThrow(/MCP_EXTENSION_ROOT.*absolute/i);
+    const enabled = loadConfig(productionEnv({ MCP_EXTENSION_ROOT: '/opt/chatgpt-terminal/extensions' }));
+    expect(enabled.extensionRoot).toBe('/opt/chatgpt-terminal/extensions');
+  });
+
   it('rejects route collisions', () => {
     expect(() => loadConfig(productionEnv({ AGENT_GATEWAY_PATH: '/mcp' })))
       .toThrow(/must not collide/i);

@@ -52,6 +52,11 @@ TERMINAL_SWEEP_INTERVAL_MS=30000
 AGENT_REQUEST_TIMEOUT_MS=15000
 REQUESTS_PER_MINUTE=120
 
+# Optional trusted server extensions. Leave MCP_EXTENSION_ROOT empty to omit terminal_reload_agent entirely.
+# When enabled, use an absolute administrator-controlled directory outside every terminal/CI/user-writable workspace.
+MCP_EXTENSION_ROOT=
+MCP_EXTENSION_MAX_BYTES=262144
+
 AUDIT_LOG_PATH=/var/log/chatgpt-terminal/audit.jsonl
 TRANSCRIPT_LOG_PATH=/var/log/chatgpt-terminal/transcript.jsonl
 TRANSCRIPT_RETENTION_DAYS=7

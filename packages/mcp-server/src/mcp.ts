@@ -36,12 +36,16 @@ import {
   terminalSearchFilesOutputSchema,
   terminalTranscriptInputSchema,
   terminalTranscriptOutputSchema,
+  terminalReloadAgentInputSchema,
+  terminalReloadAgentOutputSchema,
 } from '@terminal/protocol';
+import type { AuditLogger } from './audit.js';
 import type { ServerConfig } from './config.js';
 import type { AgentGateway } from './gateway.js';
 import type { TerminalService, RequestIdentity } from './service.js';
 import type { StreamTokenService } from './stream-token.js';
 import type { TerminalTurnRegistry, TerminalTurnState } from './turn-registry.js';
+import { TrustedExtensionLoader, createTrustedExtensionRegistrar } from './trusted-extension-loader.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
 
 export const TERMINAL_UI_URI = 'ui://terminal/v11.html';
@@ -79,6 +83,7 @@ export interface McpServerDependencies {
   service: TerminalService;
   streamTokens: StreamTokenService;
   turnRegistry: TerminalTurnRegistry;
+  audit: AuditLogger;
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
@@ -472,6 +477,26 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     },
     async (input, ctx) => resultFrom(() => deps.service.stopLsp(identityFromContext(ctx), input)),
   );
+
+  if (deps.config.extensionRoot) {
+    const extensionLoader = new TrustedExtensionLoader(
+      deps.config.extensionRoot,
+      deps.config.extensionMaxBytes,
+      createTrustedExtensionRegistrar(server),
+      deps.audit,
+    );
+    server.registerTool(
+      'terminal_reload_agent',
+      {
+        title: 'Reload trusted server extension',
+        description: 'Reload an administrator-installed trusted MCP extension by strict extension id. Arbitrary paths are not accepted.',
+        inputSchema: terminalReloadAgentInputSchema,
+        outputSchema: terminalReloadAgentOutputSchema,
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      },
+      async (input, ctx) => resultFrom(() => extensionLoader.reload(identityFromContext(ctx), input.extension_id)),
+    );
+  }
 
   return server;
 }
