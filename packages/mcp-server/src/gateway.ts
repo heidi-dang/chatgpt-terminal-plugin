@@ -370,15 +370,32 @@ export class AgentGateway {
         connection.lastSeenMs = Date.now();
         connection.agent.last_seen = new Date(connection.lastSeenMs).toISOString();
 
-        if (message.type === 'heartbeat' || message.type === 'ack') return;
+        if (message.type === 'ack') return;
+        if (message.type === 'heartbeat') {
+          // Refresh shared presence TTL so multi-instance listAgents stays accurate.
+          void this.liveStore.setAgentPresence(registeredAgentId, {
+            agent: { ...connection.agent, online: true, last_seen: connection.agent.last_seen },
+            deviceId: connection.deviceId,
+            ownerId: connection.ownerId,
+            online: true,
+            lastSeenMs: connection.lastSeenMs,
+            instanceId: this.liveStore.instanceId,
+          });
+          return;
+        }
         if (message.type === 'event') {
-          const existing = this.sessions.get(message.event.session_id);
-          if (existing?.ownerId && existing.ownerId !== ownerId) {
-            throw new TerminalProtocolError('PERMISSION_DENIED', 'Terminal event owner mismatch.');
-          }
-          this.storeEvent(message.event, registeredAgentId, ownerId);
-          void this.options.onTerminalEvent?.(ownerId, registeredAgentId, message.event);
-          socket.send(JSON.stringify({ type: 'ack', session_id: message.event.session_id, sequence: message.event.sequence }));
+          void (async () => {
+            try {
+              await this.storeEvent(message.event, registeredAgentId, ownerId);
+              void this.options.onTerminalEvent?.(ownerId, registeredAgentId, message.event);
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'ack', session_id: message.event.session_id, sequence: message.event.sequence }));
+              }
+            } catch (error) {
+              console.error(JSON.stringify({ level: 'error', event: 'gateway.store_event_failed', error: errorMessage(error) }));
+              if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'invalid terminal event');
+            }
+          })();
           return;
         }
         if (message.type === 'agent.resume') {
@@ -637,8 +654,10 @@ export class AgentGateway {
     };
   }
 
-  private storeEvent(event: TerminalEvent, agentId: string, ownerId: string): void {
-    const record = this.sessions.get(event.session_id) ?? {
+  private async storeEvent(event: TerminalEvent, agentId: string, ownerId: string): Promise<void> {
+    // Seed from shared store so multi-instance sequence checks stay coherent.
+    const loaded = await this.loadSession(event.session_id);
+    const record = loaded ?? {
       agentId,
       ownerId,
       events: [],
@@ -694,9 +713,9 @@ export class AgentGateway {
     }
 
     this.sessions.set(event.session_id, record);
-    void this.persistSession(event.session_id, record);
+    await this.persistSession(event.session_id, record);
     this.eventEmitter.emit(`session:${event.session_id}`, event);
-    void this.liveStore.publishSessionEvent(event.session_id, event);
+    await this.liveStore.publishSessionEvent(event.session_id, event);
   }
 
   private assertSnapshotIdentity(connection: AgentConnection, snapshot: AgentSessionSnapshot, userId: string, expectedSessionId?: string): void {

@@ -566,10 +566,31 @@ export async function createLiveStore(options: {
   instanceId?: string;
 }): Promise<LiveStore> {
   if (options.redisUrl) {
-    return RedisLiveStore.connect({
-      url: options.redisUrl,
-      instanceId: options.instanceId,
-    });
+    try {
+      const store = await RedisLiveStore.connect({
+        url: options.redisUrl,
+        instanceId: options.instanceId,
+      });
+      console.info(JSON.stringify({
+        level: 'info',
+        event: 'live_store.ready',
+        backend: 'redis',
+        instance_id: store.instanceId,
+      }));
+      return store;
+    } catch (error) {
+      // Fail closed when REDIS_URL is configured: silent memory fallback would split-brain agents.
+      throw new Error(
+        `Failed to connect Redis live store at ${options.redisUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
-  return new MemoryLiveStore(options.instanceId);
+  const memory = new MemoryLiveStore(options.instanceId);
+  console.info(JSON.stringify({
+    level: 'info',
+    event: 'live_store.ready',
+    backend: 'memory',
+    instance_id: memory.instanceId,
+  }));
+  return memory;
 }

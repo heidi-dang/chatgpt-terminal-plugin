@@ -114,30 +114,50 @@ export class DeviceRegistry {
   private async upsertValidated(raw: DeviceEnrollmentRequest): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
     const input = deviceEnrollmentRequestSchema.parse(raw);
     createPublicKey(input.public_key);
-    const existing = this.readDevice(input.device_id);
-    if (existing && existing.owner_id !== input.owner_id) {
-      throw new TerminalProtocolError('PERMISSION_DENIED', 'Device ownership cannot be changed by enrollment.');
-    }
-    if (existing && existing.agent_id !== input.agent_id) {
-      throw new TerminalProtocolError('PERMISSION_DENIED', 'Device agent identity cannot be changed by enrollment.');
-    }
 
-    const now = new Date().toISOString();
-    const status = existing ? 'rotated' : 'enrolled';
-    const record: DeviceRecord = {
-      device_id: input.device_id,
-      agent_id: input.agent_id,
-      owner_id: input.owner_id,
-      public_key: input.public_key,
-      ...(input.display_name ? { display_name: input.display_name } : existing?.display_name ? { display_name: existing.display_name } : {}),
-      status: 'active',
-      key_version: (existing?.key_version ?? 0) + 1,
-      enrolled_at: existing?.enrolled_at ?? now,
-      updated_at: now,
-      ...(existing?.last_seen_at ? { last_seen_at: existing.last_seen_at } : {}),
+    const apply = (): { record: DeviceRecord; status: 'enrolled' | 'rotated' } => {
+      const existing = this.readDevice(input.device_id);
+      if (existing && existing.owner_id !== input.owner_id) {
+        throw new TerminalProtocolError('PERMISSION_DENIED', 'Device ownership cannot be changed by enrollment.');
+      }
+      if (existing && existing.agent_id !== input.agent_id) {
+        throw new TerminalProtocolError('PERMISSION_DENIED', 'Device agent identity cannot be changed by enrollment.');
+      }
+
+      const now = new Date().toISOString();
+      const status = existing ? 'rotated' as const : 'enrolled' as const;
+      const record: DeviceRecord = {
+        device_id: input.device_id,
+        agent_id: input.agent_id,
+        owner_id: input.owner_id,
+        public_key: input.public_key,
+        ...(input.display_name ? { display_name: input.display_name } : existing?.display_name ? { display_name: existing.display_name } : {}),
+        status: 'active',
+        key_version: (existing?.key_version ?? 0) + 1,
+        enrolled_at: existing?.enrolled_at ?? now,
+        updated_at: now,
+        ...(existing?.last_seen_at ? { last_seen_at: existing.last_seen_at } : {}),
+      };
+      this.writeDevice(record);
+      return { record: { ...record }, status };
     };
-    this.writeDevice(record);
-    return { record: { ...record }, status };
+
+    if (!this.db) return apply();
+
+    // Serialize concurrent enroll/rotate of the same device against SQLite.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = apply();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore
+      }
+      throw error;
+    }
   }
 
   async revoke(deviceId: string, presentedToken: string | undefined): Promise<void> {
