@@ -379,10 +379,14 @@ export function TerminalApp(): React.JSX.Element {
     };
     source.onerror = () => {
       if (eventSourceRef.current !== source) return;
-      source.close();
-      eventSourceRef.current = undefined;
-      setStreamState('reconnecting');
-      refreshStream(true);
+      if (source.readyState === EventSource.CLOSED) {
+        source.close();
+        eventSourceRef.current = undefined;
+        setStreamState('reconnecting');
+        refreshStream(true);
+      } else {
+        setStreamState('reconnecting');
+      }
     };
     source.onmessage = (message) => {
       if (eventSourceRef.current !== source) return;
