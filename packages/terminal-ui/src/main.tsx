@@ -135,7 +135,7 @@ export function TerminalApp(): React.JSX.Element {
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
   const viewStateRef = useRef<TerminalViewState | null>(viewState);
   const streamMetaRef = useRef<TerminalStreamMeta | null>(streamOverride);
-  const outputQueueRef = useRef<string[]>([]);
+  const outputQueueRef = useRef('');
   const outputFrameRef = useRef<number | undefined>(undefined);
   const hotReloadingRef = useRef(false);
   const initialStreamMeta = useMemo(() => parseStreamMeta(toolResult), [toolResult]);
@@ -182,20 +182,21 @@ export function TerminalApp(): React.JSX.Element {
       window.cancelAnimationFrame(outputFrameRef.current);
       outputFrameRef.current = undefined;
     }
-    if (outputQueueRef.current.length === 0) return;
-    const output = outputQueueRef.current.join('');
-    outputQueueRef.current = [];
+    if (!outputQueueRef.current) return;
+    const output = outputQueueRef.current;
+    outputQueueRef.current = '';
     terminalRef.current?.write(output);
   }
 
   function queueTerminalOutput(text: string): void {
-    outputQueueRef.current.push(text);
+    // Use a single string accumulator instead of array + join to reduce allocations
+    outputQueueRef.current += text;
     if (outputFrameRef.current !== undefined) return;
     outputFrameRef.current = window.requestAnimationFrame(() => {
       outputFrameRef.current = undefined;
-      if (outputQueueRef.current.length === 0) return;
-      const output = outputQueueRef.current.join('');
-      outputQueueRef.current = [];
+      if (!outputQueueRef.current) return;
+      const output = outputQueueRef.current;
+      outputQueueRef.current = '';
       terminalRef.current?.write(output);
     });
   }
