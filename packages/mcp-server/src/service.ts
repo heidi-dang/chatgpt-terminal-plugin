@@ -149,7 +149,17 @@ export class TerminalService {
     const input = terminalSessionIdInputSchema.parse({ session_id: sessionId });
     const snapshot = await this.gateway.status(identity.userId, input.session_id);
     const agentOnline = this.gateway.listAgents(identity.userId).some((agent) => agent.agent_id === snapshot.session.agent_id && agent.online);
-    const output = terminalStatusOutputSchema.parse({ ...snapshot.session, agent_online: agentOnline, cursor: snapshot.cursor });
+    const metrics = this.gateway.getSessionMetrics(identity.userId, input.session_id);
+    const uptimeSeconds = (Date.now() - new Date(snapshot.session.created_at).getTime()) / 1000;
+    const output = terminalStatusOutputSchema.parse({
+      ...snapshot.session,
+      agent_online: agentOnline,
+      cursor: snapshot.cursor,
+      uptime_seconds: Math.max(0, Math.round(uptimeSeconds)),
+      total_events: metrics?.totalEvents ?? 0,
+      total_output_bytes: metrics?.totalOutputBytes ?? 0,
+      command_count: metrics?.commandCount ?? 0,
+    });
     await this.audit.record({
       action: 'terminal_status',
       ...auditIdentity(identity),

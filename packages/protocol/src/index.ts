@@ -187,6 +187,10 @@ export type TerminalMutationOutput = z.infer<typeof terminalMutationOutputSchema
 export const terminalStatusOutputSchema = terminalSessionSchema.extend({
   agent_online: z.boolean(),
   cursor: z.number().int().nonnegative(),
+  uptime_seconds: z.number().nonnegative().optional(),
+  total_events: z.number().int().nonnegative().optional(),
+  total_output_bytes: z.number().int().nonnegative().optional(),
+  command_count: z.number().int().nonnegative().optional(),
 });
 export type TerminalStatusOutput = z.infer<typeof terminalStatusOutputSchema>;
 

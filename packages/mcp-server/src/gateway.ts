@@ -48,6 +48,10 @@ export interface SessionRecord {
   latestSequence: number;
   earliestSequence: number;
   retainedBytes: number;
+  // Session metrics — monotonically increasing counters
+  totalEvents: number;
+  totalOutputBytes: number;
+  commandCount: number;
 }
 
 export interface AgentGatewayOptions {
@@ -170,6 +174,16 @@ export class AgentGateway {
       action: 'terminal.status',
       input: { session_id: sessionId },
     });
+  }
+
+  getSessionMetrics(userId: string, sessionId: string): { totalEvents: number; totalOutputBytes: number; commandCount: number } | undefined {
+    const record = this.sessions.get(sessionId);
+    if (!record || (record.ownerId && record.ownerId !== userId)) return undefined;
+    return {
+      totalEvents: record.totalEvents,
+      totalOutputBytes: record.totalOutputBytes,
+      commandCount: record.commandCount,
+    };
   }
 
   // --- File operations ---
@@ -407,6 +421,9 @@ export class AgentGateway {
               latestSequence: baseCursor,
               earliestSequence: baseCursor + 1,
               retainedBytes: 0,
+              totalEvents: 0,
+              totalOutputBytes: 0,
+              commandCount: 0,
             };
             if (record.latestSequence < snapshot.earliestCursor) {
               record.events = [];
@@ -537,6 +554,9 @@ export class AgentGateway {
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
+      totalEvents: 0,
+      totalOutputBytes: 0,
+      commandCount: 0,
     };
     if (ownerId !== undefined) record.ownerId = ownerId;
     record.agentId = snapshot.session.agent_id;
@@ -563,6 +583,9 @@ export class AgentGateway {
       latestSequence: 0,
       earliestSequence: 1,
       retainedBytes: 0,
+      totalEvents: 0,
+      totalOutputBytes: 0,
+      commandCount: 0,
     };
 
     if (record.ownerId && record.ownerId !== ownerId) {
@@ -597,6 +620,15 @@ export class AgentGateway {
     record.eventSizes.push(eventBytes);
     record.latestSequence = event.sequence;
     record.retainedBytes += eventBytes;
+
+    // Update session metrics
+    record.totalEvents += 1;
+    if (typeof textPayload === 'string') {
+      record.totalOutputBytes += Buffer.byteLength(textPayload);
+    }
+    if (event.event_type === 'command.input') {
+      record.commandCount += 1;
+    }
 
     if (record.session) {
       record.session.last_activity_at = event.timestamp;
