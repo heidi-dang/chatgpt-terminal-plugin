@@ -12,6 +12,7 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run tests/unit",
+    "pretest:e2e": "pnpm --filter @terminal/terminal-ui build",
     "test:e2e": "vitest run tests/e2e",
     "start:server": "pnpm --filter @terminal/mcp-server start",
     "start:agent": "pnpm --filter @terminal/local-agent start",
