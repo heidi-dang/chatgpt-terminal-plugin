@@ -46,6 +46,7 @@ export interface LocalTerminalAgentOptions {
   /** Maximum number of concurrent terminal sessions. Unlimited when not set. */
   maxSessions?: number;
   auditLogPath?: string;
+  stateDir?: string;
 }
 
 export interface AgentSessionSnapshot {
@@ -315,6 +316,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly codeExecutor: CodeBlockExecutor;
   private readonly lspManager: LspManager;
   private readonly auditLogger: AuditLogger;
+  private readonly stateDir: string | undefined;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -354,6 +356,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
     this.auditLogger = new AuditLogger(options.auditLogPath);
+    this.stateDir = options.stateDir;
   }
 
   getTelemetry(): AgentHealthTelemetry {
