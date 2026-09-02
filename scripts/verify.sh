@@ -1,17 +1,19 @@
-#!/bin/bash
-# Exit immediately if any command fails
-set -e 
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "1. Running Linters..."
+echo "1/5 lint"
 pnpm run lint
 
-echo "2. Running Type Checks..."
+echo "2/5 typecheck"
 pnpm run typecheck
 
-echo "3. Running Test Suite..."
+echo "3/5 unit tests"
 pnpm run test
 
-echo "4. Verifying Build..."
+echo "4/5 real PTY E2E"
+pnpm run test:e2e
+
+echo "5/5 build"
 pnpm run build
 
-echo "✅ All checks passed. Ready for commit."
+echo "Full quality gate passed."
