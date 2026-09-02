@@ -27,7 +27,7 @@ mkdir -p "$output_dir"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/release/packages"
-pnpm --filter @terminal/mcp-server deploy --prod --legacy --reporter=append-only "$stage/release/packages/mcp-server"
+pnpm --config.ignore-scripts=true --filter @terminal/mcp-server deploy --prod --legacy --reporter=append-only "$stage/release/packages/mcp-server"
 mkdir -p "$stage/release/packages/terminal-ui/dist" "$stage/release/packages/terminal-ui/src"
 cp -p packages/terminal-ui/dist/index.html "$stage/release/packages/terminal-ui/dist/index.html"
 cp -p packages/terminal-ui/src/main.ts "$stage/release/packages/terminal-ui/src/main.ts"

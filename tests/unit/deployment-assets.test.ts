@@ -47,6 +47,12 @@ describe('deployment assets', () => {
     expect(source).toContain('TERMINAL_BUFFER_HIGH_WATER_BYTES=');
   });
 
+  it('packages production dependencies without running development-only lifecycle hooks', async () => {
+    const source = await readFile(new URL('scripts/package-mcp-release.sh', root), 'utf8');
+
+    expect(source).toContain('pnpm --config.ignore-scripts=true --filter @terminal/mcp-server deploy --prod --legacy');
+  });
+
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
     const cases = [
       ['deploy/systemd/chatgpt-terminal-mcp.service.example', 'packages/mcp-server/dist/cli.js'],
