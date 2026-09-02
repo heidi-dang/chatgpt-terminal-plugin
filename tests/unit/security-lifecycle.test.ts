@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -117,6 +117,7 @@ describe('security and lifecycle hardening', () => {
 
     await rename(auditPath, rotatedPath);
     await writeFile(auditPath, '', { mode: 0o644 });
+    await chmod(auditPath, 0o644);
     expect((await stat(auditPath)).mode & 0o777).toBe(0o644);
 
     await logger.record({ action: 'terminal_read', user_id: 'user-a', authorization: 'allow' });
