@@ -27,6 +27,7 @@ const registrySchema = z.union([
 
 export class DeviceRegistry {
   private readonly devices = new Map<string, DeviceRecord>();
+  private mutationTail: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly path: string | undefined,
@@ -70,16 +71,20 @@ export class DeviceRegistry {
 
   async enroll(raw: DeviceEnrollmentRequest, presentedToken: string | undefined): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
     this.assertEnrollmentToken(presentedToken);
-    return this.upsertValidated(raw);
+    return this.enqueueMutation(() => this.upsertValidated(raw));
   }
 
   async enrollLocalAdmin(raw: DeviceEnrollmentRequest): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
-    return this.upsertValidated(raw);
+    return this.enqueueMutation(() => this.upsertValidated(raw));
   }
 
   private async upsertValidated(raw: DeviceEnrollmentRequest): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
     const input = deviceEnrollmentRequestSchema.parse(raw);
-    createPublicKey(input.public_key);
+    try {
+      createPublicKey(input.public_key);
+    } catch {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', 'Device public key is invalid.');
+    }
     const existing = this.devices.get(input.device_id);
     if (existing && existing.owner_id !== input.owner_id) {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Device ownership cannot be changed by enrollment.');
@@ -102,26 +107,33 @@ export class DeviceRegistry {
       updated_at: now,
       ...(existing?.last_seen_at ? { last_seen_at: existing.last_seen_at } : {}),
     };
-    this.devices.set(record.device_id, record);
-    await this.persist();
+    const next = new Map(this.devices);
+    next.set(record.device_id, record);
+    await this.commit(next);
     return { record: { ...record }, status };
   }
 
   async revoke(deviceId: string, presentedToken: string | undefined): Promise<void> {
     this.assertEnrollmentToken(presentedToken);
-    const current = this.devices.get(deviceId);
-    if (!current) return;
-    const now = new Date().toISOString();
-    this.devices.set(deviceId, { ...current, status: 'revoked', revoked_at: now, updated_at: now });
-    await this.persist();
+    await this.enqueueMutation(async () => {
+      const current = this.devices.get(deviceId);
+      if (!current) return;
+      const now = new Date().toISOString();
+      const next = new Map(this.devices);
+      next.set(deviceId, { ...current, status: 'revoked', revoked_at: now, updated_at: now });
+      await this.commit(next);
+    });
   }
 
   async markSeen(deviceId: string): Promise<void> {
-    const current = this.devices.get(deviceId);
-    if (!current || current.status !== 'active') return;
-    const now = new Date().toISOString();
-    this.devices.set(deviceId, { ...current, last_seen_at: now, updated_at: now });
-    await this.persist();
+    await this.enqueueMutation(async () => {
+      const current = this.devices.get(deviceId);
+      if (!current || current.status !== 'active') return;
+      const now = new Date().toISOString();
+      const next = new Map(this.devices);
+      next.set(deviceId, { ...current, last_seen_at: now, updated_at: now });
+      await this.commit(next);
+    });
   }
 
   verifyProof(deviceId: string, payload: string, signatureBase64Url: string): DeviceRecord {
@@ -137,6 +149,18 @@ export class DeviceRegistry {
     return record;
   }
 
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const current = this.mutationTail.then(operation, operation);
+    this.mutationTail = current.then(() => undefined, () => undefined);
+    return current;
+  }
+
+  private async commit(next: Map<string, DeviceRecord>): Promise<void> {
+    await this.persist(next.values());
+    this.devices.clear();
+    for (const [deviceId, record] of next) this.devices.set(deviceId, record);
+  }
+
   private assertEnrollmentToken(presented: string | undefined): void {
     if (!this.enrollmentToken) throw new TerminalProtocolError('PERMISSION_DENIED', 'Device enrollment is disabled.');
     if (!presented) throw new TerminalProtocolError('PERMISSION_DENIED', 'Device enrollment token is required.');
@@ -147,10 +171,10 @@ export class DeviceRegistry {
     }
   }
 
-  private async persist(): Promise<void> {
+  private async persist(records: Iterable<DeviceRecord> = this.devices.values()): Promise<void> {
     if (!this.path) return;
     const temporary = `${this.path}.tmp`;
-    const payload = registrySchema.parse({ version: 2, devices: [...this.devices.values()] });
+    const payload = registrySchema.parse({ version: 2, devices: [...records] });
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await chmod(temporary, 0o600);
     await rename(temporary, this.path);

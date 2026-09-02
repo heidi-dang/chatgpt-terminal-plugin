@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { codeCancelInputSchema, codeExecuteInputSchema, codeExecutionChunkSchema } from './code-block.js';
 import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
 
+export const GATEWAY_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+
 export const terminalSessionStatusSchema = z.enum([
   'creating',
   'running',

@@ -185,6 +185,50 @@ describe('terminal MCP App UI', () => {
     expect(source.close).toHaveBeenCalled();
   });
 
+  it('refreshes an expired stream capability before opening EventSource', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const expired = initialResult();
+    expired._meta.terminal_stream.expires_at = new Date(Date.now() - 1_000).toISOString();
+
+    app.ontoolresult?.(expired);
+
+    expect(FakeEventSource.instances.some((source) => source.url.includes('token=initial'))).toBe(false);
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_stream_refresh',
+      arguments: { session_id: 'session-1', after: 4 },
+    });
+    await vi.waitFor(() => expect(FakeEventSource.instances.some((source) => source.url.includes('token=refreshed'))).toBe(true));
+    viewer.destroy();
+  });
+
+  it('does not yank a user-scrolled transcript back to the live tail', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    const output = document.getElementById('terminal-output') as HTMLElement;
+    Object.defineProperties(output, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    output.scrollTop = 100;
+
+    const source = terminalSource();
+    source.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'while-reading\r\n' } });
+    await flushFrames();
+    expect(output.scrollTop).toBe(100);
+
+    output.scrollTop = 800;
+    source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'while-following\r\n' } });
+    await flushFrames();
+    expect(output.scrollTop).toBe(1000);
+    viewer.destroy();
+  });
+
   it('tracks cwd, drains queued output, and closes only on the final lifecycle event', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
@@ -239,6 +283,192 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-output')?.textContent).toContain('recovered\n');
   });
 
+  it('ignores a stale stream refresh after a same-surface PTY replacement', async () => {
+    const app = createFakeApp();
+    const surfaceId = '44444444-4444-4444-8444-444444444444';
+    let resolveOldRefresh: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh' && args.session_id === 'session-1') {
+        return new Promise<CallToolResult>((resolve) => { resolveOldRefresh = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const initial = initialResult();
+    app.ontoolresult?.({
+      ...initial,
+      structuredContent: {
+        ...initial.structuredContent,
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+      },
+    });
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveOldRefresh).toBeTypeOf('function'));
+
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-2',
+        status: 'running',
+        cursor: 2,
+        initial_output: 'replacement\r\n',
+        cwd: '/replacement',
+        shell: 'bash',
+      },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=replacement-race',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    const replacement = terminalSource('replacement-race');
+
+    resolveOldRefresh?.({
+      structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=stale-refresh',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(replacement.close).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances.some((candidate) => candidate.url.includes('token=stale-refresh'))).toBe(false);
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+    viewer.destroy();
+  });
+
+  it('does not let stale cursor resynchronization restore a replaced PTY', async () => {
+    const app = createFakeApp();
+    const surfaceId = '55555555-5555-4555-8555-555555555555';
+    let resolveOldStatus: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh' && args.session_id === 'session-1') {
+        return Promise.resolve({ isError: true, _meta: { terminal_error: { code: 'INVALID_CURSOR' } } });
+      }
+      if (name === 'terminal_status' && args.session_id === 'session-1') {
+        return new Promise<CallToolResult>((resolve) => { resolveOldStatus = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const initial = initialResult();
+    app.ontoolresult?.({
+      ...initial,
+      structuredContent: {
+        ...initial.structuredContent,
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+      },
+    });
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveOldStatus).toBeTypeOf('function'));
+
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-2',
+        status: 'running',
+        cursor: 2,
+        initial_output: 'replacement\r\n',
+        cwd: '/replacement',
+        shell: 'bash',
+      },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=replacement-resync',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+
+    resolveOldStatus?.({
+      structuredContent: {
+        session_id: 'session-1',
+        status: 'running',
+        cursor: 8,
+        cwd: '/stale-session',
+        shell: 'bash',
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.getElementById('terminal-path')?.textContent).toBe('/replacement');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('Live output gap');
+    viewer.destroy();
+  });
+
+  it('does not recreate a terminal stream when refresh completes after viewer destruction', async () => {
+    const app = createFakeApp();
+    let resolveRefresh: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_stream_refresh') {
+        return new Promise<CallToolResult>((resolve) => { resolveRefresh = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    terminalSource().emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'gap\r\n' } });
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'));
+
+    const sourcesBeforeDestroy = FakeEventSource.instances.length;
+    viewer.destroy();
+    resolveRefresh?.({
+      structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+      _meta: {
+        terminal_stream: {
+          url: 'https://terminal.example/events?token=late-refresh',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(FakeEventSource.instances).toHaveLength(sourcesBeforeDestroy);
+  });
+
+  it('starts MCP fallback immediately when an SSE event is malformed', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    terminalSource().emit({ sequence: 'invalid', event_type: 'terminal.stdout', data: { text: 'bad\r\n' } });
+
+    await vi.waitFor(() => expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
+    }));
+    expect(document.getElementById('terminal-stream-state')?.textContent).toMatch(/^MCP /);
+    viewer.destroy();
+  });
+
   it('falls back to bounded MCP terminal reads when direct SSE cannot connect', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
@@ -257,6 +487,20 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-output')?.textContent).toContain('fallback\n');
     expect(document.getElementById('terminal-shell')?.dataset.state).toBe('exited');
     expect(document.getElementById('terminal-exit')?.textContent).toBe('EXIT 0');
+  });
+
+  it('clears a pending SSE connect timeout when the viewer is destroyed', async () => {
+    vi.useFakeTimers();
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    viewer.destroy();
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('falls back to MCP reads when EventSource stays stuck connecting', async () => {
@@ -530,15 +774,55 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
-  it('closes the active terminal turn when the host tears down the widget', async () => {
+  it('releases widget resources on host teardown without ending the assistant turn', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
     app.ontoolresult?.(initialResult());
+    const source = terminalSource();
 
     await app.onteardown?.();
 
-    expect(app.callServerTool).toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+    expect(source.close).toHaveBeenCalledTimes(1);
+    expect(app.callServerTool).not.toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+  });
+
+  it('ignores an in-flight surface heartbeat after viewer destruction', async () => {
+    const app = createFakeApp();
+    const surfaceId = '66666666-6666-4666-8666-666666666666';
+    let resolveSurface: ((result: CallToolResult) => void) | undefined;
+    app.callServerTool.mockImplementation(({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_surface_status') {
+        return new Promise<CallToolResult>((resolve) => { resolveSurface = resolve; });
+      }
+      return Promise.resolve({ structuredContent: {} });
+    });
+
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.({ structuredContent: { surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null } });
+    viewer.markBridgeReady();
+    await vi.waitFor(() => expect(resolveSurface).toBeTypeOf('function'));
+    viewer.destroy();
+
+    resolveSurface?.({
+      structuredContent: {
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: true,
+        session_id: 'session-late',
+        status: 'running',
+        cursor: 1,
+        initial_output: 'late-output\r\n',
+        cwd: '/late',
+        shell: 'bash',
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.getElementById('terminal-path')?.textContent).not.toBe('/late');
+    expect(document.getElementById('terminal-output')?.textContent).not.toContain('late-output');
   });
 
   it('keeps production streaming independent from the optional stylesheet reload endpoint', () => {
@@ -551,6 +835,7 @@ describe('terminal MCP App UI', () => {
     expect(terminalSource()).toBeDefined();
     viewer.destroy();
   });
+
 
   it('adds rich terminal syntax tokens without changing the transcript text', () => {
     const text = 'shacker@host:/workspace$ pnpm test --filter "ui" ./src 42\nERROR build failed\nPASS 12 tests\n';
@@ -590,20 +875,22 @@ describe('terminal MCP App UI', () => {
     expect(output.querySelector('.term-success')?.textContent).toContain('PASS');
   });
 
-  it('previews multi-line output in Overflow order then settles into the exact transcript', () => {
+  it('animates multi-line Overflow without ever reordering terminal truth', () => {
     vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0);
     const output = document.getElementById('terminal-output')!;
     output.textContent = '';
-    const text = 'first line\nsecond line\nthird line\n';
+    const text = 'PASS first line\nconst second = 2\nthird line\n';
 
     appendRichTerminalText(output, text, true);
 
     expect(output.querySelector('.term-overflow')).not.toBeNull();
-    expect(output.textContent).not.toBe(text);
+    expect(output.textContent).toBe(text);
+    expect(output.querySelector('.term-success')?.textContent).toBe('PASS');
+    expect(output.querySelector('.term-keyword')?.textContent).toBe('const');
     vi.runAllTimers();
     expect(output.textContent).toBe(text);
     expect(output.querySelector('.term-overflow')).toBeNull();
+    expect(output.querySelector('.term-success')?.textContent).toBe('PASS');
   });
 
   it('bypasses Overflow when reduced motion is requested', () => {
@@ -656,6 +943,28 @@ describe('terminal MCP App UI', () => {
     expect(result.structuredContent).toEqual({
       surface_id: 'surface-ios', surface_open: true, surface_active: false, session_id: null,
     });
+    await bridge.close();
+  });
+
+  it('adopts window.openai injected while the parent handshake is still pending', async () => {
+    vi.useFakeTimers();
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
+    const bridge = new ChatGptMcpBridge();
+    const connecting = bridge.connect().then(() => true, () => false);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ method: 'ui/initialize' }), '*');
+
+    const callTool = vi.fn(async () => ({ structuredContent: {} }));
+    vi.stubGlobal('openai', { callTool });
+    window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: { theme: 'dark' } } }));
+
+    const adopted = Promise.race([connecting, new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), 1))]);
+    await vi.advanceTimersByTimeAsync(1);
+    const adoptedBeforeTimeout = await adopted;
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(adoptedBeforeTimeout).toBe(true);
+    await bridge.callServerTool({ name: 'terminal_surface_status', arguments: {} });
+    expect(callTool).toHaveBeenCalledWith('terminal_surface_status', {});
     await bridge.close();
   });
 

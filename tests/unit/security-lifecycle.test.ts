@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +72,76 @@ describe('security and lifecycle hardening', () => {
     const transcript = await readFile(transcriptPath, 'utf8');
     expect(transcript).not.toContain('old');
     expect(transcript).toContain('new');
+  });
+
+  it('keeps flush pending for writes enqueued while an earlier tail is draining', async () => {
+    const logger = new AuditLogger('/tmp/audit-flush-race.jsonl', undefined);
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let secondStarted!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const secondStartedPromise = new Promise<void>((resolve) => { secondStarted = resolve; });
+    const internal = logger as unknown as {
+      fileTails: Map<string, Promise<void>>;
+      enqueue(path: string | undefined, operation: () => Promise<void>): Promise<void>;
+    };
+    internal.fileTails.set('/tmp/audit-flush-race.jsonl', first);
+
+    let flushed = false;
+    const flushing = logger.flush().then(() => { flushed = true; });
+    const second = internal.enqueue('/tmp/audit-flush-race.jsonl', async () => {
+      secondStarted();
+      await secondGate;
+    });
+
+    releaseFirst();
+    await secondStartedPromise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(flushed).toBe(false);
+
+    releaseSecond();
+    await Promise.all([flushing, second]);
+    expect(flushed).toBe(true);
+  });
+
+  it('restores owner-only permissions when an audit file is externally rotated and recreated', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-audit-rotate-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const auditPath = join(root, 'audit.jsonl');
+    const rotatedPath = join(root, 'audit.jsonl.1');
+    const logger = new AuditLogger(auditPath, undefined);
+
+    await logger.record({ action: 'terminal_status', user_id: 'user-a', authorization: 'allow' });
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o600);
+
+    await rename(auditPath, rotatedPath);
+    await writeFile(auditPath, '', { mode: 0o644 });
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o644);
+
+    await logger.record({ action: 'terminal_read', user_id: 'user-a', authorization: 'allow' });
+
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(auditPath, 'utf8')).toContain('terminal_read');
+    expect(await readFile(rotatedPath, 'utf8')).toContain('terminal_status');
+  });
+
+  it('leaves transcript evidence untouched when prune staging fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-transcript-prune-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const transcriptPath = join(root, 'transcript.jsonl');
+    const logger = new AuditLogger(undefined, transcriptPath);
+    const now = Date.now();
+    const original = [
+      JSON.stringify({ timestamp: new Date(now - 10 * 24 * 60 * 60_000).toISOString(), data: 'old' }),
+      JSON.stringify({ timestamp: new Date(now).toISOString(), data: 'new' }),
+      '',
+    ].join('\n');
+    await writeFile(transcriptPath, original, { mode: 0o600 });
+    await mkdir(`${transcriptPath}.prune.tmp`);
+
+    await expect(logger.pruneTranscript(7)).rejects.toBeTruthy();
+    expect(await readFile(transcriptPath, 'utf8')).toBe(original);
   });
 
   it('serializes transcript appends with retention pruning so fresh events are not lost', async () => {

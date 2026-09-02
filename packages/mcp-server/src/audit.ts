@@ -1,4 +1,8 @@
-import { appendFile, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { chmod, mkdir, open, rename, rm } from 'node:fs/promises';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
+import { finished } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 
@@ -62,39 +66,61 @@ export class AuditLogger {
     if (!this.transcriptPath) return 0;
     let removed = 0;
     await this.enqueue(this.transcriptPath, async () => {
-      let content: string;
-      try {
-        content = await readFile(this.transcriptPath!, 'utf8');
-      } catch (error) {
-        if (isMissingFile(error)) return;
-        throw error;
-      }
+      const transcriptPath = this.transcriptPath!;
+      const temporary = `${transcriptPath}.prune.tmp`;
       const cutoff = Date.now() - retentionDays * 24 * 60 * 60_000;
-      const lines = content.split('\n').filter(Boolean);
-      const retained: string[] = [];
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line) as { timestamp?: unknown };
-          const timestamp = typeof parsed.timestamp === 'string' ? Date.parse(parsed.timestamp) : Number.NaN;
-          if (Number.isFinite(timestamp) && timestamp < cutoff) {
+      const output = createWriteStream(temporary, { encoding: 'utf8', mode: 0o600, flags: 'w' });
+      let input: ReturnType<typeof createReadStream> | undefined;
+      let lines: ReturnType<typeof createInterface> | undefined;
+      let outputFinished: Promise<void> | undefined;
+      try {
+        await once(output, 'open');
+        outputFinished = finished(output);
+        void outputFinished.catch(() => undefined);
+        input = createReadStream(transcriptPath, { encoding: 'utf8' });
+        lines = createInterface({ input, crlfDelay: Infinity });
+        for await (const line of lines) {
+          if (!line) continue;
+          let expired = false;
+          try {
+            const parsed = JSON.parse(line) as { timestamp?: unknown };
+            const timestamp = typeof parsed.timestamp === 'string' ? Date.parse(parsed.timestamp) : Number.NaN;
+            expired = Number.isFinite(timestamp) && timestamp < cutoff;
+          } catch {
+            // Preserve malformed historical entries rather than silently deleting evidence.
+          }
+          if (expired) {
             removed += 1;
             continue;
           }
-        } catch {
-          // Preserve malformed historical entries rather than silently deleting evidence.
+          if (!output.write(`${line}\n`)) await once(output, 'drain');
         }
-        retained.push(line);
-      }
-      if (removed > 0) {
-        await writeFile(this.transcriptPath!, retained.length > 0 ? `${retained.join('\n')}\n` : '', { encoding: 'utf8', mode: 0o600 });
-        await chmod(this.transcriptPath!, 0o600);
+        output.end();
+        await outputFinished;
+        if (removed === 0) {
+          await rm(temporary, { force: true });
+          return;
+        }
+        await chmod(temporary, 0o600);
+        await rename(temporary, transcriptPath);
+      } catch (error) {
+        lines?.close();
+        input?.destroy();
+        output.destroy();
+        await Promise.allSettled([...(outputFinished ? [outputFinished] : []), rm(temporary, { force: true })]);
+        if (isMissingFile(error)) return;
+        throw error;
       }
     });
     return removed;
   }
 
   async flush(): Promise<void> {
-    await Promise.all(this.fileTails.values());
+    while (true) {
+      const tails = [...this.fileTails.entries()];
+      await Promise.all(tails.map(([, tail]) => tail));
+      if (tails.length === this.fileTails.size && tails.every(([key, tail]) => this.fileTails.get(key) === tail)) return;
+    }
   }
 
   private enqueue(path: string | undefined, operation: () => Promise<void>): Promise<void> {
@@ -110,12 +136,15 @@ export class AuditLogger {
     if (path) {
       if (!this.preparedPaths.has(path)) {
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-        await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
-        await chmod(path, 0o600);
-        this.preparedPaths.add(path);
-        return;
       }
-      await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
+      const handle = await open(path, 'a', 0o600);
+      try {
+        await handle.chmod(0o600);
+        await handle.appendFile(line, { encoding: 'utf8' });
+      } finally {
+        await handle.close();
+      }
+      this.preparedPaths.add(path);
       return;
     }
     process.stdout.write(line);

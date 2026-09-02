@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import {
+  GATEWAY_MAX_PAYLOAD_BYTES,
   TerminalProtocolError,
   agentCommandSchema,
   gatewayAuthChallengeSchema,
@@ -11,6 +12,7 @@ import {
 } from '@terminal/protocol';
 import type { TerminalAgentApi } from './index.js';
 import type { DeviceIdentity } from './device-identity.js';
+import { parseGatewayUrl } from './transport-security.js';
 
 export interface GatewayClientOptions {
   url: string;
@@ -31,6 +33,7 @@ export class AgentGatewayClient {
   private stopped = false;
   private authenticated = false;
   private reconnectAttempt = 0;
+  private reconnectAbort: AbortController | undefined;
   private heartbeat: NodeJS.Timeout | undefined;
   private readonly queue: QueuedMessage[] = [];
   private queuedBytes = 0;
@@ -44,7 +47,9 @@ export class AgentGatewayClient {
   constructor(
     private readonly agent: TerminalAgentApi,
     private readonly options: GatewayClientOptions,
-  ) {}
+  ) {
+    parseGatewayUrl(options.url);
+  }
   async start(): Promise<void> {
     this.stopped = false;
     this.unsubscribeEvent ??= this.agent.onEvent((event) => {
@@ -69,7 +74,15 @@ export class AgentGatewayClient {
         const backoff = Math.min(this.options.reconnectMaxMs, Math.max(floor, Math.round(base + jitter)));
         this.reconnectAttempt += 1;
         console.error(JSON.stringify({ level: 'warn', event: 'agent.gateway_disconnected', error: errorMessage(error), retry_ms: backoff }));
-        await delay(backoff);
+        const reconnectAbort = new AbortController();
+        this.reconnectAbort = reconnectAbort;
+        try {
+          await delay(backoff, undefined, { signal: reconnectAbort.signal });
+        } catch (delayError) {
+          if (!this.stopped) throw delayError;
+        } finally {
+          if (this.reconnectAbort === reconnectAbort) this.reconnectAbort = undefined;
+        }
       }
     }
   }
@@ -78,8 +91,10 @@ export class AgentGatewayClient {
     this.stopped = true;
     this.authenticated = false;
     this.clearHeartbeat();
+    this.reconnectAbort?.abort();
     this.clearBackpressureDrain();
     this.backpressuredSessions.clear();
+    this.clearQueue();
     this.unsubscribeEvent?.();
     this.unsubscribeEvent = undefined;
     this.socket?.close(1000, 'agent stopping');
@@ -91,11 +106,24 @@ export class AgentGatewayClient {
       headers: {
         'x-terminal-device-id': this.options.identity.deviceId,
       },
+      maxPayload: GATEWAY_MAX_PAYLOAD_BYTES,
     });
     this.socket = socket;
-    await this.authenticateSocket(socket);
+    try {
+      await this.authenticateSocket(socket);
+    } catch (error) {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'device authentication failed');
+      else if (socket.readyState === WebSocket.CONNECTING) {
+        socket.once('error', () => undefined);
+        socket.terminate();
+      }
+      throw error;
+    }
     this.authenticated = true;
 
+    socket.on('error', (error) => {
+      console.error(JSON.stringify({ level: 'error', event: 'agent.gateway_socket_error', error: errorMessage(error) }));
+    });
     socket.on('message', (data) => {
       try {
         this.handleMessage(rawDataText(data));
@@ -186,7 +214,6 @@ export class AgentGatewayClient {
         this.clearBackpressureDrain();
         this.backpressuredSessions.clear();
         this.clearQueue();
-        this.agent.stopProcessFeatures();
         resolve();
       });
     });

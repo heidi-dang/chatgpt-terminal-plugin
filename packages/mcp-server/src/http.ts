@@ -35,7 +35,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     host: config.host,
     ...(config.allowedHosts.length > 0 ? { allowedHosts: config.allowedHosts } : {}),
     ...(config.allowedOrigins.length > 0 ? { allowedOrigins: config.allowedOrigins } : {}),
-    jsonLimit: '256kb',
+    jsonLimit: '512kb',
   });
   const audit = new AuditLogger(config.auditLogPath, config.transcriptLogPath);
   await audit.pruneTranscript(config.transcriptRetentionDays);
@@ -76,6 +76,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
   const uiReloadClients = new Set<Response>();
+  const terminalStreamClients = new Set<Response>();
   let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
   const stopUiWatcher = watchTerminalUiStyles((version) => {
     if (version === terminalUiStyleVersion) return;
@@ -152,9 +153,13 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   app.post(config.agentEnrollmentPath, enrollmentRateLimiter, async (req, res) => {
+    const parsed = deviceEnrollmentRequestSchema.safeParse(req.body as unknown);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_device_enrollment' });
+      return;
+    }
     try {
-      const enrollment = deviceEnrollmentRequestSchema.parse(req.body as unknown);
-      const enrolled = await deviceRegistry.enroll(enrollment, req.get('x-terminal-enrollment-token') ?? undefined);
+      const enrolled = await deviceRegistry.enroll(parsed.data, req.get('x-terminal-enrollment-token') ?? undefined);
       const output = deviceEnrollmentOutputSchema.parse({
         device_id: enrolled.record.device_id,
         agent_id: enrolled.record.agent_id,
@@ -168,7 +173,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         res.status(error.code === 'PERMISSION_DENIED' ? 403 : 400).json(error.toPayload());
         return;
       }
-      res.status(400).json({ error: 'invalid_device_enrollment' });
+      console.error(JSON.stringify({ level: 'error', event: 'device.enrollment_persist_failed', error: errorMessage(error) }));
+      res.status(503).json({ error: 'device_registry_unavailable' });
     }
   });
 
@@ -189,7 +195,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         res.status(error.code === 'PERMISSION_DENIED' ? 403 : 400).json(error.toPayload());
         return;
       }
-      res.status(400).json({ error: 'invalid_device_revocation' });
+      console.error(JSON.stringify({ level: 'error', event: 'device.revocation_persist_failed', error: errorMessage(error) }));
+      res.status(503).json({ error: 'device_registry_unavailable' });
     }
   });
 
@@ -295,6 +302,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('connection', 'keep-alive');
       res.setHeader('x-accel-buffering', 'no');
       res.flushHeaders();
+      terminalStreamClients.add(res);
 
       let lastSequence = cursor;
       let replaying = true;
@@ -342,6 +350,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearInterval(keepAlive);
         clearTimeout(expiryTimer);
         unsubscribe();
+        terminalStreamClients.delete(res);
         if (!res.writableEnded && !res.destroyed) res.end();
       };
       res.once('close', cleanup);
@@ -358,6 +367,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   const httpServer = createServer(app);
+  let closePromise: Promise<void> | undefined;
   httpServer.on('upgrade', (request, socket, head) => {
     if (!isAllowedUpgradeHost(request.headers.host, config.allowedHosts)) {
       socket.destroy();
@@ -375,19 +385,27 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     httpServer,
     gateway,
     deviceRegistry,
-    async close() {
-      clearInterval(transcriptRetentionTimer);
-      stopUiWatcher();
-      for (const client of uiReloadClients) client.end();
-      uiReloadClients.clear();
-      turnRegistry.dispose();
-      gateway.closeAll();
-      for (const session of sessions.values()) await session.server.close();
-      sessions.clear();
-      await audit.flush();
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => error ? reject(error) : resolve());
-      });
+    close() {
+      return closePromise ??= (async () => {
+        const httpClosed = httpServer.listening
+          ? new Promise<void>((resolve, reject) => {
+              httpServer.close((error) => error ? reject(error) : resolve());
+            })
+          : Promise.resolve();
+        clearInterval(transcriptRetentionTimer);
+        stopUiWatcher();
+        for (const client of uiReloadClients) client.end();
+        uiReloadClients.clear();
+        for (const client of terminalStreamClients) client.end();
+        terminalStreamClients.clear();
+        httpServer.closeIdleConnections();
+        turnRegistry.dispose();
+        gateway.closeAll();
+        for (const session of sessions.values()) await session.server.close();
+        sessions.clear();
+        await httpClosed;
+        await audit.flush();
+      })();
     },
   };
 }

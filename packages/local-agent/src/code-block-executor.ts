@@ -21,10 +21,13 @@ export interface CodeBlockExecutorOptions {
   killGraceMs?: number;
 }
 
-interface ActiveExecution {
+type ExecutionTermination = 'cancelled' | 'shutdown';
+
+interface ExecutionState {
   userId: string;
-  child: ChildProcess;
-  cancelled: boolean;
+  child?: ChildProcess;
+  termination?: ExecutionTermination;
+  finished: boolean;
   forceKillTimer?: NodeJS.Timeout;
 }
 
@@ -41,7 +44,8 @@ const DEFAULT_COMBINED_LIMIT = 384 * 1024;
 const DEFAULT_KILL_GRACE_MS = 1_000;
 
 export class CodeBlockExecutor {
-  private readonly active = new Map<string, ActiveExecution>();
+  private readonly executions = new Map<string, ExecutionState>();
+  private stopped = false;
   private readonly environment: Record<string, string>;
   private readonly defaultTimeoutMs: number;
   private readonly maxTimeoutMs: number;
@@ -66,46 +70,67 @@ export class CodeBlockExecutor {
     cwd: string,
     onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<CodeExecuteOutput> {
-    if (this.active.has(input.execution_id)) {
+    if (this.stopped) {
+      throw new TerminalProtocolError('AGENT_OFFLINE', 'Code executor has been shut down.');
+    }
+    if (this.executions.has(input.execution_id)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Execution identifier is already active.');
     }
 
     const invocation = runtimeInvocation(input.runtime, this.environment);
     const timeoutMs = Math.min(input.timeout_ms ?? this.defaultTimeoutMs, this.maxTimeoutMs);
-    const tempDir = await mkdtemp(join(tmpdir(), 'chatgpt-terminal-code-'));
-    const scriptPath = join(tempDir, `script${invocation.extension}`);
+    const execution: ExecutionState = { userId, finished: false };
+    this.executions.set(input.execution_id, execution);
+    let tempDir: string | undefined;
     const startedAt = Date.now();
 
     try {
+      tempDir = await mkdtemp(join(tmpdir(), 'chatgpt-terminal-code-'));
+      this.throwIfTerminated(execution);
+      const scriptPath = join(tempDir, `script${invocation.extension}`);
       await writeFile(scriptPath, input.code, { encoding: 'utf8', mode: 0o700, flag: 'wx' });
-      return await this.runChild(userId, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt, onChunk);
+      this.throwIfTerminated(execution);
+      return await this.runChild(execution, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt, onChunk);
     } finally {
-      await rm(tempDir, { recursive: true, force: true });
+      try {
+        if (tempDir) await rm(tempDir, { recursive: true, force: true });
+      } finally {
+        if (this.executions.get(input.execution_id) === execution) this.executions.delete(input.execution_id);
+      }
     }
   }
 
   cancel(userId: string, executionId: string): CodeCancelOutput {
-    const active = this.active.get(executionId);
-    if (!active) return { execution_id: executionId, cancelled: false };
-    if (active.userId !== userId) {
+    const execution = this.executions.get(executionId);
+    if (!execution || execution.finished || execution.termination === 'shutdown') {
+      return { execution_id: executionId, cancelled: false };
+    }
+    if (execution.userId !== userId) {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Code execution is owned by another user.');
     }
-    active.cancelled = true;
-    this.terminate(active);
+    if (execution.termination !== 'cancelled') {
+      execution.termination = 'cancelled';
+      this.terminate(execution);
+    }
     return { execution_id: executionId, cancelled: true };
   }
 
   get activeCount(): number {
-    return this.active.size;
+    return this.executions.size;
   }
 
   shutdown(): void {
-    for (const active of this.active.values()) this.terminate(active);
-    this.active.clear();
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const execution of this.executions.values()) {
+      if (execution.finished) continue;
+      execution.termination = 'shutdown';
+      this.terminate(execution);
+    }
   }
 
   private runChild(
-    userId: string,
+    execution: ExecutionState,
     input: CodeExecuteInput,
     cwd: string,
     command: string,
@@ -123,9 +148,8 @@ export class CodeBlockExecutor {
         windowsHide: true,
         detached: process.platform !== 'win32',
       });
+      execution.child = child;
       if (hasStdin && child.stdin) child.stdin.end(input.stdin, 'utf8');
-      const active: ActiveExecution = { userId, child, cancelled: false };
-      this.active.set(input.execution_id, active);
 
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
@@ -140,14 +164,15 @@ export class CodeBlockExecutor {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        if (active.forceKillTimer) clearTimeout(active.forceKillTimer);
-        this.active.delete(input.execution_id);
+        if (execution.forceKillTimer) clearTimeout(execution.forceKillTimer);
+        execution.finished = true;
         if (limitError) {
           reject(limitError);
           return;
         }
-        if (active.cancelled) {
-          reject(new TerminalProtocolError('REQUEST_CANCELLED', 'Code execution was cancelled.'));
+        const terminationError = this.terminationError(execution);
+        if (terminationError) {
+          reject(terminationError);
           return;
         }
         resolve({
@@ -185,7 +210,7 @@ export class CodeBlockExecutor {
         }
         if (allowed < chunk.length) {
           limitError = new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Code execution exceeded the configured output limit.');
-          this.terminate(active);
+          this.terminate(execution);
         }
       };
 
@@ -195,26 +220,45 @@ export class CodeBlockExecutor {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        this.active.delete(input.execution_id);
-        reject(new TerminalProtocolError('PTY_CREATE_FAILED', `Failed to start code runtime: ${error.message}`));
+        if (execution.forceKillTimer) clearTimeout(execution.forceKillTimer);
+        execution.finished = true;
+        reject(this.terminationError(execution) ?? new TerminalProtocolError('PTY_CREATE_FAILED', `Failed to start code runtime: ${error.message}`));
       });
       child.once('close', (code) => finish(code));
 
       const timeout = setTimeout(() => {
         timedOut = true;
-        this.terminate(active);
+        this.terminate(execution);
       }, timeoutMs);
       timeout.unref();
     });
   }
 
-  private terminate(active: ActiveExecution): void {
-    const pid = active.child.pid;
-    if (!pid || active.child.exitCode !== null || active.child.signalCode !== null) return;
-    signalProcessTree(active.child, 'SIGTERM');
-    if (active.forceKillTimer) clearTimeout(active.forceKillTimer);
-    active.forceKillTimer = setTimeout(() => signalProcessTree(active.child, 'SIGKILL'), this.killGraceMs);
-    active.forceKillTimer.unref();
+  private throwIfTerminated(execution: ExecutionState): void {
+    const error = this.terminationError(execution);
+    if (!error) return;
+    execution.finished = true;
+    throw error;
+  }
+
+  private terminationError(execution: ExecutionState): TerminalProtocolError | undefined {
+    if (execution.termination === 'cancelled') {
+      return new TerminalProtocolError('REQUEST_CANCELLED', 'Code execution was cancelled.');
+    }
+    if (execution.termination === 'shutdown') {
+      return new TerminalProtocolError('AGENT_OFFLINE', 'Code executor shut down before execution completed.', true);
+    }
+    return undefined;
+  }
+
+  private terminate(execution: ExecutionState): void {
+    const child = execution.child;
+    const pid = child?.pid;
+    if (!child || !pid || child.exitCode !== null || child.signalCode !== null) return;
+    signalProcessTree(child, 'SIGTERM');
+    if (execution.forceKillTimer) clearTimeout(execution.forceKillTimer);
+    execution.forceKillTimer = setTimeout(() => signalProcessTree(child, 'SIGKILL'), this.killGraceMs);
+    execution.forceKillTimer.unref();
   }
 }
 

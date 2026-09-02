@@ -70,7 +70,7 @@ const configSchema = z.object({
   TERMINAL_MAX_READ_BYTES: positiveInt(32_768, 262_144),
   TERMINAL_MAX_EVENT_BYTES: positiveInt(65_536, 1024 * 1024),
   TERMINAL_BUFFER_HIGH_WATER_BYTES: positiveInt(1024 * 1024, 64 * 1024 * 1024),
-  // 0 disables the quota. This keeps session creation unbounded by policy while OS resources remain the real ceiling.
+  // 0 disables the quota for development/test; production requires finite values below.
   TERMINAL_MAX_SESSIONS_PER_USER: nonNegativeInt(0, 100_000),
   TERMINAL_MAX_SESSIONS_PER_AGENT: nonNegativeInt(0, 100_000),
   TERMINAL_IDLE_TIMEOUT_MS: positiveInt(30 * 60_000, 7 * 24 * 60 * 60_000),
@@ -136,6 +136,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     }
     if (!parsed.AGENT_DEVICE_REGISTRY_PATH || !parsed.AGENT_ENROLLMENT_TOKEN) {
       throw new Error('Production requires AGENT_DEVICE_REGISTRY_PATH and AGENT_ENROLLMENT_TOKEN.');
+    }
+    if (parsed.TERMINAL_MAX_SESSIONS_PER_USER === 0) {
+      throw new Error('Production requires a finite per-user session quota via TERMINAL_MAX_SESSIONS_PER_USER.');
+    }
+    if (parsed.TERMINAL_MAX_SESSIONS_PER_AGENT === 0) {
+      throw new Error('Production requires a finite per-agent session quota via TERMINAL_MAX_SESSIONS_PER_AGENT.');
     }
   }
 

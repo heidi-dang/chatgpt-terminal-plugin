@@ -1,11 +1,12 @@
 import { createServer } from 'node:http';
-import { stat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { stat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayAuthChallengeSchema, gatewayChallengePayload } from '../../packages/protocol/src/index.js';
-import { DeviceIdentity } from '../../packages/local-agent/src/device-identity.js';
+import { DeviceIdentity, enrollDevice } from '../../packages/local-agent/src/device-identity.js';
+import { resolveEnrollmentConfig } from '../../packages/local-agent/src/enrollment-config.js';
 import { DeviceRegistry } from '../../packages/mcp-server/src/device-registry.js';
 import { AgentGateway } from '../../packages/mcp-server/src/gateway.js';
 
@@ -15,6 +16,36 @@ afterEach(async () => {
 });
 
 describe('device identity and enrollment', () => {
+  it('requires same-startup enrollment before rotating the local device key', () => {
+    expect(() => resolveEnrollmentConfig({ AGENT_ROTATE_KEY: '1' })).toThrow(/rotate.*enrollment/i);
+    expect(() => resolveEnrollmentConfig({
+      AGENT_ROTATE_KEY: '1',
+      AGENT_ENROLLMENT_URL: 'https://terminal.example.com/agent/enroll',
+      AGENT_ENROLLMENT_TOKEN: 'bootstrap-token',
+      AGENT_OWNER_ID: 'owner-a',
+    })).not.toThrow();
+  });
+
+  it('rejects partial enrollment configuration before identity mutation', () => {
+    expect(() => resolveEnrollmentConfig({
+      AGENT_ENROLLMENT_URL: 'https://terminal.example.com/agent/enroll',
+    })).toThrow(/configured together/i);
+  });
+  it('rejects plaintext remote enrollment before sending the bootstrap token', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-enrollment-transport-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    cleanup.push(() => fetchSpy.mockRestore());
+
+    await expect(enrollDevice({
+      identity,
+      enrollmentUrl: 'http://example.com/agent/enroll',
+      enrollmentToken: 'must-not-cross-plaintext',
+      ownerId: 'owner-a',
+    })).rejects.toThrow(/https.*loopback/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
   it('persists owner-only Ed25519 identity, verifies proof, rotates key, and revokes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-device-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -133,6 +164,59 @@ describe('device identity and enrollment', () => {
     expect(await closed).toBe(1008);
   });
 
+  it('contains best-effort last-seen persistence failures after successful gateway authentication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-mark-seen-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registry = await DeviceRegistry.load(join(root, 'devices.json'), 'enrollment-token');
+    await registry.enroll({
+      device_id: identity.deviceId,
+      agent_id: identity.agentId,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }, 'enrollment-token');
+    vi.spyOn(registry, 'markSeen').mockRejectedValue(new Error('last-seen persistence failed'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup.push(() => errorSpy.mockRestore());
+
+    const gateway = new AgentGateway({
+      requestTimeoutMs: 1000,
+      maxRetainedBytesPerSession: 1024 * 1024,
+      closedSessionRetentionMs: 60_000,
+      sessionSweepIntervalMs: 10_000,
+      deviceRegistry: registry,
+      authChallengeTtlMs: 5000,
+    });
+    cleanup.push(() => gateway.closeAll());
+    const server = createServer();
+    server.on('upgrade', (request, socket, head) => gateway.handleUpgrade(request, socket, head));
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate mark-seen failure test port.');
+
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/agent`, {
+      headers: { 'x-terminal-device-id': identity.deviceId },
+    });
+    cleanup.push(() => socket.close());
+    const challenge = gatewayAuthChallengeSchema.parse(await nextMessage(socket));
+    socket.send(JSON.stringify({
+      type: 'auth.proof',
+      device_id: identity.deviceId,
+      nonce: challenge.nonce,
+      issued_at: challenge.issued_at,
+      signature: identity.signChallenge(challenge),
+    }));
+
+    expect(await nextMessage(socket)).toMatchObject({ type: 'auth.accepted' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('gateway.mark_seen_failed'));
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it('rejects enrollment with the wrong administrative token and owner reassignment', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-device-deny-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -190,6 +274,48 @@ describe('device identity and enrollment', () => {
       owner_id: 'owner-b',
       public_key: identity.publicKey,
     })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('serializes concurrent registry mutations without losing persisted devices', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-concurrent-persist-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registryPath = join(root, 'devices.json');
+    const registry = await DeviceRegistry.load(registryPath);
+    const records = Array.from({ length: 8 }, (_, index) => ({
+      device_id: `device-concurrent-${index}`,
+      agent_id: `agent-concurrent-${index}`,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }));
+
+    await Promise.all(records.map((record) => registry.enrollLocalAdmin(record)));
+
+    const reloaded = await DeviceRegistry.load(registryPath);
+    for (const record of records) {
+      expect(reloaded.requireActive(record.device_id)).toMatchObject({
+        agent_id: record.agent_id, owner_id: record.owner_id, key_version: 1,
+      });
+    }
+  });
+
+  it('rolls back in-memory enrollment when registry persistence fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-persist-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registryPath = join(root, 'devices.json');
+    const registry = await DeviceRegistry.load(registryPath, 'enrollment-token');
+    await mkdir(`${registryPath}.tmp`);
+
+    await expect(registry.enroll({
+      device_id: identity.deviceId,
+      agent_id: identity.agentId,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }, 'enrollment-token')).rejects.toBeTruthy();
+
+    expect(registry.get(identity.deviceId)).toBeUndefined();
+    expect(() => registry.requireActive(identity.deviceId)).toThrow(/not enrolled/i);
   });
 
   it('migrates version-1 device registries to an explicit immutable agent binding', async () => {

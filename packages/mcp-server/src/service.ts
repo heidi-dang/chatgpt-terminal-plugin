@@ -48,6 +48,9 @@ export interface RequestIdentity {
 }
 
 export class TerminalService {
+  private readonly startingByUser = new Map<string, number>();
+  private readonly startingByAgent = new Map<string, number>();
+
   constructor(
     private readonly gateway: AgentGateway,
     private readonly config: ServerConfig,
@@ -69,16 +72,29 @@ export class TerminalService {
     const input = terminalStartInputSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_start', { agent_id: input.agent_id, cwd: input.cwd, shell: input.shell });
     const active = this.gateway.listSessions(identity.userId).filter((session) => isActive(session.status));
-    if (this.config.maxSessionsPerUser > 0 && active.length >= this.config.maxSessionsPerUser) {
+    const agentReservationKey = `${identity.userId}\0${input.agent_id}`;
+    const reservedForUser = this.startingByUser.get(identity.userId) ?? 0;
+    const reservedForAgent = this.startingByAgent.get(agentReservationKey) ?? 0;
+    if (this.config.maxSessionsPerUser > 0 && active.length + reservedForUser >= this.config.maxSessionsPerUser) {
       await this.denied(identity, 'terminal_start', 'SESSION_LIMIT_REACHED', { agent_id: input.agent_id });
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'User terminal session quota has been reached.');
     }
-    if (this.config.maxSessionsPerAgent > 0 && active.filter((session) => session.agent_id === input.agent_id).length >= this.config.maxSessionsPerAgent) {
+    if (this.config.maxSessionsPerAgent > 0 && active.filter((session) => session.agent_id === input.agent_id).length + reservedForAgent >= this.config.maxSessionsPerAgent) {
       await this.denied(identity, 'terminal_start', 'SESSION_LIMIT_REACHED', { agent_id: input.agent_id });
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Agent terminal session quota has been reached.');
     }
 
-    const snapshot = await this.gateway.start(identity.userId, input, identity.executionProfile);
+    const reserveUser = this.config.maxSessionsPerUser > 0;
+    const reserveAgent = this.config.maxSessionsPerAgent > 0;
+    if (reserveUser) incrementCount(this.startingByUser, identity.userId);
+    if (reserveAgent) incrementCount(this.startingByAgent, agentReservationKey);
+    let snapshot;
+    try {
+      snapshot = await this.gateway.start(identity.userId, input, identity.executionProfile);
+    } finally {
+      if (reserveUser) decrementCount(this.startingByUser, identity.userId);
+      if (reserveAgent) decrementCount(this.startingByAgent, agentReservationKey);
+    }
     // Do not long-poll during creation: terminal_start must return the stream capability immediately.
     const initial = await this.gateway.read(identity.userId, snapshot.session.session_id, 0, this.config.maxReadBytes, 0);
     const output = terminalStartOutputSchema.parse({
@@ -415,4 +431,14 @@ function auditIdentity(identity: RequestIdentity) {
 
 function isActive(status: string): boolean {
   return status === 'creating' || status === 'running' || status === 'waiting' || status === 'closing' || status === 'disconnected';
+}
+
+function incrementCount(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function decrementCount(counts: Map<string, number>, key: string): void {
+  const next = (counts.get(key) ?? 1) - 1;
+  if (next <= 0) counts.delete(key);
+  else counts.set(key, next);
 }

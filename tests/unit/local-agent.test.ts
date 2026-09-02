@@ -302,6 +302,22 @@ describe('LocalTerminalAgent', () => {
     );
   });
 
+  it('submits a terminal_start command as a complete line on a fresh PTY', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-start-command-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-start-command', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-start-command', cwd: root, shell: 'bash', cols: 80, rows: 24,
+      command: "printf '__START_COMMAND_READY__\\n'",
+    }, 'developer');
+
+    const output = await waitForText(agent, started.session.session_id, 0, '__START_COMMAND_READY__');
+    expect(output.output).toContain('__START_COMMAND_READY__');
+  });
+
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-env-root-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -346,20 +362,29 @@ async function waitForText(
     return output.includes(needle);
   };
 
-  if (consume()) return { output, cursor };
-
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      reject(new Error(`Timed out waiting for terminal output: ${needle}\n${normalizeTerminal(output)}`));
-    }, timeoutMs);
-    const unsubscribe = agent.onEvent((event) => {
-      if (event.session_id !== sessionId) return;
-      if (!consume()) return;
+    let settled = false;
+    let unsubscribe = () => undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       unsubscribe();
       resolve({ output, cursor });
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      reject(new Error(`Timed out waiting for terminal output: ${needle}\n${normalizeTerminal(output)}`));
+    }, timeoutMs);
+    unsubscribe = agent.onEvent((event) => {
+      if (event.session_id !== sessionId) return;
+      if (consume()) finish();
     });
+    // Subscribe before the durable-buffer check so output arriving between the check
+    // and listener registration cannot be missed permanently.
+    if (consume()) finish();
   });
 }
 

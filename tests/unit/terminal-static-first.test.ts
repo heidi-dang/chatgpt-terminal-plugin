@@ -34,6 +34,15 @@ describe('terminal UI static-first contract', () => {
     }
   });
 
+  it('allows the narrow-screen terminal to shrink with a short mobile viewport', async () => {
+    const css = await readFile(join(root, 'packages/terminal-ui/src/styles.css'), 'utf8');
+    expect(css).toContain('grid-template-rows: auto minmax(0, 68vh) auto;');
+    expect(css).toContain('min-height: min(560px, 82vh);');
+    expect(css).toContain('.terminal-frame { min-height: 0; padding: 9px 8px 7px; }');
+    expect(css).toContain('.terminal-output { min-height: 0; font-size: 11.5px; line-height: 1.32; }');
+    expect(css).not.toContain('grid-template-rows: auto minmax(430px, 68vh) auto;');
+  });
+
   it('boots the app runtime whenever the static terminal shell exists', async () => {
     const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
     expect(runtime).toContain("if (document.querySelector('[data-terminal-static-shell]')) {");

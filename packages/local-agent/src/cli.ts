@@ -4,6 +4,8 @@ import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
 import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
+import { parseGatewayUrl } from './transport-security.js';
+import { resolveEnrollmentConfig } from './enrollment-config.js';
 import { resolveLspServers } from './lsp-discovery.js';
 
 function csv(value: string | undefined): string[] {
@@ -18,12 +20,18 @@ function intEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+function boolEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return fallback;
+  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+  throw new Error(`${name} must be a boolean (true/false or 1/0).`);
+}
+
+
 const gatewayUrl = process.env.AGENT_GATEWAY_URL;
 if (!gatewayUrl) throw new Error('AGENT_GATEWAY_URL is required.');
-const parsedGatewayUrl = new URL(gatewayUrl);
-if (parsedGatewayUrl.protocol !== 'ws:' && parsedGatewayUrl.protocol !== 'wss:') {
-  throw new Error('AGENT_GATEWAY_URL must use ws:// or wss://.');
-}
+const parsedGatewayUrl = parseGatewayUrl(gatewayUrl);
 
 const roots = csv(process.env.ALLOWED_WORKSPACE_ROOTS);
 const shells = csv(process.env.AGENT_SHELLS);
@@ -38,18 +46,16 @@ if (profile === 'developer' && roots.length === 0) {
   throw new Error('ALLOWED_WORKSPACE_ROOTS is required when EXECUTION_PROFILE=developer.');
 }
 const identityPath = process.env.AGENT_IDENTITY_PATH ?? join(homedir(), '.config', 'chatgpt-terminal-plugin', 'device.json');
-const identity = await DeviceIdentity.loadOrCreate(identityPath, process.env.AGENT_ROTATE_KEY === '1');
+const enrollmentConfig = resolveEnrollmentConfig(process.env);
+const identity = await DeviceIdentity.loadOrCreate(identityPath, enrollmentConfig.rotateKey);
 
-if (process.env.AGENT_ENROLLMENT_URL || process.env.AGENT_ENROLLMENT_TOKEN || process.env.AGENT_OWNER_ID) {
-  if (!process.env.AGENT_ENROLLMENT_URL || !process.env.AGENT_ENROLLMENT_TOKEN || !process.env.AGENT_OWNER_ID) {
-    throw new Error('AGENT_ENROLLMENT_URL, AGENT_ENROLLMENT_TOKEN, and AGENT_OWNER_ID must be configured together.');
-  }
+if (enrollmentConfig.enrollment) {
   const status = await enrollDevice({
     identity,
-    enrollmentUrl: process.env.AGENT_ENROLLMENT_URL,
-    enrollmentToken: process.env.AGENT_ENROLLMENT_TOKEN,
-    ownerId: process.env.AGENT_OWNER_ID,
-    ...(process.env.AGENT_DISPLAY_NAME ? { displayName: process.env.AGENT_DISPLAY_NAME } : {}),
+    enrollmentUrl: enrollmentConfig.enrollment.url,
+    enrollmentToken: enrollmentConfig.enrollment.token,
+    ownerId: enrollmentConfig.enrollment.ownerId,
+    ...(enrollmentConfig.enrollment.displayName ? { displayName: enrollmentConfig.enrollment.displayName } : {}),
   });
   console.log(JSON.stringify({ level: 'info', event: 'agent.device_enrollment', status, device_id: identity.deviceId }));
   delete process.env.AGENT_ENROLLMENT_TOKEN;
@@ -68,6 +74,17 @@ const agent = new LocalTerminalAgent({
   maxLifetimeMs: intEnv('TERMINAL_MAX_LIFETIME_MS', 8 * 60 * 60_000),
   closedSessionRetentionMs: intEnv('TERMINAL_CLOSED_SESSION_RETENTION_MS', 15 * 60_000),
   sweepIntervalMs: intEnv('TERMINAL_SWEEP_INTERVAL_MS', 30_000),
+  terminationGraceMs: intEnv('TERMINAL_TERMINATION_GRACE_MS', 750),
+  outputFlushIntervalMs: intEnv('TERMINAL_OUTPUT_FLUSH_INTERVAL_MS', 8),
+  outputFlushBytes: intEnv('TERMINAL_OUTPUT_FLUSH_BYTES', 32 * 1024),
+  ...(process.env.TERMINAL_EVENT_JOURNAL_DIR
+    ? {
+        eventJournalDir: process.env.TERMINAL_EVENT_JOURNAL_DIR,
+        eventJournalMaxBytes: intEnv('TERMINAL_EVENT_JOURNAL_MAX_BYTES', 8 * 1024 * 1024),
+        eventJournalRetentionMs: intEnv('TERMINAL_EVENT_JOURNAL_RETENTION_MS', 7 * 24 * 60 * 60_000),
+        eventJournalIncludeInput: boolEnv('TERMINAL_EVENT_JOURNAL_INCLUDE_INPUT', false),
+      }
+    : {}),
   workspaceRootsStatePath: process.env.AGENT_WORKSPACE_ROOTS_STATE_PATH ?? join(dirname(identityPath), 'workspace-roots.json'),
   stateDir: process.env.AGENT_SESSION_STATE_DIR ?? join(dirname(identityPath), 'sessions'),
 });

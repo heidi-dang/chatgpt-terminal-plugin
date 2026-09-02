@@ -93,18 +93,17 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
 
   async connect(): Promise<void> {
     if (this.listening) return;
+    this.listening = true;
+    window.addEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
     const openAi = getChatGptOpenAiCompat();
     if (openAi) {
-      this.listening = true;
       this.openAi = openAi;
-      window.addEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
       const initial = normalizeCompatCallToolResult(openAi.toolOutput);
       if (initial) this.ontoolresult?.(initial);
       if (typeof openAi.theme === 'string') this.onhostcontextchanged?.({ theme: openAi.theme });
       return;
     }
 
-    this.listening = true;
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
@@ -112,6 +111,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
+      if (this.openAi) return;
       if (isRecord(initialized.hostContext)) this.onhostcontextchanged?.(initialized.hostContext);
       this.notify('ui/notifications/initialized', {});
       this.startAutoResize();
@@ -147,7 +147,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     if (this.resizeFrame !== undefined) window.cancelAnimationFrame(this.resizeFrame);
     this.resizeFrame = undefined;
     for (const pending of this.pending.values()) {
-      window.clearTimeout(pending.timer);
+      clearTimeout(pending.timer);
       pending.reject(new Error('MCP App bridge closed.'));
     }
     this.pending.clear();
@@ -155,6 +155,11 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
   }
 
   private readonly handleOpenAiGlobals = (event: CustomEvent<unknown>): void => {
+    const openAi = getChatGptOpenAiCompat();
+    if (!this.openAi && openAi) {
+      this.openAi = openAi;
+      this.done(1, {});
+    }
     const detail = isRecord(event.detail) ? event.detail : undefined;
     const globals = detail && isRecord(detail.globals) ? detail.globals : undefined;
     if (!globals) return;
@@ -171,15 +176,9 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     if (message.jsonrpc !== '2.0') return;
 
     if (typeof message.id === 'number' && ('result' in message || 'error' in message)) {
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      window.clearTimeout(pending.timer);
-      if (isRecord(message.error)) {
-        pending.reject(new Error(typeof message.error.message === 'string' ? message.error.message : 'MCP App request failed.'));
-      } else {
-        pending.resolve(message.result);
-      }
+      this.done(message.id, message.result, isRecord(message.error)
+        ? new Error(typeof message.error.message === 'string' ? message.error.message : 'MCP App request failed.')
+        : undefined);
       return;
     }
 
@@ -190,6 +189,15 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     }
     this.handleNotification(message.method, isRecord(message.params) ? message.params : {});
   };
+
+  private done(id: number, result: unknown, error?: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    if (error) pending.reject(error);
+    else pending.resolve(result);
+  }
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
     if (method === 'ui/notifications/tool-result') {
@@ -415,14 +423,15 @@ export function appendRichTerminalText(container: HTMLElement, input: string, ov
     at = pos + match[0].length;
   }
   add(input.slice(at));
-  const text = out.textContent ?? '', lines = text.split('\n'), nl = text.endsWith('\n');
-  if (nl) lines.pop();
+  const text = out.textContent ?? '';
   const reduced = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  if (overflow && !reduced && text.length < 4096 && lines.length > 2) {
-    const cut = 1 + Math.floor(Math.random() * (lines.length - 1));
-    lines.push(...lines.splice(0, cut));
-    const slot = doc.createElement('span'); slot.className = 'term-overflow'; slot.textContent = lines.join('\n') + (nl ? '\n' : '');
-    container.appendChild(slot); setTimeout(() => slot.replaceWith(out), 180); return;
+  if (overflow && !reduced && text.length < 4096 && text.indexOf('\n') !== text.lastIndexOf('\n')) {
+    const slot = doc.createElement('span');
+    slot.className = 'term-overflow';
+    slot.appendChild(out);
+    container.appendChild(slot);
+    setTimeout(() => slot.replaceWith(...slot.childNodes), 180);
+    return;
   }
   container.appendChild(out);
 }
@@ -485,12 +494,21 @@ function terminalErrorCode(result: CallToolResult): string | undefined {
   return match?.[1];
 }
 
+type TerminalEventSource = EventSource & { t?: number };
+
+function closeTerminalSource(source?: TerminalEventSource): void {
+  if (!source) return;
+  clearTimeout(source.t);
+  source.close();
+}
+
 export class TerminalViewer {
   private viewState: TerminalViewState | null = null;
   private streamState: StreamState = 'connecting';
-  private eventSource: EventSource | undefined;
+  private eventSource: TerminalEventSource | undefined;
   private lastSequence = 0;
-  private refreshInFlight = false;
+  private refreshId = 0;
+  private refreshing = false;
   private reconnectAttempt = 0;
   private reconnectTimer: number | undefined;
   private refreshTimer: number | undefined;
@@ -535,15 +553,9 @@ export class TerminalViewer {
       const theme = context.theme;
       if (typeof theme === 'string') this.doc.documentElement.dataset.theme = theme;
     };
-    this.app.onteardown = async () => {
-      this.stopSurfaceSync();
-      try {
-        await this.callTool('terminal_turn_close', {});
-      } catch (error) {
-        console.error('[terminal-app] turn cleanup failed', error);
-      }
+    this.app.onteardown = () => {
       this.destroy();
-      return {};
+      return Promise.resolve({});
     };
     this.app.onerror = (error) => {
       console.error('[terminal-app]', error);
@@ -590,7 +602,9 @@ export class TerminalViewer {
       if (!canSwitch) return;
       this.viewState = mergeViewState(this.viewState, next);
       if (previousSession !== next.session_id) {
-        this.eventSource?.close();
+        this.refreshId += 1;
+        this.refreshing = false;
+        closeTerminalSource(this.eventSource);
         this.eventSource = undefined;
         this.clearReconnectTimer();
         this.clearRefreshTimer();
@@ -612,11 +626,8 @@ export class TerminalViewer {
 
   destroy(): void {
     this.stopSurfaceSync();
-    this.eventSource?.close();
-    this.eventSource = undefined;
-    this.clearReconnectTimer();
-    this.clearRefreshTimer();
-    this.stopReadFallback();
+    this.finishStream();
+    this.surfaceId = undefined;
     this.flushOutput();
   }
 
@@ -651,23 +662,25 @@ export class TerminalViewer {
   }
 
   private useStream(meta: TerminalStreamMeta): void {
+    const ttl = Date.parse(meta.expires_at) - Date.now();
+    if (ttl <= STREAM_REFRESH_MARGIN_MS) return this.refreshStream(true);
     this.connectTerminalStream(meta);
-    this.scheduleCapabilityRefresh(meta);
+    this.scheduleCapabilityRefresh(ttl);
   }
 
   private connectTerminalStream(meta: TerminalStreamMeta): void {
-    this.eventSource?.close();
+    closeTerminalSource(this.eventSource);
     if (!this.viewState || isFinalStatus(this.viewState.status)) return;
     if (!this.readFallbackActive) {
       this.transportMode = 'sse';
       this.streamState = 'connecting';
       this.renderState();
     }
-    const source = new EventSource(meta.url);
+    const source = new EventSource(meta.url) as TerminalEventSource;
     this.eventSource = source;
-    window.setTimeout(() => {
+    source.t = window.setTimeout(() => {
       if (this.eventSource !== source || this.streamState !== 'connecting' || isFinalStatus(this.viewState?.status)) return;
-      source.close();
+      closeTerminalSource(source);
       this.eventSource = undefined;
       this.startReadFallback();
       this.scheduleStreamReconnect();
@@ -675,6 +688,7 @@ export class TerminalViewer {
 
     source.onopen = () => {
       if (this.eventSource !== source) return;
+      clearTimeout(source.t);
       this.stopReadFallback();
       this.transportMode = 'sse';
       this.reconnectAttempt = 0;
@@ -683,13 +697,9 @@ export class TerminalViewer {
     };
     source.onerror = () => {
       if (this.eventSource !== source || isFinalStatus(this.viewState?.status)) return;
-      source.close();
+      closeTerminalSource(source);
       this.eventSource = undefined;
       this.startReadFallback();
-      if (!this.readFallbackActive) {
-        this.streamState = 'reconnecting';
-        this.renderState();
-      }
       this.scheduleStreamReconnect();
     };
     source.onmessage = (message) => {
@@ -699,10 +709,9 @@ export class TerminalViewer {
         this.acceptEvent(parseTerminalEvent(message.data), source);
       } catch (error) {
         console.error('[terminal-app] invalid SSE event', error);
-        source.close();
+        closeTerminalSource(source);
         if (this.eventSource === source) this.eventSource = undefined;
-        this.streamState = 'reconnecting';
-        this.renderState();
+        this.startReadFallback();
         this.scheduleStreamReconnect();
       }
     };
@@ -714,7 +723,7 @@ export class TerminalViewer {
     if (sequenceState === 'gap') {
       console.error('[terminal-app] terminal sequence gap', { expected: this.lastSequence + 1, received: event.sequence });
       if (source) {
-        source.close();
+        closeTerminalSource(source);
         if (this.eventSource === source) this.eventSource = undefined;
         this.streamState = 'reconnecting';
         this.renderState();
@@ -747,7 +756,9 @@ export class TerminalViewer {
   }
 
   private finishStream(): void {
-    this.eventSource?.close();
+    this.refreshId += 1;
+    this.refreshing = false;
+    closeTerminalSource(this.eventSource);
     this.eventSource = undefined;
     this.clearReconnectTimer();
     this.clearRefreshTimer();
@@ -840,6 +851,7 @@ export class TerminalViewer {
 
   private async resynchronizeCursor(sessionId: string): Promise<void> {
     const statusResult = await this.callTool('terminal_status', { session_id: sessionId });
+    if (this.viewState?.session_id !== sessionId) return;
     const status = parseViewState(statusResult);
     if (statusResult.isError || !status) throw new Error('Unable to resynchronize terminal cursor.');
     if (status.cursor > this.lastSequence) this.queueOutput('\n[Live output gap: older terminal output was no longer retained]\n');
@@ -862,30 +874,37 @@ export class TerminalViewer {
 
   private refreshStream(retryOnFailure: boolean): void {
     const current = this.viewState;
-    if (!current || isFinalStatus(current.status) || this.refreshInFlight) return;
+    if (!current || isFinalStatus(current.status) || this.refreshing) return;
+    const sessionId = current.session_id;
+    const refreshId = ++this.refreshId;
+    const stale = () => refreshId !== this.refreshId;
     this.clearReconnectTimer();
-    this.refreshInFlight = true;
+    this.refreshing = true;
     if (!this.readFallbackActive) {
       this.transportMode = 'sse';
       this.streamState = 'reconnecting';
       this.renderState();
     }
     void this.callTool('terminal_stream_refresh', {
-      session_id: current.session_id,
+      session_id: sessionId,
       after: this.lastSequence,
     }).then(async (result) => {
+      if (stale()) return;
       if (result.isError && terminalErrorCode(result) === 'INVALID_CURSOR') {
-        await this.resynchronizeCursor(current.session_id);
+        await this.resynchronizeCursor(sessionId);
+        if (stale()) return;
         result = await this.callTool('terminal_stream_refresh', {
-          session_id: current.session_id,
+          session_id: sessionId,
           after: this.lastSequence,
         });
+        if (stale()) return;
       }
       if (result.isError) throw new Error(`Terminal stream refresh failed: ${terminalErrorCode(result) ?? 'unknown error'}`);
       const refreshed = parseStreamMeta(result);
       if (!refreshed) throw new Error('Terminal stream refresh returned no stream capability.');
       this.useStream(refreshed);
     }).catch((error) => {
+      if (stale()) return;
       console.error('[terminal-app] stream refresh failed', error);
       this.startReadFallback();
       if (!this.readFallbackActive) {
@@ -895,15 +914,14 @@ export class TerminalViewer {
       }
       if (retryOnFailure) this.scheduleStreamReconnect();
     }).finally(() => {
-      this.refreshInFlight = false;
+      if (!stale()) this.refreshing = false;
     });
   }
 
-  private scheduleCapabilityRefresh(meta: TerminalStreamMeta): void {
+  private scheduleCapabilityRefresh(ttl: number): void {
     this.clearRefreshTimer();
-    const expiry = Date.parse(meta.expires_at);
-    if (!Number.isFinite(expiry)) return;
-    const delay = Math.max(1_000, expiry - Date.now() - STREAM_REFRESH_MARGIN_MS);
+    if (!Number.isFinite(ttl)) return;
+    const delay = Math.max(1_000, ttl - STREAM_REFRESH_MARGIN_MS);
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = undefined;
       this.refreshStream(true);
@@ -927,14 +945,16 @@ export class TerminalViewer {
       this.outputFrame = undefined;
     }
     if (!this.outputQueue) return;
+    const output = this.output;
     if (!this.hasLiveOutput) {
-      this.output.textContent = '';
+      output.textContent = '';
       this.hasLiveOutput = true;
     }
-    appendRichTerminalText(this.output, this.outputQueue, true);
+    const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+    appendRichTerminalText(output, this.outputQueue, true);
     this.outputQueue = '';
     this.trimOutput();
-    this.output.scrollTop = this.output.scrollHeight;
+    if (follow) output.scrollTop = output.scrollHeight;
   }
 
   private trimOutput(): void {
@@ -976,19 +996,19 @@ export class TerminalViewer {
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer === undefined) return;
-    window.clearTimeout(this.reconnectTimer);
+    clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
   }
 
   private clearRefreshTimer(): void {
     if (this.refreshTimer === undefined) return;
-    window.clearTimeout(this.refreshTimer);
+    clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
   }
 
   private clearReadRetryTimer(): void {
     if (this.readRetryTimer === undefined) return;
-    window.clearTimeout(this.readRetryTimer);
+    clearTimeout(this.readRetryTimer);
     this.readRetryTimer = undefined;
   }
 }

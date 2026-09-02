@@ -4,6 +4,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+  GATEWAY_MAX_PAYLOAD_BYTES,
   TerminalProtocolError,
   agentResponseSchema,
   agentSessionSnapshotSchema,
@@ -61,6 +62,7 @@ interface AgentConnection {
 
 interface PendingRequest {
   agentId: string;
+  socket: WebSocket;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -98,7 +100,7 @@ export interface AgentGatewayOptions {
 export class AgentGateway {
   // Limit individual WebSocket message size to prevent memory exhaustion from oversized payloads.
   // Terminal events rarely exceed a few KB; 2 MB provides generous headroom while bounding risk.
-  readonly webSocketServer = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+  readonly webSocketServer = new WebSocketServer({ noServer: true, maxPayload: GATEWAY_MAX_PAYLOAD_BYTES });
   private readonly agents = new Map<string, AgentConnection>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, SessionRecord>();
@@ -532,7 +534,9 @@ export class AgentGateway {
           if (verified.owner_id !== ownerId) throw new TerminalProtocolError('PERMISSION_DENIED', 'Device owner changed during authentication.');
           this.usedAuthNonces.set(nonce, expiresAtMs);
           authenticated = true;
-          void this.options.deviceRegistry.markSeen(deviceId);
+          void this.options.deviceRegistry.markSeen(deviceId).catch((error) => {
+            console.error(JSON.stringify({ level: 'error', event: 'gateway.mark_seen_failed', device_id: deviceId, error: errorMessage(error) }));
+          });
           socket.send(JSON.stringify({ type: 'auth.accepted', server_time: new Date().toISOString() }));
           return;
         }
@@ -667,7 +671,7 @@ export class AgentGateway {
       }
 
       for (const [requestId, pending] of this.pending) {
-        if (pending.agentId !== registeredAgentId) continue;
+        if (pending.agentId !== registeredAgentId || pending.socket !== socket) continue;
         clearTimeout(pending.timer);
         pending.reject(new TerminalProtocolError('AGENT_OFFLINE', 'Agent disconnected while handling the request.', true));
         this.pending.delete(requestId);
@@ -705,6 +709,7 @@ export class AgentGateway {
       timer.unref();
       this.pending.set(command.request_id, {
         agentId: connection.agent.agent_id,
+        socket: connection.socket,
         resolve: resolve as (result: unknown) => void,
         reject,
         timer,

@@ -48,6 +48,19 @@ pnpm test:e2e
 
 The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v12.html` MCP App resource. The terminal UI build also enforces a 30,000-byte single-file mobile bundle budget; override `TERMINAL_UI_MAX_BUNDLE_BYTES` only for an intentional, reviewed budget change.
 
+### Source release artifact
+
+Do not keep generated source archives under `deploy/`: they silently become stale as security and lifecycle fixes land. After the complete verification gate passes, create a source artifact from the exact Git commit you intend to deploy:
+
+```bash
+mkdir -p artifacts
+RELEASE_COMMIT="$(git rev-parse --verify HEAD)"
+git diff --quiet && git diff --cached --quiet
+git archive --format=tar.gz --output="artifacts/chatgpt-terminal-plugin-${RELEASE_COMMIT:0:12}.tgz" "$RELEASE_COMMIT"
+```
+
+The `artifacts/` directory is ignored by Git. Record the full commit ID alongside the artifact and deploy only a commit that has passed the repository quality gate. `git archive` packages the tracked tree for that commit, including the current installer, CI workflow, protocol, server, agent, Terminal UI, deployment templates, and documentation, without accidentally snapshotting `node_modules`, local secrets, or uncommitted edits.
+
 ### Terminal UI release model
 
 The v12 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`. Production widgets do not open a second stylesheet hot-reload stream; this keeps the single-file mobile bundle smaller and removes an always-on EventSource. CSS, HTML, and JavaScript changes are released through the versioned MCP App resource and the normal connector rescan/refresh process. The legacy `/terminal-ui/reload` endpoint may remain available for development tooling, but production UI correctness must never depend on it.
@@ -64,6 +77,7 @@ Production requires at minimum:
 - `STREAM_TOKEN_SECRET` with at least 32 bytes
 - `AGENT_DEVICE_REGISTRY_PATH`
 - `AGENT_ENROLLMENT_TOKEN`
+- finite positive `TERMINAL_MAX_SESSIONS_PER_USER` and `TERMINAL_MAX_SESSIONS_PER_AGENT` values sized for the host
 - appropriate audit/transcript paths and retention
 
 Set `MCP_DEFAULT_EXECUTION_PROFILE` to the least privilege appropriate for tokens that do not carry an explicit profile claim. `TERMINAL_CLOSED_SESSION_RETENTION_MS` controls how long final session metadata/events remain available for status, UI reconnect, and post-mortem reads before agent/server memory is released. Use `deploy/server-environment.example` as the complete non-secret template; the runtime rejects malformed public URLs, insecure production OAuth endpoints, empty required scopes, and route collisions at startup.
@@ -104,18 +118,18 @@ The stream capability is carried in a URL query parameter because browser `Event
 
 ## Server service
 
-Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-environment.example` as starting points. Recommended properties:
+Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-environment.example` as starting points. The service runs the already-built Node entrypoint directly, so `pnpm` is not required on the production service `PATH` after `./install.sh` completes; Node.js 22+ still must be resolvable by the service. Recommended properties:
 
 - run as a dedicated unprivileged OS account
 - working directory is the checked-out release
 - secrets live in an owner/root-readable environment file outside Git
 - restart on failure
 - bind the Node service to loopback when a local reverse proxy is used
-- persist the device registry and logs on a protected local path
+- persist the device registry and logs on protected local paths; the provided systemd unit uses `StateDirectory=chatgpt-terminal` and `LogsDirectory=chatgpt-terminal` with `0700` modes so `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` are created and owned for the service automatically
 
 ## Local-agent installation
 
-The local computer requires the same built repository or a packaged agent distribution. `deploy/local-agent-environment.example` and `deploy/systemd/chatgpt-terminal-agent.service.example` provide a user-service baseline. Run the agent as the OS user whose tools/workspaces it is intentionally allowed to access; do not run it as root.
+The local computer requires the same built repository or a packaged agent distribution. `deploy/local-agent-environment.example` and `deploy/systemd/chatgpt-terminal-agent.service.example` provide a user-service baseline. The user service runs the built Node entrypoint directly; `pnpm` is needed to install/build the release but is not a runtime service dependency. Ensure Node.js 22+ is on the systemd user service `PATH`. Run the agent as the OS user whose tools/workspaces it is intentionally allowed to access; do not run it as root.
 
 Configure:
 
@@ -141,7 +155,7 @@ After successful enrollment, remove the enrollment token from the persistent ser
 A trusted server administrator with local filesystem access can enroll a public device record without reading the bootstrap token by using the server-only admin CLI. This is not an HTTP endpoint and should be run as the OS account that owns the registry so ownership remains correct:
 
 ```bash
-sudo -u terminal-mcp node packages/mcp-server/dist/admin.js \
+sudo -u chatgpt-terminal node packages/mcp-server/dist/admin.js \
   enroll /var/lib/chatgpt-terminal/devices.json /path/to/device-enrollment.json
 ```
 
@@ -173,7 +187,7 @@ Protect at minimum:
 - containing secret/identity directories: owner-only
 - transcript/audit files according to your data-retention policy
 
-The application creates its device identity and registry with owner-only modes and serializes audit/transcript writes with retention pruning. Deployment ownership should still be validated after installation.
+The application creates its device identity and registry with owner-only modes and serializes audit/transcript writes with retention pruning. Deployment ownership should still be validated after installation. When using the provided server systemd unit, systemd creates the default `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` directories with owner-only modes; custom paths must be provisioned and permissioned separately.
 
 `developer` mode canonicalizes the requested launch directory and rejects symlink/path escapes outside configured roots. It does **not** sandbox arbitrary commands after the shell starts. Use a dedicated OS account, container/VM, or OS mandatory-access controls if filesystem/process containment beyond normal user permissions is required.
 
