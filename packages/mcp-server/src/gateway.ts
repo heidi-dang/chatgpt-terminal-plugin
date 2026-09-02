@@ -477,7 +477,9 @@ export class AgentGateway {
           if (verified.owner_id !== ownerId) throw new TerminalProtocolError('PERMISSION_DENIED', 'Device owner changed during authentication.');
           this.usedAuthNonces.set(nonce, expiresAtMs);
           authenticated = true;
-          void this.options.deviceRegistry.markSeen(deviceId);
+          void this.options.deviceRegistry.markSeen(deviceId).catch((error) => {
+            console.error(JSON.stringify({ level: 'error', event: 'gateway.mark_seen_failed', device_id: deviceId, error: errorMessage(error) }));
+          });
           socket.send(JSON.stringify({ type: 'auth.accepted', server_time: new Date().toISOString() }));
           return;
         }

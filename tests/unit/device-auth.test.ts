@@ -3,7 +3,7 @@ import { stat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayAuthChallengeSchema, gatewayChallengePayload } from '../../packages/protocol/src/index.js';
 import { DeviceIdentity } from '../../packages/local-agent/src/device-identity.js';
 import { DeviceRegistry } from '../../packages/mcp-server/src/device-registry.js';
@@ -131,6 +131,59 @@ describe('device identity and enrollment', () => {
     const closed = waitForClose(socket);
     socket.send(JSON.stringify(proof));
     expect(await closed).toBe(1008);
+  });
+
+  it('contains best-effort last-seen persistence failures after successful gateway authentication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-mark-seen-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registry = await DeviceRegistry.load(join(root, 'devices.json'), 'enrollment-token');
+    await registry.enroll({
+      device_id: identity.deviceId,
+      agent_id: identity.agentId,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }, 'enrollment-token');
+    vi.spyOn(registry, 'markSeen').mockRejectedValue(new Error('last-seen persistence failed'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup.push(() => errorSpy.mockRestore());
+
+    const gateway = new AgentGateway({
+      requestTimeoutMs: 1000,
+      maxRetainedBytesPerSession: 1024 * 1024,
+      closedSessionRetentionMs: 60_000,
+      sessionSweepIntervalMs: 10_000,
+      deviceRegistry: registry,
+      authChallengeTtlMs: 5000,
+    });
+    cleanup.push(() => gateway.closeAll());
+    const server = createServer();
+    server.on('upgrade', (request, socket, head) => gateway.handleUpgrade(request, socket, head));
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate mark-seen failure test port.');
+
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/agent`, {
+      headers: { 'x-terminal-device-id': identity.deviceId },
+    });
+    cleanup.push(() => socket.close());
+    const challenge = gatewayAuthChallengeSchema.parse(await nextMessage(socket));
+    socket.send(JSON.stringify({
+      type: 'auth.proof',
+      device_id: identity.deviceId,
+      nonce: challenge.nonce,
+      issued_at: challenge.issued_at,
+      signature: identity.signChallenge(challenge),
+    }));
+
+    expect(await nextMessage(socket)).toMatchObject({ type: 'auth.accepted' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('gateway.mark_seen_failed'));
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it('rejects enrollment with the wrong administrative token and owner reassignment', async () => {
