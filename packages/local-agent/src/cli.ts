@@ -64,7 +64,14 @@ const agent = new LocalTerminalAgent({
   maxLifetimeMs: intEnv('TERMINAL_MAX_LIFETIME_MS', 8 * 60 * 60_000),
   closedSessionRetentionMs: intEnv('TERMINAL_CLOSED_SESSION_RETENTION_MS', 15 * 60_000),
   sweepIntervalMs: intEnv('TERMINAL_SWEEP_INTERVAL_MS', 30_000),
+  ...(process.env.AGENT_AUDIT_LOG_PATH ? { auditLogPath: process.env.AGENT_AUDIT_LOG_PATH } : {}),
 });
+
+// AGENT_CONTROL_QUEUE_LIMIT is documented in the example environment but is not yet consumed
+// by the AgentGatewayClient (GatewayClientOptions has no controlQueueLimit field in this version).
+if (process.env.AGENT_CONTROL_QUEUE_LIMIT) {
+  console.warn(JSON.stringify({ level: 'warn', event: 'agent.config', message: 'AGENT_CONTROL_QUEUE_LIMIT is set but not yet consumed by this version.' }));
+}
 
 const client = new AgentGatewayClient(agent, {
   url: parsedGatewayUrl.href,

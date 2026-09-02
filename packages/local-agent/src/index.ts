@@ -2,11 +2,13 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { constants, readlinkSync, realpathSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
+import { AuditLogger } from './audit-logger.js';
 import {
   TerminalProtocolError,
   type Agent,
@@ -39,6 +41,9 @@ export interface LocalTerminalAgentOptions {
   maxLifetimeMs?: number;
   closedSessionRetentionMs?: number;
   sweepIntervalMs?: number;
+  /** Maximum number of concurrent terminal sessions. Unlimited when not set. */
+  maxSessions?: number;
+  auditLogPath?: string;
 }
 
 export interface AgentSessionSnapshot {
@@ -74,6 +79,8 @@ export interface TerminalAgentApi {
   readFile(sessionId: string, path: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }>;
   listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
   writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
+  deleteFile(sessionId: string, filePath: string): Promise<{ path: string }>;
+  renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }>;
   searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
   executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput>;
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput;
@@ -91,6 +98,8 @@ const CONTROL_PLANE_SECRET_ENV = new Set([
   'STREAM_TOKEN_SECRET',
   'OAUTH_CLIENT_SECRET',
 ]);
+
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '__pycache__', 'vendor', 'target', 'out', 'coverage', '.next', '.nuxt']);
 
 export function cleanEnvironment(): Record<string, string> {
   return Object.fromEntries(
@@ -112,21 +121,39 @@ function errorMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Simple glob matching for file include filters (e.g. "*.ts", "*.{js,jsx}"). */
+/** Glob matching for file include filters.
+ * Handles basename patterns:
+ *   *.ext            — simple extension match
+ *   *.{ext1,ext2}    — brace-expanded extension match
+ *   {ext1,ext2}      — bare brace alternation (matched against full basename)
+ *   **\/*.ext        — any-depth wildcard; basename portion is matched
+ *   exact            — exact filename match (no wildcards)
+ */
 function matchGlob(filename: string, pattern: string): boolean {
-  // Handle {a,b} alternation
-  const braceMatch = pattern.match(/^(.*)\.\{([^}]+)\}$/);
-  const extensionGroup = braceMatch?.[2];
-  if (extensionGroup) {
-    const extensions = extensionGroup.split(',');
+  // Strip leading **/ segments — we only match against the basename here.
+  const normalised = pattern.replace(/^(?:\.\.\/|\*\*\/)+/, '');
+
+  // Handle *.{ext1,ext2,...} or **/*.{ext1,ext2,...}
+  const starBraceMatch = normalised.match(/^\*\.\{([^}]+)\}$/);
+  if (starBraceMatch) {
+    const extensions = (starBraceMatch[1] ?? '').split(',').map((e) => e.trim());
     return extensions.some((ext) => filename.endsWith('.' + ext));
   }
-  // Handle simple *.ext
-  if (pattern.startsWith('*.')) {
-    return filename.endsWith(pattern.slice(1));
+
+  // Handle bare {ext1,ext2,...} alternation — each branch matched as a full pattern
+  const bareBraceMatch = normalised.match(/^\{([^}]+)\}$/);
+  if (bareBraceMatch) {
+    const branches = (bareBraceMatch[1] ?? '').split(',').map((b) => b.trim());
+    return branches.some((branch) => matchGlob(filename, branch));
   }
-  // Exact match
-  return filename === pattern;
+
+  // Handle *.ext or **/*.ext
+  if (normalised.startsWith('*.')) {
+    return filename.endsWith(normalised.slice(1));
+  }
+
+  // Exact filename match (no wildcards remaining)
+  return filename === normalised;
 }
 
 /** Read a file as UTF-8 text, returning null if it's binary or too large. */
@@ -260,12 +287,14 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly idleTimeoutMs: number;
   private readonly maxLifetimeMs: number;
   private readonly closedSessionRetentionMs: number;
+  private readonly maxSessions: number | undefined;
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly agent: Agent;
   private readonly workspacePolicy: WorkspacePolicy;
   private readonly executionWorkspacePolicy: WorkspacePolicy;
   private readonly codeExecutor: CodeBlockExecutor;
   private readonly lspManager: LspManager;
+  private readonly auditLogger: AuditLogger;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -274,6 +303,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000;
     this.maxLifetimeMs = options.maxLifetimeMs ?? 8 * 60 * 60_000;
     this.closedSessionRetentionMs = options.closedSessionRetentionMs ?? 15 * 60_000;
+    this.maxSessions = options.maxSessions;
     const now = new Date().toISOString();
     this.agent = {
       agent_id: options.agentId ?? randomUUID(),
@@ -282,6 +312,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       display_name: options.displayName ?? os.hostname(),
       platform: process.platform,
       architecture: process.arch,
+      os_version: `${os.type()} ${os.release()}`,
+      node_version: process.version,
       online: true,
       capabilities: {
         pty: true,
@@ -301,6 +333,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
+    this.auditLogger = new AuditLogger(options.auditLogPath);
   }
 
   describe(): Agent {
@@ -325,6 +358,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const shell = input.shell ?? this.shells[0];
     if (!shell || !this.shells.includes(shell)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Requested shell is not enabled for this agent.');
+    }
+
+    if (this.maxSessions !== undefined && this.sessions.size >= this.maxSessions) {
+      throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Maximum number of concurrent terminal sessions has been reached.');
     }
 
     const sessionId = randomUUID();
@@ -400,6 +437,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     });
 
     this.recordEvent(managed, 'agent', 'session.started', { cwd, shell, cols: input.cols, rows: input.rows, execution_profile: effectiveProfile });
+    this.auditLogger.log({ event: 'session.start', userId, sessionId, shell, cwd, profile: effectiveProfile });
     if (input.command) {
       this.write(sessionId, `${input.command}\r`, 'chatgpt');
     }
@@ -489,7 +527,6 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     try {
       const info = await stat(resolved);
       if (!info.isFile()) throw new TerminalProtocolError('INVALID_ARGUMENT', 'Path is not a regular file.');
-      if (info.size > maxBytes * 4) throw new TerminalProtocolError('FILE_TOO_LARGE', `File is ${info.size} bytes; max allowed is ${maxBytes * 4}.`);
       const buffer = Buffer.alloc(Math.min(info.size, maxBytes));
       const fd = await open(resolved, 'r');
       try {
@@ -517,19 +554,20 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       const dirents = await readdir(resolved, { withFileTypes: true });
       const entries: Array<{ name: string; type: string; size: number; modified_at: string }> = [];
       const truncated = dirents.length > maxEntries;
-      for (const dirent of dirents.slice(0, maxEntries)) {
-        try {
-          const entryPath = resolve(resolved, dirent.name);
-          const info = await lstat(entryPath).catch(() => null);
-          entries.push({
-            name: dirent.name,
-            type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : dirent.isFile() ? 'file' : 'other',
-            size: info?.size ?? 0,
-            modified_at: info ? new Date(info.mtimeMs).toISOString() : new Date().toISOString(),
-          });
-        } catch {
-          // Skip entries we can't stat (permission denied, etc.)
-        }
+      const sliced = dirents.slice(0, maxEntries);
+      const statResults = await Promise.allSettled(
+        sliced.map((dirent) => lstat(resolve(resolved, dirent.name))),
+      );
+      for (let i = 0; i < sliced.length; i += 1) {
+        const dirent = sliced[i]!;
+        const statResult = statResults[i];
+        const info = statResult?.status === 'fulfilled' ? statResult.value : null;
+        entries.push({
+          name: dirent.name,
+          type: dirent.isDirectory() ? 'directory' : dirent.isSymbolicLink() ? 'symlink' : dirent.isFile() ? 'file' : 'other',
+          size: info?.size ?? 0,
+          modified_at: info ? new Date(info.mtimeMs).toISOString() : new Date().toISOString(),
+        });
       }
       return {
         path: relative(managed.metadata.cwd, resolved) || resolved,
@@ -566,19 +604,20 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       }
 
       const buffer = Buffer.from(content, 'utf8');
-      const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
-      const handle = await open(resolved, constants.O_WRONLY | constants.O_CREAT | noFollow, 0o644);
+      const tmpPath = resolved + '.tmp.' + randomUUID();
+      const handle = await open(tmpPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o644);
       try {
-        if (process.platform === 'linux') {
-          this.workspacePolicy.resolveExistingPath(`/proc/self/fd/${handle.fd}`);
-        }
-        await handle.truncate(0);
         await handle.writeFile(buffer);
-      } finally {
         await handle.close();
+        await rename(tmpPath, resolved);
+      } finally {
+        await handle.close().catch(() => undefined);
+        await unlink(tmpPath).catch(() => undefined);
       }
+      const resultPath = relative(managed.metadata.cwd, resolved) || resolved;
+      this.auditLogger.log({ event: 'file.write', userId: managed.metadata.user_id, sessionId, path: resultPath, bytes: buffer.length });
       return {
-        path: relative(managed.metadata.cwd, resolved) || resolved,
+        path: resultPath,
         bytes_written: buffer.length,
       };
     } catch (error) {
@@ -613,6 +652,37 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     let truncated = false;
     const maxFilesSearched = 10_000;
 
+    /** Search one file; returns true if maxResults was hit (truncated). */
+    const searchSingleFile = async (
+      filePath: string,
+      relPath: string,
+      _regex: RegExp,
+      _contextLines: number,
+      _maxResults: number,
+      _matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>,
+    ): Promise<boolean> => {
+      const content = await readFileContent(filePath, 512 * 1024); // max 512KB per file
+      if (content === null) return false; // binary or too large
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        const lineText = lines[i] ?? '';
+        if (_regex.test(lineText)) {
+          const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
+            file: relPath,
+            line: i + 1,
+            text: lineText.slice(0, 500),
+          };
+          if (_contextLines > 0) {
+            match.context_before = lines.slice(Math.max(0, i - _contextLines), i).map(l => l.slice(0, 500));
+            match.context_after = lines.slice(i + 1, i + 1 + _contextLines).map(l => l.slice(0, 500));
+          }
+          _matches.push(match);
+          if (_matches.length >= _maxResults) return true;
+        }
+      }
+      return false;
+    };
+
     const walk = async (dir: string): Promise<void> => {
       if (truncated) return;
       let dirents;
@@ -624,9 +694,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       for (const dirent of dirents) {
         if (truncated) return;
         const entryPath = resolve(dir, dirent.name);
-        // Skip hidden dirs, node_modules, .git
-        if (dirent.name.startsWith('.') || dirent.name === 'node_modules') continue;
-        if (dirent.isDirectory()) {
+        // Skip hidden dirs and known large/irrelevant directories
+        if (dirent.name.startsWith('.') || SKIP_DIRS.has(dirent.name)) continue;
+        if (dirent.isDirectory() && !dirent.isSymbolicLink()) {
           await walk(entryPath);
         } else if (dirent.isFile()) {
           if (filesSearched >= maxFilesSearched) {
@@ -637,28 +707,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
           if (include && !matchGlob(dirent.name, include)) continue;
           filesSearched += 1;
           try {
-            const content = await readFileContent(entryPath, 512 * 1024); // max 512KB per file
-            if (content === null) continue; // binary or too large
-            const lines = content.split('\n');
-            for (let i = 0; i < lines.length; i += 1) {
-              const lineText = lines[i] ?? '';
-              if (regex.test(lineText)) {
-                const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                  file: relative(managed.metadata.cwd, entryPath) || entryPath,
-                  line: i + 1,
-                  text: lineText.slice(0, 500),
-                };
-                if (contextLines > 0) {
-                  match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                  match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-                }
-                matches.push(match);
-                if (matches.length >= maxResults) {
-                  truncated = true;
-                  return;
-                }
-              }
-            }
+            const relPath = relative(managed.metadata.cwd, entryPath) || entryPath;
+            const wasTruncated = await searchSingleFile(entryPath, relPath, regex, contextLines, maxResults, matches);
+            if (wasTruncated) { truncated = true; return; }
           } catch {
             // skip unreadable files
           }
@@ -670,26 +721,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       // Search single file
       filesSearched = 1;
       try {
-        const content = await readFileContent(resolved, 512 * 1024);
-        if (content !== null) {
-          const lines = content.split('\n');
-          for (let i = 0; i < lines.length; i += 1) {
-            const lineText = lines[i] ?? '';
-            if (regex.test(lineText)) {
-              const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                file: relative(managed.metadata.cwd, resolved) || resolved,
-                line: i + 1,
-                text: lineText.slice(0, 500),
-              };
-              if (contextLines > 0) {
-                match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-              }
-              matches.push(match);
-              if (matches.length >= maxResults) { truncated = true; break; }
-            }
-          }
-        }
+        const relPath = relative(managed.metadata.cwd, resolved) || resolved;
+        const wasTruncated = await searchSingleFile(resolved, relPath, regex, contextLines, maxResults, matches);
+        if (wasTruncated) truncated = true;
       } catch {
         throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${searchPath}`);
       }
@@ -700,6 +734,52 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return { pattern, matches, truncated, files_searched: filesSearched };
   }
 
+  async deleteFile(sessionId: string, filePath: string): Promise<{ path: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File deletes are not permitted under the read-only execution profile.');
+    }
+    const requested = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
+    const resolved = this.workspacePolicy.resolveWritablePath(requested);
+    try {
+      const info = await lstat(resolved);
+      if (info.isSymbolicLink()) throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to delete a symbolic link.');
+      if (info.isDirectory()) throw new TerminalProtocolError('INVALID_ARGUMENT', 'Path is a directory; use recursive delete via PTY.');
+      await unlink(resolved);
+      const relPath = relative(managed.metadata.cwd, resolved) || resolved;
+      this.auditLogger.log({ event: 'file.delete', userId: managed.metadata.user_id, sessionId, path: relPath });
+      return { path: relPath };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `File not found: ${filePath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot delete file: ${errorMsg(error)}`);
+    }
+  }
+
+  async renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File renames are not permitted under the read-only execution profile.');
+    }
+    const absFrom = isAbsolute(fromPath) ? fromPath : resolve(managed.metadata.cwd, fromPath);
+    const absTo = isAbsolute(toPath) ? toPath : resolve(managed.metadata.cwd, toPath);
+    const resolvedFrom = this.workspacePolicy.resolveExistingPath(absFrom);
+    const resolvedTo = this.workspacePolicy.resolveWritablePath(absTo);
+    try {
+      const info = await lstat(resolvedFrom);
+      if (info.isSymbolicLink()) throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to rename a symbolic link.');
+      await rename(resolvedFrom, resolvedTo);
+      const relFrom = relative(managed.metadata.cwd, resolvedFrom) || resolvedFrom;
+      const relTo = relative(managed.metadata.cwd, resolvedTo) || resolvedTo;
+      this.auditLogger.log({ event: 'file.rename', userId: managed.metadata.user_id, sessionId, from: relFrom, to: relTo });
+      return { from: relFrom, to: relTo };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Source file not found: ${fromPath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot rename file: ${errorMsg(error)}`);
+    }
+  }
+
   async executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
     this.assertProcessExecutionAllowed(requestedProfile);
     const fallbackRoot = this.options.allowedWorkspaceRoots[0];
@@ -708,7 +788,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace root is configured for code execution.');
     }
     const cwd = this.executionWorkspacePolicy.resolveCwd(requestedCwd);
-    return this.codeExecutor.execute(userId, input, cwd);
+    const startMs = Date.now();
+    const result = await this.codeExecutor.execute(userId, input, cwd);
+    this.auditLogger.log({ event: 'code.execute', userId, runtime: input.runtime, exitCode: result.exit_code, durationMs: Date.now() - startMs });
+    return result;
   }
 
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput {
@@ -719,7 +802,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   async startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput> {
     this.assertProcessExecutionAllowed(requestedProfile);
     const root = this.executionWorkspacePolicy.resolveCwd(input.root);
-    return this.lspManager.start(userId, input, root);
+    const result = await this.lspManager.start(userId, input, root);
+    this.auditLogger.log({ event: 'lsp.start', userId, lspId: result.lsp_id, serverId: result.server_id });
+    return result;
   }
 
   requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput> {
@@ -729,7 +814,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
   stopLsp(userId: string, lspId: string, requestedProfile: ExecutionProfile): LspStopOutput {
     this.assertProcessExecutionAllowed(requestedProfile);
-    return this.lspManager.stop(userId, lspId);
+    const result = this.lspManager.stop(userId, lspId);
+    this.auditLogger.log({ event: 'lsp.stop', userId, lspId });
+    return result;
   }
 
   private assertProcessExecutionAllowed(requestedProfile: ExecutionProfile): void {
@@ -788,6 +875,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     if (managed.metadata.status === 'exited' || managed.metadata.status === 'failed') {
       managed.metadata.status = 'closed';
       this.recordEvent(managed, actor, 'session.closed', { reason, exit_code: managed.metadata.exit_code });
+      this.auditLogger.log({ event: 'session.close', userId: managed.metadata.user_id, sessionId: managed.metadata.session_id, reason });
       return;
     }
 
@@ -795,6 +883,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     managed.closeRequest = closeRequest;
     managed.metadata.status = 'closing';
     managed.metadata.last_activity_at = new Date().toISOString();
+    this.auditLogger.log({ event: 'session.close', userId: managed.metadata.user_id, sessionId: managed.metadata.session_id, reason });
     try {
       managed.pty.kill();
     } catch (error) {
@@ -822,18 +911,36 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   }
 
   private scheduleCwdRefresh(managed: ManagedSession): void {
-    if (process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
+    if (managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
+    if (process.platform !== 'linux' && process.platform !== 'darwin') return;
     managed.cwdRefreshTimer = setTimeout(() => {
       delete managed.cwdRefreshTimer;
       if (isTerminalFinal(managed.metadata.status) || managed.closeRequest?.finalized) return;
+
       try {
-        const cwd = readlinkSync(`/proc/${managed.pty.pid}/cwd`);
+        let cwd: string | undefined;
+        if (process.platform === 'linux') {
+          cwd = readlinkSync(`/proc/${managed.pty.pid}/cwd`);
+        } else if (process.platform === 'darwin') {
+          // Use lsof to find cwd on macOS — synchronous exec
+          try {
+            const out = execFileSync('lsof', ['-a', '-p', String(managed.pty.pid), '-d', 'cwd', '-Fn'], {
+              timeout: 500,
+              encoding: 'utf8',
+            }) as string;
+            // lsof -Fn output: lines starting with 'n' are the name/path
+            const line = out.split('\n').find((l: string) => l.startsWith('n'));
+            cwd = line?.slice(1).trim();
+          } catch {
+            // lsof may not be available or process may have exited
+          }
+        }
         if (cwd && cwd !== managed.metadata.cwd) {
           managed.metadata.cwd = cwd;
           this.recordEvent(managed, 'agent', 'cwd.changed', { cwd });
         }
       } catch {
-        // The PTY process may have exited between scheduling and the /proc lookup.
+        // process may have exited
       }
     }, 25);
     managed.cwdRefreshTimer.unref();
