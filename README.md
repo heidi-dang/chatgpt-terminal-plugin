@@ -226,6 +226,7 @@ For the complete authentication, reverse-proxy, enrollment, smoke-test, upgrade,
 | `terminal_session_transcript` | Read a bounded structured chronological transcript. |
 | `terminal_close` | Terminate and dispose the PTY. |
 | `terminal_turn_close` | Tear down the active PTY and Terminal UI at end of turn. |
+| `terminal_continue_task` | Return a current-turn continuation checkpoint for already-approved work; it does not schedule background re-entry or bypass authorization. |
 
 ### Files, code, and language intelligence
 
@@ -235,7 +236,7 @@ For the complete authentication, reverse-proxy, enrollment, smoke-test, upgrade,
 | `terminal_list_files` | Bounded directory listing without following symlink metadata. |
 | `terminal_write_file` | Bounded writes with canonical parent and symlink checks. |
 | `terminal_search_files` | Bounded regex search with file/result limits. |
-| `terminal_execute_code_block` | Run allowlisted `bash`, `python3`, `node`, or `typescript` code. |
+| `terminal_execute_code_block` | Run allowlisted `bash`, `python3`, `node`, or `typescript` code with bounded MCP output excerpts and explicit truncation metadata. |
 | `terminal_cancel_code` | Cancel an owned running code execution. |
 | `terminal_lsp_start` | Start an administrator-configured language server. |
 | `terminal_lsp_request` | Send a bounded ownership-checked LSP JSON-RPC request. |

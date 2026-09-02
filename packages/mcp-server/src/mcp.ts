@@ -54,6 +54,13 @@ import type { StreamTokenService } from './stream-token.js';
 import type { TerminalTurnRegistry, TerminalTurnState } from './turn-registry.js';
 import { TrustedExtensionLoader, createTrustedExtensionRegistrar } from './trusted-extension-loader.js';
 import { readTerminalUiDocument } from './ui-runtime.js';
+import {
+  DEFAULT_MCP_CODE_OUTPUT_CHARACTERS,
+  MAX_MCP_CODE_OUTPUT_CHARACTERS,
+  MIN_MCP_CODE_OUTPUT_CHARACTERS,
+  boundOutputText,
+  createProgressChunkLimiter,
+} from './output-bounds.js';
 
 export const TERMINAL_UI_URI = 'ui://terminal/v12.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
@@ -73,6 +80,29 @@ const terminalSurfaceOutputSchema = z.object({
   cwd: z.string().optional(),
   shell: z.string().optional(),
   exit_code: z.number().int().nullable().optional(),
+});
+
+const terminalYieldInputSchema = z.object({});
+const terminalYieldOutputSchema = z.object({
+  continue_current_turn: z.literal(true),
+  host_reentry_scheduled: z.literal(false),
+  message: z.string(),
+});
+
+const terminalExecuteCodeBlockMcpInputSchema = terminalExecuteCodeBlockToolSchema.extend({
+  max_output_chars: z.number().int()
+    .min(MIN_MCP_CODE_OUTPUT_CHARACTERS)
+    .max(MAX_MCP_CODE_OUTPUT_CHARACTERS)
+    .default(DEFAULT_MCP_CODE_OUTPUT_CHARACTERS),
+});
+
+const terminalExecuteCodeBlockMcpOutputSchema = codeExecuteOutputSchema.extend({
+  stdout_truncated: z.boolean(),
+  stderr_truncated: z.boolean(),
+  stdout_original_characters: z.number().int().nonnegative(),
+  stderr_original_characters: z.number().int().nonnegative(),
+  stdout_omitted_characters: z.number().int().nonnegative(),
+  stderr_omitted_characters: z.number().int().nonnegative(),
 });
 
 const terminalStartViewOutputSchema = terminalStartOutputSchema.extend({
@@ -481,24 +511,28 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_execute_code_block',
     {
       title: 'Execute code block',
-      description: 'Execute code through a strict runtime allowlist on a selected local agent. Execution is confined to configured workspace roots and requires a non-read-only profile.',
-      inputSchema: terminalExecuteCodeBlockToolSchema,
-      outputSchema: codeExecuteOutputSchema,
+      description: 'Execute code through a strict runtime allowlist on a selected local agent. Execution is confined to configured workspace roots and requires a non-read-only profile. Final stdout/stderr are returned as explicit bounded head/tail excerpts; max_output_chars controls the per-stream MCP context bound.',
+      inputSchema: terminalExecuteCodeBlockMcpInputSchema,
+      outputSchema: terminalExecuteCodeBlockMcpOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async (input, ctx) => resultFrom(async () => {
       const identity = identityFromContext(ctx);
-      const executionId = input.execution_id ?? randomUUID();
-      const executeInput = { ...input, execution_id: executionId };
+      const { max_output_chars: maxOutputCharacters, ...serviceInput } = input;
+      const executionId = serviceInput.execution_id ?? randomUUID();
+      const executeInput = { ...serviceInput, execution_id: executionId };
       if (ctx.mcpReq.signal.aborted) throw new TerminalProtocolError('REQUEST_CANCELLED', 'Code execution request was cancelled.');
       const onAbort = (): void => {
-        void deps.service.cancelCode(identity, { agent_id: input.agent_id, execution_id: executionId }).catch(() => undefined);
+        void deps.service.cancelCode(identity, { agent_id: serviceInput.agent_id, execution_id: executionId }).catch(() => undefined);
       };
       ctx.mcpReq.signal.addEventListener('abort', onAbort, { once: true });
       let progress = 0;
       let notificationTail: Promise<void> = Promise.resolve();
       const progressToken = ctx.mcpReq._meta?.progressToken;
+      const limitProgressChunk = createProgressChunkLimiter(maxOutputCharacters);
       const onChunk = progressToken === undefined ? undefined : (stream: 'stdout' | 'stderr', chunk: string): void => {
+        const limited = limitProgressChunk(chunk);
+        if (!limited) return;
         progress += 1;
         notificationTail = notificationTail
           .then(() => ctx.mcpReq.notify({
@@ -506,15 +540,32 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
             params: {
               progressToken,
               progress,
-              message: JSON.stringify({ execution_id: executionId, stream, chunk }),
+              message: JSON.stringify({
+                execution_id: executionId,
+                stream,
+                chunk: limited.chunk,
+                ...(limited.truncated ? { truncated: true } : {}),
+              }),
             },
           }))
           .catch(() => undefined);
       };
       try {
         const output = await deps.service.executeCode(identity, executeInput, onChunk);
+        const stdout = boundOutputText(output.stdout, maxOutputCharacters);
+        const stderr = boundOutputText(output.stderr, maxOutputCharacters);
         await notificationTail;
-        return output;
+        return terminalExecuteCodeBlockMcpOutputSchema.parse({
+          ...output,
+          stdout: stdout.text,
+          stderr: stderr.text,
+          stdout_truncated: stdout.truncated,
+          stderr_truncated: stderr.truncated,
+          stdout_original_characters: stdout.originalCharacters,
+          stderr_original_characters: stderr.originalCharacters,
+          stdout_omitted_characters: stdout.omittedCharacters,
+          stderr_omitted_characters: stderr.omittedCharacters,
+        });
       } finally {
         ctx.mcpReq.signal.removeEventListener('abort', onAbort);
       }
@@ -531,6 +582,22 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(() => deps.service.cancelCode(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_continue_task',
+    {
+      title: 'Continue approved task',
+      description: 'Return a continuation checkpoint for a user-approved long-running task while the current model turn remains active. This is a hint only: it does not schedule background work, extend host execution, bypass authorization or safety requirements, or suppress confirmations that are otherwise required.',
+      inputSchema: terminalYieldInputSchema,
+      outputSchema: terminalYieldOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    () => resultFrom(() => Promise.resolve(terminalYieldOutputSchema.parse({
+      continue_current_turn: true,
+      host_reentry_scheduled: false,
+      message: 'Continue with the next already-authorized step while this turn remains active. Stop if the user cancels or if a required authorization or confirmation boundary is reached.',
+    }))),
   );
 
   server.registerTool(
