@@ -26,7 +26,7 @@ describe('quality workflow', () => {
 const deployWorkflow = new URL('../../.github/workflows/deploy-production.yml', import.meta.url);
 
 describe('production deployment workflow', () => {
-  it('uses single-flight deployment and a real authenticated MCP tool smoke', async () => {
+  it('uses single-flight deployment, mandatory MCP smoke, and optional external full-agent smoke', async () => {
     const source = await readFile(deployWorkflow, 'utf8');
     expect(source).toContain('group: terminal-mcp-production');
     expect(source).toContain('cancel-in-progress: false');
@@ -34,5 +34,8 @@ describe('production deployment workflow', () => {
     expect(source).toContain('TERMINAL_SMOKE_TOKEN');
     expect(source).toContain('TERMINAL_SMOKE_REQUIRE_AGENT=1');
     expect(source).toContain('node scripts/mcp-smoke.mjs');
+    expect(source).not.toContain('Production requires an external MCP smoke credential');
+    expect(source).toContain('Public authenticated MCP smoke skipped');
+    expect(source).toContain('Cloudflare Access smoke credentials must be configured together');
   });
 });

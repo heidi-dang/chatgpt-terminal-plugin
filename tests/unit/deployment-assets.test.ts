@@ -70,7 +70,7 @@ describe('deployment assets', () => {
     expect(workflow).toContain('TERMINAL_SMOKE_BEARER_TOKEN');
     expect(workflow).toContain('Public ChatGPT widget boundary smoke');
     expect(workflow).toContain('TERMINAL_SMOKE_REQUIRE_AGENT=1');
-    expect(workflow).not.toContain('Public OAuth smoke skipped');
+    expect(workflow).toContain('Public authenticated MCP smoke skipped');
     expect(deploy).toContain('flock -n 9');
     expect(deploy).toContain('TERMINAL_SMOKE_LOCAL=1');
     expect(deploy).toContain('TERMINAL_SMOKE_WIDGET_ORIGIN=');
