@@ -31,6 +31,13 @@ describe('deployment assets', () => {
     expect(deployment).toContain(`sudo -u ${serviceUser} node packages/mcp-server/dist/admin.js`);
   });
 
+  it('does not advertise unsupported local-agent queue controls', async () => {
+    const source = await readFile(new URL('deploy/local-agent-environment.example', root), 'utf8');
+
+    expect(source).not.toContain('AGENT_CONTROL_QUEUE_LIMIT=');
+    expect(source).toContain('TERMINAL_BUFFER_HIGH_WATER_BYTES=');
+  });
+
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
     const cases = [
       ['deploy/systemd/chatgpt-terminal-mcp.service.example', 'packages/mcp-server/dist/cli.js'],
