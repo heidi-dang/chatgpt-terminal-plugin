@@ -31,6 +31,32 @@ describe('device identity and enrollment', () => {
       AGENT_ENROLLMENT_URL: 'https://terminal.example.com/agent/enroll',
     })).toThrow(/configured together/i);
   });
+  it('keeps the trusted key active until a prepared rotation is enrolled and committed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-rotation-transaction-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identityPath = join(root, 'device.json');
+    const original = await DeviceIdentity.loadOrCreate(identityPath);
+    const originalPublicKey = original.publicKey;
+    const candidate = await DeviceIdentity.prepareRotation(identityPath);
+    expect(candidate.publicKey).not.toBe(originalPublicKey);
+    expect((await DeviceIdentity.loadOrCreate(identityPath)).publicKey).toBe(originalPublicKey);
+
+    const failedFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
+    await expect(enrollDevice({
+      identity: candidate,
+      enrollmentUrl: 'https://terminal.example.com/agent/enroll',
+      enrollmentToken: 'bootstrap-token',
+      ownerId: 'owner-a',
+    })).rejects.toThrow(/HTTP 503/);
+    failedFetch.mockRestore();
+
+    expect((await DeviceIdentity.loadOrCreate(identityPath)).publicKey).toBe(originalPublicKey);
+    const resumedCandidate = await DeviceIdentity.prepareRotation(identityPath);
+    expect(resumedCandidate.publicKey).toBe(candidate.publicKey);
+    await resumedCandidate.commitPreparedRotation();
+    expect((await DeviceIdentity.loadOrCreate(identityPath)).publicKey).toBe(candidate.publicKey);
+  });
+
   it('rejects plaintext remote enrollment before sending the bootstrap token', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-device-enrollment-transport-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

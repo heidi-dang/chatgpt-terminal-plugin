@@ -47,7 +47,9 @@ if (profile === 'developer' && roots.length === 0) {
 }
 const identityPath = process.env.AGENT_IDENTITY_PATH ?? join(homedir(), '.config', 'chatgpt-terminal-plugin', 'device.json');
 const enrollmentConfig = resolveEnrollmentConfig(process.env);
-const identity = await DeviceIdentity.loadOrCreate(identityPath, enrollmentConfig.rotateKey);
+const identity = enrollmentConfig.rotateKey
+  ? await DeviceIdentity.prepareRotation(identityPath)
+  : await DeviceIdentity.loadOrCreate(identityPath);
 
 if (enrollmentConfig.enrollment) {
   const status = await enrollDevice({
@@ -57,6 +59,7 @@ if (enrollmentConfig.enrollment) {
     ownerId: enrollmentConfig.enrollment.ownerId,
     ...(enrollmentConfig.enrollment.displayName ? { displayName: enrollmentConfig.enrollment.displayName } : {}),
   });
+  if (enrollmentConfig.rotateKey) await identity.commitPreparedRotation();
   console.log(JSON.stringify({ level: 'info', event: 'agent.device_enrollment', status, device_id: identity.deviceId }));
   delete process.env.AGENT_ENROLLMENT_TOKEN;
 }
