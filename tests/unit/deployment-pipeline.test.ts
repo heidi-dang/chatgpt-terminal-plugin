@@ -88,7 +88,7 @@ async function createFixture() {
   const sudoLog = join(root, 'sudo.log');
   await mkdir(join(deployRoot, 'releases'), { recursive: true });
   await mkdir(fakeBin, { recursive: true });
-  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nexit 0\n`);
+  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nif [[ "$1 $2 $3 $4" == "systemctl show -p ActiveState" ]]; then printf 'active\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p SubState" ]]; then printf 'running\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p MainPID" ]]; then printf '1234\\n'; exit 0; fi\nexit 0\n`);
   await writeExecutable(join(fakeBin, 'curl'), `#!/usr/bin/env bash\n[[ "${'${FAKE_CURL_FAIL:-0}'}" == 1 ]] && exit 1\nexit 0\n`);
   return { root, deployRoot, fakeBin, sudoLog };
 }
@@ -97,11 +97,15 @@ async function makeArtifact(root: string, revision: string) {
   const stage = join(root, `stage-${revision}`);
   await mkdir(join(stage, 'packages/mcp-server/dist'), { recursive: true });
   await mkdir(join(stage, 'packages/local-agent/dist'), { recursive: true });
+  await mkdir(join(stage, 'packages/local-agent/node_modules/node-pty'), { recursive: true });
   await mkdir(join(stage, 'packages/terminal-ui/dist'), { recursive: true });
   await writeFile(join(stage, 'REVISION'), `${revision}\n`);
   await writeFile(join(stage, 'packages/mcp-server/dist/index.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/mcp-server/dist/cli.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/local-agent/dist/cli.js'), 'export {};\n');
+  await writeFile(join(stage, 'packages/local-agent/node_modules/node-pty/package.json'), JSON.stringify({ type: 'module', exports: './index.js' }));
+  await writeFile(join(stage, 'packages/local-agent/node_modules/node-pty/index.js'), 'export {};\n');
+  await writeFile(join(stage, 'NATIVE_RUNTIME_VERIFIED'), `node_major=${process.versions.node.split('.')[0]}\n`);
   await writeFile(join(stage, 'packages/terminal-ui/dist/index.html'), '<!doctype html><title>Terminal</title>\n');
   const archive = join(root, `${revision}.tar.gz`);
   await execFileAsync('tar', ['-C', stage, '-czf', archive, '.']);
