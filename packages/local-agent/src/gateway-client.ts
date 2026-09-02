@@ -283,6 +283,11 @@ export class AgentGatewayClient {
         }
         if (read.events.length === 0) return;
         for (const event of read.events.slice(0, remaining)) {
+          // Adaptive backpressure: if socket write buffer is backed up, pause and resume on next tick
+          if (socket.bufferedAmount > this.options.outboundHighWaterBytes / 2) {
+            setTimeout(() => this.pumpSession(sessionId), 25).unref();
+            return;
+          }
           socket.send(JSON.stringify({ type: 'event', event } satisfies GatewayMessage));
           sent = event.sequence;
           this.sentSequence.set(sessionId, sent);
@@ -303,7 +308,7 @@ export class AgentGatewayClient {
     }
 
     const socket = this.socket;
-    if (this.authenticated && socket?.readyState === WebSocket.OPEN) {
+    if (this.authenticated && socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < this.options.outboundHighWaterBytes) {
       socket.send(payload);
       return;
     }
