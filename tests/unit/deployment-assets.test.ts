@@ -31,6 +31,15 @@ describe('deployment assets', () => {
     expect(deployment).toContain(`sudo -u ${serviceUser} node packages/mcp-server/dist/admin.js`);
   });
 
+  it('ships finite production session quotas', async () => {
+    const source = await readFile(new URL('deploy/server-environment.example', root), 'utf8');
+    const perUser = Number(source.match(/^TERMINAL_MAX_SESSIONS_PER_USER=(\d+)$/m)?.[1]);
+    const perAgent = Number(source.match(/^TERMINAL_MAX_SESSIONS_PER_AGENT=(\d+)$/m)?.[1]);
+
+    expect(perUser).toBeGreaterThan(0);
+    expect(perAgent).toBeGreaterThan(0);
+  });
+
   it('does not advertise unsupported local-agent queue controls', async () => {
     const source = await readFile(new URL('deploy/local-agent-environment.example', root), 'utf8');
 

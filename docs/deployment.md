@@ -77,6 +77,7 @@ Production requires at minimum:
 - `STREAM_TOKEN_SECRET` with at least 32 bytes
 - `AGENT_DEVICE_REGISTRY_PATH`
 - `AGENT_ENROLLMENT_TOKEN`
+- finite positive `TERMINAL_MAX_SESSIONS_PER_USER` and `TERMINAL_MAX_SESSIONS_PER_AGENT` values sized for the host
 - appropriate audit/transcript paths and retention
 
 Set `MCP_DEFAULT_EXECUTION_PROFILE` to the least privilege appropriate for tokens that do not carry an explicit profile claim. `TERMINAL_CLOSED_SESSION_RETENTION_MS` controls how long final session metadata/events remain available for status, UI reconnect, and post-mortem reads before agent/server memory is released. Use `deploy/server-environment.example` as the complete non-secret template; the runtime rejects malformed public URLs, insecure production OAuth endpoints, empty required scopes, and route collisions at startup.

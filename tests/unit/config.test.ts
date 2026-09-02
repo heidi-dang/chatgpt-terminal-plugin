@@ -16,6 +16,8 @@ function productionEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     STREAM_TOKEN_SECRET: 'stream-token-secret-0123456789abcdef',
     AGENT_DEVICE_REGISTRY_PATH: '/var/lib/chatgpt-terminal/devices.json',
     AGENT_ENROLLMENT_TOKEN: 'enrollment-token-0123456789abcdef',
+    TERMINAL_MAX_SESSIONS_PER_USER: '4',
+    TERMINAL_MAX_SESSIONS_PER_AGENT: '8',
     ...overrides,
   };
 }
@@ -73,6 +75,13 @@ describe('server configuration invariants', () => {
       .toThrow(/MCP_EXTENSION_ROOT.*absolute/i);
     const enabled = loadConfig(productionEnv({ MCP_EXTENSION_ROOT: '/opt/chatgpt-terminal/extensions' }));
     expect(enabled.extensionRoot).toBe('/opt/chatgpt-terminal/extensions');
+  });
+
+  it('requires finite production session quotas', () => {
+    expect(() => loadConfig(productionEnv({ TERMINAL_MAX_SESSIONS_PER_USER: '0' })))
+      .toThrow(/production.*session quota.*user/i);
+    expect(() => loadConfig(productionEnv({ TERMINAL_MAX_SESSIONS_PER_AGENT: '0' })))
+      .toThrow(/production.*session quota.*agent/i);
   });
 
   it('rejects route collisions', () => {
