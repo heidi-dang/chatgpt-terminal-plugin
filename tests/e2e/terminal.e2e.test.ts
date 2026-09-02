@@ -156,6 +156,7 @@ describe('terminal MCP end-to-end', () => {
       'terminal_workspace_root_remove',
       'terminal_execute_code_block',
       'terminal_cancel_code',
+      'terminal_continue_task',
       'terminal_lsp_start',
       'terminal_lsp_request',
       'terminal_lsp_stop',
@@ -186,8 +187,15 @@ describe('terminal MCP end-to-end', () => {
     const turnCloseTool = listed.tools.find((tool) => tool.name === 'terminal_turn_close');
     const turnCloseMeta = turnCloseTool?._meta as Record<string, unknown> | undefined;
     const turnCloseUi = turnCloseMeta?.ui as Record<string, unknown> | undefined;
-    expect(turnCloseUi?.visibility).toEqual(['model']);
-    expect(turnCloseMeta?.['openai/widgetAccessible']).toBeUndefined();
+    expect(turnCloseUi?.visibility).toEqual(['model', 'app']);
+    expect(turnCloseMeta?.['openai/widgetAccessible']).toBe(true);
+
+    const continuation = structured(await client.callTool({ name: 'terminal_continue_task', arguments: {} }));
+    expect(continuation).toMatchObject({
+      continue_current_turn: true,
+      host_reentry_scheduled: false,
+    });
+    expect(String(continuation.message)).toContain('already-authorized step');
     for (const toolName of ['terminal_read', 'terminal_status']) {
       const toolMeta = listed.tools.find((tool) => tool.name === toolName)?._meta as Record<string, unknown> | undefined;
       const toolUi = toolMeta?.ui as Record<string, unknown> | undefined;
@@ -279,10 +287,57 @@ describe('terminal MCP end-to-end', () => {
     expect(codeResult.execution_id).toBe(codeExecutionId);
     expect(codeResult.stdout).toContain(`__CODE_E2E__|${workspace}`);
     expect(codeResult.exit_code).toBe(0);
+    expect(codeResult).toMatchObject({
+      stdout_truncated: false,
+      stderr_truncated: false,
+      stdout_omitted_characters: 0,
+      stderr_omitted_characters: 0,
+    });
     expect(codeProgress.some((message) => {
       const chunk = JSON.parse(message) as { execution_id: string; stream: string; chunk: string };
       return chunk.execution_id === codeExecutionId && chunk.stream === 'stdout' && chunk.chunk.includes('__CODE_E2E__');
     })).toBe(true);
+
+    const boundedExecutionId = randomUUID();
+    const boundedProgress: string[] = [];
+    const boundedResult = structured(await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId,
+        execution_id: boundedExecutionId,
+        runtime: 'node',
+        cwd: workspace,
+        code: `process.stdout.write('HEAD|' + 'x'.repeat(7000) + '|TAIL')`,
+        timeout_ms: 5_000,
+        max_output_chars: 1_024,
+      },
+    }, {
+      onprogress: (notification) => {
+        if (notification.message) boundedProgress.push(notification.message);
+      },
+    }));
+    expect(boundedResult).toMatchObject({
+      execution_id: boundedExecutionId,
+      exit_code: 0,
+      stdout_truncated: true,
+      stderr_truncated: false,
+      stdout_original_characters: 7_010,
+      stderr_original_characters: 0,
+      stderr_omitted_characters: 0,
+    });
+    expect(Array.from(String(boundedResult.stdout))).toHaveLength(1_024);
+    expect(String(boundedResult.stdout)).toContain('[TRUNCATED ');
+    expect(String(boundedResult.stdout)).toContain('HEAD|');
+    expect(String(boundedResult.stdout)).toContain('|TAIL');
+    expect(Number(boundedResult.stdout_omitted_characters)).toBeGreaterThan(0);
+    const boundedProgressPayloads = boundedProgress.map((message) => JSON.parse(message) as {
+      execution_id: string;
+      stream: string;
+      chunk: string;
+      truncated?: boolean;
+    });
+    expect(boundedProgressPayloads.some((payload) => payload.truncated === true)).toBe(true);
+    expect(boundedProgressPayloads.reduce((total, payload) => total + Array.from(payload.chunk).length, 0)).toBeLessThanOrEqual(1_024);
 
     const stdinExecutionId = randomUUID();
     const stdinResult = structured(await client.callTool({
@@ -473,7 +528,7 @@ describe('terminal MCP end-to-end', () => {
     const replacementCursor = numberField(replacement, 'cursor');
     await readUntil(client, replacementSessionId, replacementCursor, '__REPLACEMENT__');
 
-    const turnClosed = structured(await client.callTool({ name: 'terminal_turn_close', arguments: {} }));
+    const turnClosed = structured(await client.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceId } }));
     expect(turnClosed.surface_open).toBe(true);
     expect(turnClosed.surface_active).toBe(false);
     expect(turnClosed.session_id).toBeNull();
@@ -505,7 +560,7 @@ describe('terminal MCP end-to-end', () => {
     expect(reusedSurface.session_id).toBe(laterSessionId);
     await client.callTool({ name: 'terminal_write', arguments: { session_id: laterSessionId, text: "printf '__LATER_TURN__\n'\r" } });
     await readUntil(client, laterSessionId, numberField(laterTurn, 'cursor'), '__LATER_TURN__');
-    const finalTurnClose = structured(await client.callTool({ name: 'terminal_turn_close', arguments: {} }));
+    const finalTurnClose = structured(await client.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceId } }));
     expect(finalTurnClose).toMatchObject({ surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null });
 
     await waitUntil(async () => {

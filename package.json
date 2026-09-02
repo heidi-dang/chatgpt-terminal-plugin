@@ -17,7 +17,9 @@
     "start:server": "pnpm --filter @terminal/mcp-server start",
     "start:agent": "pnpm --filter @terminal/local-agent start",
     "dev": "concurrently -k -n mcp,agent,ui 'pnpm --filter @terminal/mcp-server dev' 'pnpm --filter @terminal/local-agent dev' 'pnpm --filter @terminal/terminal-ui dev'",
-    "test:soak": "vitest run ./tests/soak --exclude '.worktrees/**' --maxWorkers=1 --testTimeout=120000"
+    "test:soak": "vitest run ./tests/soak --exclude '.worktrees/**' --maxWorkers=1 --testTimeout=120000",
+    "prepare": "husky",
+    "check": "./scripts/verify.sh"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
@@ -27,6 +29,7 @@
     "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "eslint": "^9.35.0",
+    "husky": "^9.1.7",
     "jsdom": "^26.1.0",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.42.0",

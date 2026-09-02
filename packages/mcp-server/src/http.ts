@@ -31,9 +31,12 @@ export interface TerminalHttpRuntime {
 }
 
 export async function createTerminalHttpRuntime(config: ServerConfig): Promise<TerminalHttpRuntime> {
+  const allowedHosts = config.nodeEnv === 'production'
+    ? [...new Set([...config.allowedHosts, '127.0.0.1', 'localhost', '::1'])]
+    : config.allowedHosts;
   const app = express();
   app.use(express.json({ limit: '512kb' }));
-  if (config.allowedHosts.length > 0) app.use(hostHeaderValidation([...config.allowedHosts]));
+  if (allowedHosts.length > 0) app.use(hostHeaderValidation(allowedHosts));
   else if (isLoopbackHost(config.host)) app.use(localhostHostValidation());
   app.use((req, res, next) => {
     const origin = req.get('origin');
@@ -52,7 +55,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       });
       return;
     }
-    if (widgetRoute) setWidgetCorsHeaders(req, res);
+    if (widgetRoute) setWidgetCorsHeaders(origin, res);
     next();
   });
   const audit = new AuditLogger(config.auditLogPath, config.transcriptLogPath);
@@ -86,9 +89,11 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
   const service = new TerminalService(gateway, config, audit);
   const streamTokens = new StreamTokenService(config.streamTokenSecret, config.streamTokenTtlSeconds);
-  const turnRegistry = new TerminalTurnRegistry(
+  const turnRegistry = await TerminalTurnRegistry.load(
     async (identity, sessionId) => service.close(identity, sessionId).then(() => undefined),
     config.terminalTurnLeaseMs,
+    config.terminalTurnStatePath,
+    config.terminalSurfaceRetentionMs,
   );
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
@@ -227,13 +232,32 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   }
 
   const resourceMetadataUrl = oauthMetadata ? getOAuthProtectedResourceMetadataUrl(config.publicUrl) : undefined;
-  const authMiddleware = config.authMode === 'cloudflare-access'
+  const publicAuthMiddleware = config.authMode === 'cloudflare-access'
     ? createCloudflareAccessAuthMiddleware(verifier, config.requiredScopes)
     : requireBearerAuth({
         verifier,
         requiredScopes: config.requiredScopes,
         ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
       });
+  const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+    if (config.nodeEnv === 'production' && isDirectLoopbackDeploymentSmoke(req)) {
+      req.auth = {
+        token: 'deployment-smoke',
+        clientId: 'deployment-smoke',
+        scopes: [...config.requiredScopes],
+        expiresAt: Math.floor(Date.now() / 1000) + 60,
+        resource: config.publicUrl,
+        extra: {
+          user_id: 'deployment-smoke',
+          auth_mode: 'deployment-smoke',
+          execution_profile: 'read-only',
+        },
+      };
+      next();
+      return;
+    }
+    publicAuthMiddleware(req, res, next);
+  };
 
   const mcpHandler = async (req: Request, res: Response) => {
     try {
@@ -259,15 +283,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
           return;
         }
 
-        let boundMcpSessionId = '';
-        const mcpServer = createTerminalMcpServer({
-          config, gateway, service, streamTokens, turnRegistry, audit,
-          mcpSessionId: () => boundMcpSessionId,
-        });
+        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry, audit });
         const transport = new NodeStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {
-            boundMcpSessionId = sessionId;
             sessions.set(sessionId, { transport, server: mcpServer, ...principal });
           },
         });
@@ -420,6 +439,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
               httpServer.close((error) => error ? reject(error) : resolve());
             })
           : Promise.resolve();
+        const forceCloseTimer = setTimeout(() => httpServer.closeAllConnections(), config.shutdownGraceMs);
+        forceCloseTimer.unref();
         clearInterval(transcriptRetentionTimer);
         stopUiWatcher();
         for (const client of uiReloadClients) client.end();
@@ -427,17 +448,18 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         for (const client of terminalStreamClients) client.end();
         terminalStreamClients.clear();
         httpServer.closeIdleConnections();
-        httpServer.closeAllConnections();
         turnRegistry.dispose();
         gateway.closeAll();
         for (const session of sessions.values()) await session.server.close();
         sessions.clear();
         await httpClosed;
+        clearTimeout(forceCloseTimer);
         await audit.flush();
       })();
     },
   };
 }
+
 
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
@@ -462,26 +484,22 @@ function isOpenAiWidgetOrigin(origin: string): boolean {
 }
 
 function isConfiguredBrowserOrigin(origin: string, allowedOrigins: readonly string[]): boolean {
-  let hostname: string;
+  let actual: string;
   try {
-    hostname = new URL(origin).hostname.toLowerCase();
+    actual = new URL(origin).origin.toLowerCase();
   } catch {
     return false;
   }
   return allowedOrigins.some((allowed) => {
-    const candidate = allowed.trim();
-    if (!candidate) return false;
     try {
-      return new URL(candidate).hostname.toLowerCase() === hostname;
+      return new URL(allowed).origin.toLowerCase() === actual;
     } catch {
-      return candidate.toLowerCase() === hostname;
+      return false;
     }
   });
 }
 
-function setWidgetCorsHeaders(req: Request, res: Response): void {
-  const origin = req.get('origin');
-  if (!origin) return;
+function setWidgetCorsHeaders(origin: string, res: Response): void {
   res.setHeader('access-control-allow-origin', origin);
   res.append('vary', 'Origin');
 }
@@ -514,6 +532,26 @@ function createCloudflareAccessAuthMiddleware(
       res.status(401).json({ error: 'invalid_cloudflare_access_assertion' });
     });
   };
+}
+
+function isDirectLoopbackDeploymentSmoke(req: Request): boolean {
+  if (req.get('x-terminal-deployment-smoke') !== '1') return false;
+  const remoteAddress = req.socket.remoteAddress ?? '';
+  const loopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+  if (!loopback) return false;
+
+  const hostHeader = req.get('host');
+  if (!hostHeader) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '[::1]') return false;
+
+  const proxyHeaders = ['cf-connecting-ip', 'cf-ray', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto'];
+  return proxyHeaders.every((name) => !req.get(name));
 }
 
 function requestPrincipal(req: Request): { userId: string; clientId: string } {

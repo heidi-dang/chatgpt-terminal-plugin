@@ -28,6 +28,9 @@ describe('server configuration invariants', () => {
     expect(config.publicUrl.href).toBe('https://terminal.example.com/mcp');
     expect(config.allowedHosts).toEqual(['terminal.example.com']);
     expect(config.defaultExecutionProfile).toBe('developer');
+    expect(config.shutdownGraceMs).toBe(2_000);
+    expect(config.terminalTurnStatePath).toBe('/var/lib/chatgpt-terminal/terminal-turns.json');
+    expect(config.terminalSurfaceRetentionMs).toBe(30 * 24 * 60 * 60_000);
   });
 
   it('rejects insecure production endpoints and malformed public MCP URLs', () => {
@@ -82,6 +85,25 @@ describe('server configuration invariants', () => {
       .toThrow(/production.*session quota.*user/i);
     expect(() => loadConfig(productionEnv({ TERMINAL_MAX_SESSIONS_PER_AGENT: '0' })))
       .toThrow(/production.*session quota.*agent/i);
+  });
+
+  it('keeps surface retention longer than the active PTY lease', () => {
+    expect(() => loadConfig(productionEnv({
+      TERMINAL_TURN_LEASE_MS: '120000',
+      TERMINAL_SURFACE_RETENTION_MS: '60000',
+    }))).toThrow(/SURFACE_RETENTION.*greater than or equal/i);
+    const config = loadConfig(productionEnv({
+      TERMINAL_TURN_LEASE_MS: '120000',
+      TERMINAL_SURFACE_RETENTION_MS: '2592000000',
+    }));
+    expect(config.terminalSurfaceRetentionMs).toBe(2_592_000_000);
+  });
+
+  it('requires an absolute persisted turn-state path when one is explicitly configured', () => {
+    expect(() => loadConfig(productionEnv({ TERMINAL_TURN_STATE_PATH: 'relative/turns.json' })))
+      .toThrow(/TERMINAL_TURN_STATE_PATH.*absolute/i);
+    expect(loadConfig(productionEnv({ TERMINAL_TURN_STATE_PATH: '/srv/terminal/turns.json' })).terminalTurnStatePath)
+      .toBe('/srv/terminal/turns.json');
   });
 
   it('rejects route collisions', () => {

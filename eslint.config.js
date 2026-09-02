@@ -15,6 +15,17 @@ export default tseslint.config(
     ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**', '.worktrees/**'],
   },
   {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        AbortSignal: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        process: 'readonly',
+      },
+    },
+  },
+  {
     files: ['packages/**/*.ts', 'packages/**/*.tsx'],
     languageOptions: {
       parserOptions: {

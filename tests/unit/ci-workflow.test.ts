@@ -17,6 +17,7 @@ describe('quality workflow', () => {
     expect(source).toContain('run: pnpm lint');
     expect(source).toContain('run: pnpm test');
     expect(source).toContain('run: pnpm test:e2e');
+    expect(source).toContain('run: pnpm test:soak');
     expect(source).toContain('run: pnpm build');
   });
 });
@@ -29,8 +30,9 @@ describe('production deployment workflow', () => {
     const source = await readFile(deployWorkflow, 'utf8');
     expect(source).toContain('group: terminal-mcp-production');
     expect(source).toContain('cancel-in-progress: false');
-    expect(source).toContain('TERMINAL_MCP_URL');
+    expect(source).toContain('TERMINAL_SMOKE_URL');
     expect(source).toContain('TERMINAL_SMOKE_TOKEN');
+    expect(source).toContain('TERMINAL_SMOKE_REQUIRE_AGENT=1');
     expect(source).toContain('node scripts/mcp-smoke.mjs');
   });
 });

@@ -4,6 +4,8 @@ NODE_ENV=production
 MCP_HOST=127.0.0.1
 MCP_PORT=8787
 MCP_PUBLIC_URL=https://terminal.example.com/mcp
+# Bounds graceful HTTP shutdown during immutable deploys so a stale keep-alive/SSE cannot create a long 502 window.
+MCP_SHUTDOWN_GRACE_MS=2000
 
 AGENT_GATEWAY_PATH=/agent
 AGENT_ENROLLMENT_PATH=/agent/enroll
@@ -47,6 +49,10 @@ TERMINAL_MAX_SESSIONS_PER_AGENT=8
 TERMINAL_IDLE_TIMEOUT_MS=1800000
 TERMINAL_MAX_LIFETIME_MS=28800000
 TERMINAL_TURN_LEASE_MS=120000
+# Keep the one conversation widget recoverable across later turns while abandoned PTYs still use the short lease above.
+TERMINAL_SURFACE_RETENTION_MS=2592000000
+# Persist the surface lease so a new MCP process can reclaim the same ChatGPT surface after a deployment restart.
+TERMINAL_TURN_STATE_PATH=/var/lib/chatgpt-terminal/terminal-turns.json
 # Keep final session metadata/events briefly for status, UI reconnect, and post-mortem reads, then release memory.
 TERMINAL_CLOSED_SESSION_RETENTION_MS=900000
 TERMINAL_SWEEP_INTERVAL_MS=30000

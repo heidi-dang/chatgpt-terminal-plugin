@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalTurnRegistry } from '../../packages/mcp-server/src/turn-registry.js';
 import type { RequestIdentity } from '../../packages/mcp-server/src/service.js';
@@ -6,7 +9,6 @@ const identity: RequestIdentity = {
   userId: 'user-a',
   clientId: 'client-a',
   executionProfile: 'owner-full',
-  mcpSessionId: 'mcp-a',
   chatgptSessionId: 'chat-a',
 };
 
@@ -72,11 +74,11 @@ describe('TerminalTurnRegistry', () => {
     const activation = registry.activate(identity, 'session-new');
     await oldCloseStarted;
     const queuedActivation = registry.activate(identity, 'session-queued');
-    const repeatedSurface = await registry.begin(identity);
+    const repeatedSurface = registry.begin(identity);
     releaseOldClose();
 
     await Promise.all([activation, queuedActivation]);
-    expect(repeatedSurface.surface_id).toBe(surface.surface_id);
+    expect((await repeatedSurface).surface_id).toBe(surface.surface_id);
     expect(closed).toEqual(['session-old', 'session-new']);
     expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, session_id: 'session-queued' }));
     registry.dispose();
@@ -121,16 +123,131 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('isolates concurrent MCP sessions even when OAuth conversation metadata is identical', async () => {
+    const closed: string[] = [];
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
+    const conversationA: RequestIdentity = { ...identity, mcpSessionId: 'mcp-a', chatgptSessionId: 'shared-oauth-session' };
+    const conversationB: RequestIdentity = { ...identity, mcpSessionId: 'mcp-b', chatgptSessionId: 'shared-oauth-session' };
+
+    const surfaceA = await registry.begin(conversationA);
+    await registry.activate(conversationA, 'session-a');
+    const surfaceB = await registry.begin(conversationB);
+    await registry.activate(conversationB, 'session-b');
+
+    expect(surfaceA.surface_id).not.toBe(surfaceB.surface_id);
+    expect(closed).toEqual([]);
+    expect(registry.current(conversationA).session_id).toBe('session-a');
+    expect(registry.current(conversationB).session_id).toBe('session-b');
+
+    await registry.end(conversationA);
+    expect(closed).toEqual(['session-a']);
+    expect(registry.current(conversationA)).toEqual(expect.objectContaining({ surface_id: surfaceA.surface_id, surface_open: true, surface_active: false, session_id: null }));
+    expect(registry.current(conversationB)).toEqual(expect.objectContaining({ surface_open: true, session_id: 'session-b' }));
+    registry.dispose();
+  });
+
+  it('migrates persisted v1 surface state without losing the existing widget capability', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-turn-v1-migration-'));
+    const statePath = join(root, 'turns.json');
+    const surfaceId = '77777777-7777-4777-8777-777777777777';
+    const legacyIdentity: RequestIdentity = { ...identity, mcpSessionId: 'mcp-legacy', chatgptSessionId: undefined };
+
+    try {
+      await writeFile(statePath, `${JSON.stringify({
+        version: 1,
+        records: [{
+          identity: legacyIdentity,
+          surfaceId,
+          sessionId: null,
+          expiresAt: Date.now() + 60_000,
+        }],
+      })}\n`);
+
+      const registry = await TerminalTurnRegistry.load(async () => undefined, 5_000, statePath, 20_000);
+      expect(registry.current(legacyIdentity)).toEqual(expect.objectContaining({
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: false,
+        session_id: null,
+      }));
+      const migrated = JSON.parse(await readFile(statePath, 'utf8')) as { version: number; records: unknown[] };
+      expect(migrated.version).toBe(2);
+      expect(migrated.records).toHaveLength(1);
+      registry.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers the exact persisted surface after an MCP process restart before terminal_start', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-turn-restart-'));
+    const statePath = join(root, 'turns.json');
+    const closed: string[] = [];
+    const closeTerminal = async (_identity: RequestIdentity, sessionId: string) => { closed.push(sessionId); };
+    const beforeRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-before', chatgptSessionId: undefined };
+    const afterRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-after', chatgptSessionId: undefined };
+
+    try {
+      const firstProcess = await TerminalTurnRegistry.load(closeTerminal, 60_000, statePath);
+      const surface = await firstProcess.begin(beforeRestart);
+      firstProcess.dispose();
+
+      const secondProcess = await TerminalTurnRegistry.load(closeTerminal, 60_000, statePath);
+      const recovered = await secondProcess.recover(afterRestart, surface.surface_id!);
+      expect(recovered).toEqual(expect.objectContaining({
+        surface_id: surface.surface_id,
+        surface_open: true,
+        surface_active: false,
+        session_id: null,
+      }));
+
+      await secondProcess.activate(afterRestart, 'session-after-restart');
+      expect(secondProcess.current(afterRestart).session_id).toBe('session-after-restart');
+      expect(secondProcess.current(beforeRestart).surface_open).toBe(false);
+      expect(closed).toEqual([]);
+      await secondProcess.end(afterRestart);
+      secondProcess.dispose();
+      expect(closed).toEqual(['session-after-restart']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('requires the exact surface capability for modern MCP-session restart recovery', async () => {
+    const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const beforeRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-before' };
+    const afterRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-after' };
+
+    const surface = await registry.begin(beforeRestart);
+    await expect(registry.recover(afterRestart)).resolves.toEqual(expect.objectContaining({ surface_open: false }));
+    expect(registry.current(beforeRestart)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true }));
+    registry.dispose();
+  });
+
+  it('refuses ambiguous implicit recovery when two conversations from the same principal are open', async () => {
+    const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const conversationA: RequestIdentity = { ...identity, mcpSessionId: 'mcp-a' };
+    const conversationB: RequestIdentity = { ...identity, mcpSessionId: 'mcp-b' };
+    const afterRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-new' };
+
+    await registry.begin(conversationA);
+    await registry.begin(conversationB);
+    await expect(registry.recover(afterRestart)).resolves.toEqual(expect.objectContaining({ surface_open: false }));
+    expect(registry.current(conversationA).surface_open).toBe(true);
+    expect(registry.current(conversationB).surface_open).toBe(true);
+    registry.dispose();
+  });
+
   it('closes the active PTY when the assistant turn ends but keeps the surface open', async () => {
     const closed: string[] = [];
     const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
 
-    await registry.begin(identity);
+    const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-1');
     await registry.end(identity);
 
     expect(closed).toEqual(['session-1']);
-    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_open: true, surface_active: false, session_id: null }));
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, surface_active: false, session_id: null }));
     registry.dispose();
   });
 
@@ -152,9 +269,29 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('renews an active PTY lease from matching model-side terminal activity', async () => {
+    vi.useFakeTimers();
+    const closed: string[] = [];
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000, undefined, 20_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-1');
+    await vi.advanceTimersByTimeAsync(4_000);
+    registry.touch(identity, 'session-1');
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(closed).toEqual([]);
+    expect(registry.current(identity).session_id).toBe('session-1');
+    registry.touch(identity, 'different-session');
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(closed).toEqual(['session-1']);
+    expect(registry.current(identity).surface_open).toBe(true);
+    registry.dispose();
+  });
+
   it('expires an abandoned surface even when no PTY was started', async () => {
     vi.useFakeTimers();
-    const registry = new TerminalTurnRegistry(async () => undefined, 5_000);
+    const registry = new TerminalTurnRegistry(async () => undefined, 1_000, undefined, 5_000);
 
     const surface = await registry.begin(identity);
     expect(registry.status(identity, surface.surface_id!).surface_open).toBe(true);
@@ -167,60 +304,16 @@ describe('TerminalTurnRegistry', () => {
   it('expires an abandoned PTY after the configured turn lease', async () => {
     vi.useFakeTimers();
     const closed: string[] = [];
-    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000);
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000, undefined, 20_000);
 
-    await registry.begin(identity);
+    const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-1');
     await vi.advanceTimersByTimeAsync(5_001);
 
     expect(closed).toEqual(['session-1']);
-    expect(registry.current(identity).session_id).toBeNull();
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, session_id: null }));
     registry.dispose();
   });
-  it('isolates two concurrent MCP sessions for the same OAuth principal', async () => {
-    const closed: string[] = [];
-    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
-    const conversationA = { ...identity, mcpSessionId: 'mcp-conversation-a', chatgptSessionId: undefined };
-    const conversationB = { ...identity, mcpSessionId: 'mcp-conversation-b', chatgptSessionId: undefined };
-
-    const surfaceA = await registry.begin(conversationA);
-    const surfaceB = await registry.begin(conversationB);
-    await registry.activate(conversationA, 'pty-a');
-    await registry.activate(conversationB, 'pty-b');
-
-    expect(surfaceA.surface_id).not.toBe(surfaceB.surface_id);
-    expect(registry.current(conversationA).session_id).toBe('pty-a');
-    expect(registry.current(conversationB).session_id).toBe('pty-b');
-    expect(closed).toEqual([]);
-
-    const repeatedA = await registry.begin(conversationA);
-    expect(repeatedA.surface_id).toBe(surfaceA.surface_id);
-    expect(closed).toEqual([]);
-    expect(registry.current(conversationA).session_id).toBe('pty-a');
-    expect(registry.current(conversationB).session_id).toBe('pty-b');
-    registry.dispose();
-  });
-
-  it('recovers an exact surface capability after an MCP process restart', async () => {
-    const first = new TerminalTurnRegistry(async () => undefined, 60_000);
-    const surface = await first.begin(identity);
-    first.dispose();
-
-    const restartedIdentity = { ...identity, mcpSessionId: 'mcp-after-restart' };
-    const restarted = new TerminalTurnRegistry(async () => undefined, 60_000);
-    const recovered = restarted.recover(restartedIdentity, surface.surface_id!);
-
-    expect(recovered).toEqual(expect.objectContaining({
-      surface_id: surface.surface_id,
-      surface_open: true,
-      surface_active: false,
-      session_id: null,
-    }));
-    await restarted.activate(restartedIdentity, 'pty-after-restart');
-    expect(restarted.current(restartedIdentity).session_id).toBe('pty-after-restart');
-    restarted.dispose();
-  });
-
   it('treats already-missing PTYs as successful idempotent cleanup', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const registry = new TerminalTurnRegistry(async () => {

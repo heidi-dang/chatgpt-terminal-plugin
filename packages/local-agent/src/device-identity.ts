@@ -17,20 +17,58 @@ const identitySchema = z.object({
 
 export type DeviceIdentityData = z.infer<typeof identitySchema>;
 
-const preparedRotationSchema = z.object({
-  version: z.literal(1),
-  base_public_key: z.string().min(32),
-  identity: identitySchema,
-});
-
 export class DeviceIdentity {
   constructor(
     private readonly path: string,
     private data: DeviceIdentityData,
-    private readonly preparedRotation?: { path: string; basePublicKey: string },
+    private readonly preparedPath?: string,
+    private readonly basePublicKey?: string,
   ) {}
 
   static async loadOrCreate(path: string, rotate = false): Promise<DeviceIdentity> {
+    const identity = await DeviceIdentity.loadCurrentOrCreate(path);
+    if (!rotate) return identity;
+    const prepared = await DeviceIdentity.prepareRotation(path);
+    await prepared.commitPreparedRotation();
+    return prepared;
+  }
+
+  static async prepareRotation(path: string): Promise<DeviceIdentity> {
+    const current = await DeviceIdentity.loadCurrentOrCreate(path);
+    const preparedPath = rotationPath(path);
+    let prepared: DeviceIdentityData | undefined;
+    try {
+      prepared = identitySchema.parse(JSON.parse(await readFile(preparedPath, 'utf8')));
+      await chmod(preparedPath, 0o600);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+
+    if (prepared) {
+      if (prepared.device_id !== current.deviceId || prepared.agent_id !== current.agentId) {
+        throw new Error('Prepared device rotation does not match the active device identity.');
+      }
+      if (prepared.public_key === current.publicKey) {
+        await rm(preparedPath, { force: true });
+        prepared = undefined;
+      }
+    }
+
+    if (!prepared) {
+      const rotated = createKeyMaterial();
+      prepared = {
+        ...current.data,
+        public_key: rotated.publicKey,
+        private_key: rotated.privateKey,
+        rotated_at: new Date().toISOString(),
+      };
+      await writeIdentity(preparedPath, prepared);
+    }
+
+    return new DeviceIdentity(path, prepared, preparedPath, current.publicKey);
+  }
+
+  private static async loadCurrentOrCreate(path: string): Promise<DeviceIdentity> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     let data: DeviceIdentityData | undefined;
     try {
@@ -39,69 +77,36 @@ export class DeviceIdentity {
     } catch (error) {
       if (!isMissingFile(error)) throw error;
     }
-
     if (!data) {
       data = createIdentity();
       await writeIdentity(path, data);
-    } else if (rotate) {
-      const rotated = createKeyMaterial();
-      data = {
-        ...data,
-        public_key: rotated.publicKey,
-        private_key: rotated.privateKey,
-        rotated_at: new Date().toISOString(),
-      };
-      await writeIdentity(path, data);
     }
-
     return new DeviceIdentity(path, data);
-  }
-
-  static async prepareRotation(path: string): Promise<DeviceIdentity> {
-    const current = await DeviceIdentity.loadOrCreate(path);
-    const preparedPath = `${path}.rotation`;
-    try {
-      const prepared = preparedRotationSchema.parse(JSON.parse(await readFile(preparedPath, 'utf8')));
-      await chmod(preparedPath, 0o600);
-      if (prepared.identity.device_id !== current.deviceId || prepared.identity.agent_id !== current.agentId) {
-        throw new Error('Prepared device rotation does not match the active device identity.');
-      }
-      if (prepared.base_public_key !== current.publicKey) {
-        throw new Error('Prepared device rotation is stale because the active device key changed.');
-      }
-      return new DeviceIdentity(path, prepared.identity, { path: preparedPath, basePublicKey: prepared.base_public_key });
-    } catch (error) {
-      if (!isMissingFile(error)) throw error;
-    }
-
-    const rotated = createKeyMaterial();
-    const data: DeviceIdentityData = {
-      ...current.data,
-      public_key: rotated.publicKey,
-      private_key: rotated.privateKey,
-      rotated_at: new Date().toISOString(),
-    };
-    await writePreparedRotation(preparedPath, current.publicKey, data);
-    return new DeviceIdentity(path, data, { path: preparedPath, basePublicKey: current.publicKey });
-  }
-
-  async commitPreparedRotation(): Promise<void> {
-    if (!this.preparedRotation) throw new Error('Device identity is not a prepared rotation.');
-    const current = await DeviceIdentity.loadOrCreate(this.path);
-    if (current.deviceId !== this.deviceId || current.agentId !== this.agentId) {
-      throw new Error('Active device identity changed before the prepared rotation could be committed.');
-    }
-    if (current.publicKey !== this.preparedRotation.basePublicKey) {
-      throw new Error('Active device key changed before the prepared rotation could be committed.');
-    }
-    await writeIdentity(this.path, this.data);
-    await rm(this.preparedRotation.path, { force: true });
   }
 
   get deviceId(): string { return this.data.device_id; }
   get agentId(): string { return this.data.agent_id; }
   get publicKey(): string { return this.data.public_key; }
   get identityPath(): string { return this.path; }
+
+  async commitPreparedRotation(): Promise<void> {
+    if (!this.preparedPath || !this.basePublicKey) {
+      throw new Error('Device identity does not contain a prepared key rotation.');
+    }
+    const current = await DeviceIdentity.loadCurrentOrCreate(this.path);
+    if (current.deviceId !== this.deviceId || current.agentId !== this.agentId) {
+      throw new Error('Active device identity changed before the prepared rotation could be committed.');
+    }
+    if (current.publicKey === this.publicKey) {
+      await rm(this.preparedPath, { force: true });
+      return;
+    }
+    if (current.publicKey !== this.basePublicKey) {
+      throw new Error('Active device key changed before the prepared rotation could be committed.');
+    }
+    await rename(this.preparedPath, this.path);
+    await chmod(this.path, 0o600);
+  }
 
   signChallenge(challenge: GatewayAuthChallenge): string {
     const payload = gatewayChallengePayload(this.deviceId, challenge.nonce, challenge.issued_at);
@@ -137,6 +142,10 @@ export async function enrollDevice(options: {
   return deviceEnrollmentOutputSchema.parse(await response.json()).status;
 }
 
+function rotationPath(path: string): string {
+  return `${path}.rotation-pending`;
+}
+
 function createIdentity(): DeviceIdentityData {
   const keys = createKeyMaterial();
   const now = new Date().toISOString();
@@ -161,15 +170,6 @@ function createKeyMaterial(): { publicKey: string; privateKey: string } {
 async function writeIdentity(path: string, data: DeviceIdentityData): Promise<void> {
   const temporary = `${path}.tmp`;
   await writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, path);
-  await chmod(path, 0o600);
-}
-
-async function writePreparedRotation(path: string, basePublicKey: string, identity: DeviceIdentityData): Promise<void> {
-  const temporary = `${path}.tmp`;
-  const payload = { version: 1 as const, base_public_key: basePublicKey, identity };
-  await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   await chmod(temporary, 0o600);
   await rename(temporary, path);
   await chmod(path, 0o600);

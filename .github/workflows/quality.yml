@@ -44,5 +44,8 @@ jobs:
       - name: Real PTY E2E
         run: pnpm test:e2e
 
+      - name: Concurrency and reconnect soak
+        run: pnpm test:soak
+
       - name: Build
         run: pnpm build

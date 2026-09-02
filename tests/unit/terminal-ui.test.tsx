@@ -254,9 +254,26 @@ describe('terminal MCP App UI', () => {
   });
 
 
-  it('keeps a healthy SSE connection open after capability expiry and refreshes only after disconnect', async () => {
+  it('recovers from server-enforced capability expiry through MCP fallback and a fresh SSE', async () => {
     vi.useFakeTimers();
     const app = createFakeApp();
+    app.callServerTool.mockImplementation(async ({ name }: { name: string; arguments: Record<string, unknown> }) => {
+      if (name === 'terminal_read') {
+        return new Promise<CallToolResult>(() => undefined);
+      }
+      if (name === 'terminal_stream_refresh') {
+        return {
+          structuredContent: { session_id: 'session-1', status: 'running', cursor: 4 },
+          _meta: {
+            terminal_stream: {
+              url: 'https://terminal.example/events?token=refreshed',
+              expires_at: new Date(Date.now() + 60_000).toISOString(),
+            },
+          },
+        };
+      }
+      return { structuredContent: {} };
+    });
     const viewer = new TerminalViewer(app);
     viewer.bind();
     const shortLived = initialResult();
@@ -268,12 +285,7 @@ describe('terminal MCP App UI', () => {
     source.emitOpen();
     app.callServerTool.mockClear();
 
-    await vi.advanceTimersByTimeAsync(30_000);
-
-    expect(source.close).not.toHaveBeenCalled();
-    expect(app.callServerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'terminal_stream_refresh' }));
-    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
-
+    // The browser receives an EventSource error when the server ends the SSE at token expiry.
     source.emitError();
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -281,6 +293,14 @@ describe('terminal MCP App UI', () => {
       name: 'terminal_read',
       arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
     });
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_stream_refresh',
+      arguments: { session_id: 'session-1', after: 4 },
+    });
+    const refreshed = terminalSource('refreshed');
+    refreshed.emitOpen();
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
+    expect(source.close).toHaveBeenCalled();
     viewer.destroy();
   });
 
@@ -855,17 +875,28 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
-  it('releases widget resources on host teardown without ending the assistant turn', async () => {
+  it('closes the active turn and releases widget resources on host teardown', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: '11111111-1111-4111-8111-111111111111',
+        surface_open: true,
+        surface_active: false,
+        session_id: null,
+      },
+    });
     app.ontoolresult?.(initialResult());
     const source = terminalSource();
 
     await app.onteardown?.();
 
     expect(source.close).toHaveBeenCalledTimes(1);
-    expect(app.callServerTool).not.toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_turn_close',
+      arguments: { surface_id: '11111111-1111-4111-8111-111111111111' },
+    });
   });
 
   it('ignores an in-flight surface heartbeat after viewer destruction', async () => {

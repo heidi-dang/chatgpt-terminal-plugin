@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
       - name: Enable repository pnpm
         run: |
           corepack enable
@@ -74,16 +74,20 @@ jobs:
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
           AGENT_SERVICE_NAME: ${{ vars.TERMINAL_AGENT_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
-          MCP_URL: ${{ vars.TERMINAL_MCP_URL }}
-          SMOKE_HEADER_NAME: ${{ vars.TERMINAL_SMOKE_HEADER_NAME }}
-          SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_TOKEN }}
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
+          SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
+          SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
+          SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
         run: |
-          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME AGENT_SERVICE_NAME HEALTH_URL MCP_URL SMOKE_HEADER_NAME SMOKE_TOKEN SSH_KEY KNOWN_HOSTS; do
+          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME AGENT_SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
             [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
           done
           if [[ -n "$DEPLOY_PORT" && ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then echo "DEPLOY_PORT must be numeric" >&2; exit 64; fi
+          if [[ -z "$SMOKE_TOKEN" && ( -z "$SMOKE_CF_ACCESS_CLIENT_ID" || -z "$SMOKE_CF_ACCESS_CLIENT_SECRET" ) ]]; then
+            echo "Production requires an external MCP smoke credential so a real agent + Terminal SSE path is verified." >&2
+            exit 64
+          fi
       - name: Configure SSH trust
         env:
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
@@ -117,18 +121,35 @@ jobs:
           scp "${scp_port_args[@]}" "$archive" "$checksum" deploy/immutable-deploy.sh "$target:$remote_dir/"
           qroot=$(printf '%q' "$DEPLOY_ROOT")
           qservice=$(printf '%q' "$SERVICE_NAME")
+          qagentservice=$(printf '%q' "$AGENT_SERVICE_NAME")
           qhealth=$(printf '%q' "$HEALTH_URL")
-          qagent=$(printf '%q' "$AGENT_SERVICE_NAME")
           qdir=$(printf '%q' "$remote_dir")
           qrev=$(printf '%q' "$GITHUB_SHA")
           base=$(basename "$archive")
           qbase=$(printf '%q' "$base")
           ssh "${port_args[@]}" "$target" \
-            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_AGENT_SERVICE_NAME=$qagent TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
-      - name: Real MCP post-deployment smoke
+            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_AGENT_SERVICE_NAME=$qagentservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
+      - name: Public ChatGPT widget boundary smoke
         env:
-          MCP_SMOKE_URL: ${{ vars.TERMINAL_MCP_URL }}
-          MCP_SMOKE_HEADER_NAME: ${{ vars.TERMINAL_SMOKE_HEADER_NAME }}
-          MCP_SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_TOKEN }}
-          MCP_SMOKE_WIDGET_ORIGIN: https://web-sandbox.oaiusercontent.com
-        run: node scripts/mcp-smoke.mjs
+          HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+        run: |
+          set -euo pipefail
+          TERMINAL_SMOKE_URL="${HEALTH_URL%/health}/mcp" \
+            TERMINAL_SMOKE_WIDGET_ORIGIN="https://web-sandbox.oaiusercontent.com" \
+            TERMINAL_SMOKE_WIDGET_ONLY=1 \
+            node scripts/mcp-smoke.mjs
+      - name: Public MCP agent and Terminal SSE smoke
+        env:
+          HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+          SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
+          SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
+          SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          TERMINAL_SMOKE_URL="${HEALTH_URL%/health}/mcp" \
+            TERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" \
+            TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID="$SMOKE_CF_ACCESS_CLIENT_ID" \
+            TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET="$SMOKE_CF_ACCESS_CLIENT_SECRET" \
+            TERMINAL_SMOKE_WIDGET_ORIGIN="https://web-sandbox.oaiusercontent.com" \
+            TERMINAL_SMOKE_REQUIRE_AGENT=1 \
+            node scripts/mcp-smoke.mjs

@@ -14,9 +14,10 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env node packages/mcp-server/dist/cli.js
 Restart=on-failure
 RestartSec=3
+# The server itself drains for MCP_SHUTDOWN_GRACE_MS; systemd is the final hard cap.
 TimeoutStopSec=5
-KillMode=mixed
 KillSignal=SIGTERM
+KillMode=mixed
 UMask=0077
 StateDirectory=chatgpt-terminal
 StateDirectoryMode=0700

@@ -557,9 +557,16 @@ export class TerminalViewer {
       const theme = context.theme;
       if (typeof theme === 'string') this.doc.documentElement.dataset.theme = theme;
     };
-    this.app.onteardown = () => {
-      this.destroy();
-      return Promise.resolve({});
+    this.app.onteardown = async () => {
+      const surfaceId = this.surfaceId;
+      try {
+        if (surfaceId) await this.app.callServerTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceId } });
+      } catch (error) {
+        console.error('[terminal-app] terminal teardown cleanup failed', error);
+      } finally {
+        this.destroy();
+      }
+      return {};
     };
     this.app.onerror = (error) => {
       console.error('[terminal-app]', error);

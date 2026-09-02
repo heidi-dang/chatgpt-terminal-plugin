@@ -29,14 +29,34 @@ describe('immutable production deployment', () => {
     expect((await readFile(join(fixture.deployRoot, 'releases', revision, 'REVISION'), 'utf8')).trim()).toBe(revision);
     expect((await readFile(join(fixture.deployRoot, 'releases', revision, 'ARTIFACT_SHA256'), 'utf8')).trim()).toBe(artifact.sha256);
     expect((await stat(join(fixture.deployRoot, 'releases', revision))).mode & 0o222).toBe(0);
-    expect(await readFile(fixture.sudoLog, 'utf8')).toContain('systemctl restart terminal-test.service');
+    const log = await readFile(fixture.sudoLog, 'utf8');
+    expect(log).toContain('systemctl restart terminal-test.service');
+    expect(log).toContain('systemctl restart terminal-agent-test.service');
+  });
+
+  it('rejects an overlapping host deployment before mutating the active release', async () => {
+    const fixture = await createFixture();
+    const revision = 'e'.repeat(40);
+    const artifact = await makeArtifact(fixture.root, revision);
+    const lockPath = join(fixture.deployRoot, '.deploy.lock');
+    await writeFile(lockPath, '');
+    const holder = execFileAsync('flock', ['-n', lockPath, 'sleep', '1']);
+    await delay(100);
+
+    try {
+      await expect(runDeploy(fixture, artifact, revision, { TERMINAL_DEPLOY_LOCK_PATH: lockPath }))
+        .rejects.toMatchObject({ code: 75 });
+      await expect(readlink(join(fixture.deployRoot, 'current'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await holder;
+    }
   });
 
   it('serializes remote deployments with an OS lock', async () => {
     const source = await readFile(deployScript, 'utf8');
     expect(source).toContain('flock -n 9');
     expect(source).toContain('another Terminal deployment is already in progress');
-    expect(source).toContain('TERMINAL_DEPLOY_LOCK_FILE');
+    expect(source).toContain('TERMINAL_DEPLOY_LOCK_PATH');
   });
 
   it('restores the previous release when the health gate fails', async () => {
@@ -73,21 +93,31 @@ async function createFixture() {
   const deployRoot = join(root, 'deploy');
   const fakeBin = join(root, 'bin');
   const sudoLog = join(root, 'sudo.log');
+  const serverEnv = join(root, 'server.env');
   await mkdir(join(deployRoot, 'releases'), { recursive: true });
   await mkdir(fakeBin, { recursive: true });
-  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nexit 0\n`);
+  await writeFile(serverEnv, 'MCP_HOST=127.0.0.1\nMCP_PORT=18791\n');
+  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nif [[ "$1 $2 $3 $4" == "systemctl show -p ActiveState" ]]; then printf 'active\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p SubState" ]]; then printf 'running\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p MainPID" ]]; then printf '1234\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p EnvironmentFiles" ]]; then printf '%s (ignore_errors=no)\\n' "$FAKE_SERVER_ENV"; exit 0; fi\nif [[ "$1" == "awk" ]]; then shift; exec awk "$@"; fi\nexit 0\n`);
   await writeExecutable(join(fakeBin, 'curl'), `#!/usr/bin/env bash\n[[ "${'${FAKE_CURL_FAIL:-0}'}" == 1 ]] && exit 1\nexit 0\n`);
-  return { root, deployRoot, fakeBin, sudoLog };
+  return { root, deployRoot, fakeBin, sudoLog, serverEnv };
 }
 
 async function makeArtifact(root: string, revision: string) {
   const stage = join(root, `stage-${revision}`);
   await mkdir(join(stage, 'packages/mcp-server/dist'), { recursive: true });
+  await mkdir(join(stage, 'packages/local-agent/dist'), { recursive: true });
+  await mkdir(join(stage, 'packages/local-agent/node_modules/node-pty'), { recursive: true });
   await mkdir(join(stage, 'packages/terminal-ui/dist'), { recursive: true });
+  await mkdir(join(stage, 'scripts'), { recursive: true });
   await writeFile(join(stage, 'REVISION'), `${revision}\n`);
   await writeFile(join(stage, 'packages/mcp-server/dist/index.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/mcp-server/dist/cli.js'), 'export {};\n');
+  await writeFile(join(stage, 'packages/local-agent/dist/cli.js'), 'export {};\n');
+  await writeFile(join(stage, 'packages/local-agent/node_modules/node-pty/package.json'), JSON.stringify({ type: 'module', exports: './index.js' }));
+  await writeFile(join(stage, 'packages/local-agent/node_modules/node-pty/index.js'), 'export {};\n');
+  await writeFile(join(stage, 'NATIVE_RUNTIME_VERIFIED'), `node_major=${process.versions.node.split('.')[0]}\n`);
   await writeFile(join(stage, 'packages/terminal-ui/dist/index.html'), '<!doctype html><title>Terminal</title>\n');
+  await writeFile(join(stage, 'scripts/mcp-smoke.mjs'), "console.log('mcp_smoke=ok tool=terminal_list_agents agent_count=0');\n");
   const archive = join(root, `${revision}.tar.gz`);
   await execFileAsync('tar', ['-C', stage, '-czf', archive, '.']);
   const { stdout } = await execFileAsync('sha256sum', [archive]);
@@ -109,8 +139,10 @@ async function runDeploy(
       ...extraEnv,
       PATH: `${fixture.fakeBin}:${process.env.PATH ?? ''}`,
       FAKE_SUDO_LOG: fixture.sudoLog,
+      FAKE_SERVER_ENV: fixture.serverEnv,
       TERMINAL_DEPLOY_ROOT: fixture.deployRoot,
       TERMINAL_SERVICE_NAME: 'terminal-test.service',
+      TERMINAL_AGENT_SERVICE_NAME: 'terminal-agent-test.service',
       TERMINAL_HEALTH_URL: 'https://health.invalid/health',
     },
   });
@@ -124,4 +156,8 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 async function symlinkAbsolute(target: string, path: string): Promise<void> {
   const { symlink } = await import('node:fs/promises');
   await symlink(target, path);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }

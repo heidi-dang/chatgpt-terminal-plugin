@@ -1,3 +1,4 @@
+import { connect } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../packages/mcp-server/src/config.js';
 import { createTerminalHttpRuntime } from '../../packages/mcp-server/src/http.js';
@@ -32,21 +33,34 @@ describe('HTTP shutdown lifecycle', () => {
     await closing;
   });
 
-  it('force-closes persistent HTTP connections so deploy restarts do not wait for keep-alive timeouts', async () => {
+  it('force-closes stubborn sockets after the shutdown grace instead of hanging a deploy restart', async () => {
     const config = loadConfig({
       NODE_ENV: 'test', MCP_HOST: '127.0.0.1', MCP_PORT: '8787',
       MCP_PUBLIC_URL: 'http://127.0.0.1:8787/mcp', MCP_AUTH_MODE: 'development',
       MCP_DEVELOPMENT_TOKEN: 'http-shutdown-force-token-0123456789', DEVELOPMENT_USER_ID: 'user-force',
       STREAM_TOKEN_SECRET: 'http-shutdown-force-secret-0123456789abcdef',
+      MCP_SHUTDOWN_GRACE_MS: '10',
     });
     const runtime = await createTerminalHttpRuntime(config);
     await new Promise<void>((resolve, reject) => {
       runtime.httpServer.once('error', reject);
       runtime.httpServer.listen(0, '127.0.0.1', resolve);
     });
+    const address = runtime.httpServer.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate HTTP port.');
+    const socket = connect(address.port, '127.0.0.1');
+    cleanup.push(() => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+
     const closeAllConnections = vi.spyOn(runtime.httpServer, 'closeAllConnections');
-    await runtime.close();
+    const closing = runtime.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
     expect(closeAllConnections).toHaveBeenCalledOnce();
+    socket.destroy();
+    await closing;
   });
 
   it('coalesces concurrent runtime close calls into one teardown', async () => {
