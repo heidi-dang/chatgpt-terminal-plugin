@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { signalProcessTree } from './process-tree.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -226,19 +227,4 @@ function runtimeInvocation(runtime: CodeRuntime, environment: Readonly<Record<st
       return { extension: '.ts', command: configuredNode || process.execPath, args: (scriptPath) => ['--experimental-strip-types', scriptPath] };
     }
   }
-}
-
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (!pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-pid, signal);
-  } catch (error) {
-    if (!isNoSuchProcess(error)) throw error;
-  }
-}
-
-function isNoSuchProcess(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH');
 }
