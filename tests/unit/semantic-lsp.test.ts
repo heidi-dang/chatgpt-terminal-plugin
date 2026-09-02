@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -103,6 +103,42 @@ describe('Serena-style semantic LSP layer', () => {
     await expect(fixture.semantic.implementations('user-a', opened.semantic_id, 'sample.ts', 0, 16)).resolves.toMatchObject({
       locations: [expect.objectContaining({ uri: expect.stringContaining('/sample.ts') })],
     });
+  });
+
+  it('primes configured TypeScript projects and uses unscoped tsserver navto for workspace symbols', async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.root, 'packages/a/src'), { recursive: true });
+    await mkdir(join(fixture.root, 'packages/b/src'), { recursive: true });
+    await mkdir(join(fixture.root, '.worktrees/noise/src'), { recursive: true });
+    await writeFile(join(fixture.root, 'tsconfig.json'), JSON.stringify({ files: [], references: [{ path: './packages/a' }, { path: './packages/b' }] }), 'utf8');
+    await writeFile(join(fixture.root, 'eslint.config.js'), 'export default {};\n', 'utf8');
+    await writeFile(join(fixture.root, 'packages/a/tsconfig.json'), JSON.stringify({ include: ['src/**/*.ts'] }), 'utf8');
+    await writeFile(join(fixture.root, 'packages/b/tsconfig.json'), JSON.stringify({ include: ['src/**/*.ts'] }), 'utf8');
+    await writeFile(join(fixture.root, '.worktrees/noise/tsconfig.json'), JSON.stringify({ include: ['src/**/*.ts'] }), 'utf8');
+    await writeFile(join(fixture.root, 'packages/a/src/alpha.ts'), 'export function alpha() { return 1; }\n', 'utf8');
+    await writeFile(join(fixture.root, 'packages/b/src/beta.ts'), 'export function beta() { return 2; }\n', 'utf8');
+    await writeFile(join(fixture.root, '.worktrees/noise/src/noise.ts'), 'export function betaNoise() { return 3; }\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'typescript', root: fixture.root }, fixture.root);
+
+    const output = await fixture.semantic.findSymbols('user-a', opened.semantic_id, 'beta');
+
+    expect(output.symbols).toEqual([
+      expect.objectContaining({ name: 'beta', location: expect.objectContaining({ uri: expect.stringContaining('/packages/b/src/beta.ts') }) }),
+    ]);
+    const log = await readLog(fixture.logPath);
+    const didOpenUris = log
+      .filter((entry) => entry.method === 'textDocument/didOpen')
+      .map((entry) => ((entry.params as { textDocument?: { uri?: string } } | undefined)?.textDocument?.uri ?? ''));
+    expect(didOpenUris.some((uri) => uri.includes('/packages/a/src/alpha.ts'))).toBe(true);
+    expect(didOpenUris.some((uri) => uri.includes('/packages/b/src/beta.ts'))).toBe(true);
+    expect(didOpenUris.some((uri) => uri.includes('/.worktrees/'))).toBe(false);
+    const navto = log.find((entry) => entry.method === 'workspace/executeCommand');
+    expect(navto?.params).toMatchObject({
+      command: 'typescript.tsserverRequest',
+      arguments: ['navto', { searchValue: 'beta' }, {}],
+    });
+    expect((navto?.params as { arguments?: unknown[] } | undefined)?.arguments?.[1]).not.toHaveProperty('file');
+    expect(log.some((entry) => entry.method === 'workspace/symbol')).toBe(false);
   });
 
   it('captures publishDiagnostics notifications and returns the latest diagnostics for a synchronized file', async () => {
@@ -237,7 +273,10 @@ async function createFixture(): Promise<{
   const scriptPath = join(root, `${randomUUID()}.cjs`);
   await writeFile(scriptPath, fakeLspSource(), { encoding: 'utf8', mode: 0o700 });
   const lsp = new LspManager({
-    servers: { fake: { command: process.execPath, args: [scriptPath, logPath] } },
+    servers: {
+      fake: { command: process.execPath, args: [scriptPath, logPath] },
+      typescript: { command: process.execPath, args: [scriptPath, logPath] },
+    },
     environment: testEnvironment(),
     requestTimeoutMs: 2_000,
   });
@@ -250,10 +289,11 @@ async function createFixture(): Promise<{
 function fakeLspSource(): string {
   return String.raw`
 const fs = require('node:fs');
-const { pathToFileURL } = require('node:url');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 let buffer = Buffer.alloc(0);
 const logPath = process.argv[2];
 let rootUri = '';
+const openedUris = new Set();
 function send(message) {
   const body = JSON.stringify(message);
   process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body);
@@ -275,10 +315,12 @@ function handle(message) {
       referencesProvider: true,
       definitionProvider: true,
       implementationProvider: true,
-      renameProvider: true
+      renameProvider: true,
+      executeCommandProvider: { commands: ['typescript.tsserverRequest'] }
     } } });
   }
   if (message.method === 'textDocument/didOpen') {
+    openedUris.add(message.params.textDocument.uri);
     send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
       uri: message.params.textDocument.uri,
       version: message.params.textDocument.version,
@@ -292,6 +334,18 @@ function handle(message) {
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 37 } },
       selectionRange: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } }
     }] });
+  }
+  if (message.method === 'workspace/executeCommand' && message.params?.command === 'typescript.tsserverRequest') {
+    const [command, args] = message.params.arguments || [];
+    if (command === 'navto') {
+      const betaOpen = [...openedUris].some(uri => uri.endsWith('/packages/b/src/beta.ts'));
+      const body = args?.searchValue === 'beta' && betaOpen ? [{
+        name: 'beta', kind: 'function', kindModifiers: 'export', isCaseSensitive: true, matchKind: 'exact',
+        file: fileURLToPath(rootUri) + '/packages/b/src/beta.ts',
+        start: { line: 1, offset: 17 }, end: { line: 1, offset: 21 }
+      }] : [];
+      return send({ jsonrpc: '2.0', id: message.id, result: { seq: 0, type: 'response', command: 'navto', success: true, body } });
+    }
   }
   if (message.method === 'workspace/symbol') {
     if (message.params?.query === 'huge') {
