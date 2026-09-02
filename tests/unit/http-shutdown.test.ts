@@ -10,6 +10,28 @@ afterEach(async () => {
 });
 
 describe('HTTP shutdown lifecycle', () => {
+  it('stops admitting new HTTP connections as soon as shutdown begins', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      MCP_HOST: '127.0.0.1',
+      MCP_PORT: '8787',
+      MCP_PUBLIC_URL: 'http://127.0.0.1:8787/mcp',
+      MCP_AUTH_MODE: 'development',
+      MCP_DEVELOPMENT_TOKEN: 'http-shutdown-admission-token-0123456789',
+      DEVELOPMENT_USER_ID: 'user-shutdown-admission',
+      STREAM_TOKEN_SECRET: 'http-shutdown-admission-secret-0123456789abcdef',
+    });
+    const runtime = await createTerminalHttpRuntime(config);
+    await new Promise<void>((resolve, reject) => {
+      runtime.httpServer.once('error', reject);
+      runtime.httpServer.listen(0, '127.0.0.1', resolve);
+    });
+
+    const closing = runtime.close();
+    expect(runtime.httpServer.listening).toBe(false);
+    await closing;
+  });
+
   it('closes active terminal SSE responses instead of waiting for capability expiry', async () => {
     const config = loadConfig({
       NODE_ENV: 'test',
