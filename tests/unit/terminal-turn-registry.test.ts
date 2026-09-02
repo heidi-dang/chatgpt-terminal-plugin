@@ -120,4 +120,33 @@ describe('TerminalTurnRegistry', () => {
     expect(registry.current(identity).session_id).toBeNull();
     registry.dispose();
   });
+  it('treats already-missing PTYs as successful idempotent cleanup', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const registry = new TerminalTurnRegistry(async () => {
+      throw Object.assign(new Error('Terminal session was not found.'), { code: 'SESSION_NOT_FOUND' });
+    }, 60_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-gone');
+    await expect(registry.end(identity)).resolves.toEqual(expect.objectContaining({ surface_open: false }));
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    registry.dispose();
+  });
+
+  it('still reports real cleanup failures', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const registry = new TerminalTurnRegistry(async () => {
+      throw Object.assign(new Error('Agent is offline.'), { code: 'AGENT_OFFLINE' });
+    }, 60_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-failed');
+    await registry.end(identity);
+    expect(errorSpy).toHaveBeenCalledOnce();
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('terminal.turn_cleanup_failed');
+    errorSpy.mockRestore();
+    registry.dispose();
+  });
+
 });

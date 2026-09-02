@@ -541,23 +541,15 @@ describe('terminal MCP App UI', () => {
     expect(app.callServerTool).toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
   });
 
-  it('hot reloads CSS without replacing the document or terminal SSE source', async () => {
-    const css = '.terminal-shell { outline: 1px solid transparent; }';
-    const fetchMock = vi.fn(async () => new Response(css, { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const documentOpen = vi.spyOn(document, 'open');
+  it('keeps production streaming independent from the optional stylesheet reload endpoint', () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
     app.ontoolresult?.(initialResult());
-    const terminal = terminalSource();
-    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'))!;
 
-    reload.emit({ version: 'styles-v2', kind: 'styles' });
-    await vi.waitFor(() => expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toBe(css));
-    expect(fetchMock).toHaveBeenCalled();
-    expect(documentOpen).not.toHaveBeenCalled();
-    expect(terminal.close).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances.some((candidate) => candidate.url.endsWith('/terminal-ui/reload'))).toBe(false);
+    expect(terminalSource()).toBeDefined();
+    viewer.destroy();
   });
 
   it('adds rich terminal syntax tokens without changing the transcript text', () => {

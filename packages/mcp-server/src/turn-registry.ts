@@ -129,6 +129,7 @@ export class TerminalTurnRegistry {
     try {
       await this.closeTerminal(identity, sessionId);
     } catch (error) {
+      if (isErrorCode(error, 'SESSION_NOT_FOUND')) return;
       console.error(JSON.stringify({
         level: 'error',
         event: 'terminal.turn_cleanup_failed',
@@ -159,4 +160,8 @@ function closedState(surfaceId: string | null): TerminalTurnState {
 
 function turnKey(identity: RequestIdentity): string {
   return [identity.userId, identity.clientId, identity.chatgptSessionId ?? 'mcp-session'].join('\u0000');
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === code);
 }
