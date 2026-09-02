@@ -29,7 +29,9 @@ describe('immutable production deployment', () => {
     expect((await readFile(join(fixture.deployRoot, 'releases', revision, 'REVISION'), 'utf8')).trim()).toBe(revision);
     expect((await readFile(join(fixture.deployRoot, 'releases', revision, 'ARTIFACT_SHA256'), 'utf8')).trim()).toBe(artifact.sha256);
     expect((await stat(join(fixture.deployRoot, 'releases', revision))).mode & 0o222).toBe(0);
-    expect(await readFile(fixture.sudoLog, 'utf8')).toContain('systemctl restart terminal-test.service');
+    const log = await readFile(fixture.sudoLog, 'utf8');
+    expect(log).toContain('systemctl restart terminal-test.service');
+    expect(log).toContain('systemctl restart terminal-agent-test.service');
   });
 
   it('rejects an overlapping host deployment before mutating the active release', async () => {
@@ -94,10 +96,12 @@ async function createFixture() {
 async function makeArtifact(root: string, revision: string) {
   const stage = join(root, `stage-${revision}`);
   await mkdir(join(stage, 'packages/mcp-server/dist'), { recursive: true });
+  await mkdir(join(stage, 'packages/local-agent/dist'), { recursive: true });
   await mkdir(join(stage, 'packages/terminal-ui/dist'), { recursive: true });
   await writeFile(join(stage, 'REVISION'), `${revision}\n`);
   await writeFile(join(stage, 'packages/mcp-server/dist/index.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/mcp-server/dist/cli.js'), 'export {};\n');
+  await writeFile(join(stage, 'packages/local-agent/dist/cli.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/terminal-ui/dist/index.html'), '<!doctype html><title>Terminal</title>\n');
   const archive = join(root, `${revision}.tar.gz`);
   await execFileAsync('tar', ['-C', stage, '-czf', archive, '.']);
@@ -122,6 +126,7 @@ async function runDeploy(
       FAKE_SUDO_LOG: fixture.sudoLog,
       TERMINAL_DEPLOY_ROOT: fixture.deployRoot,
       TERMINAL_SERVICE_NAME: 'terminal-test.service',
+      TERMINAL_AGENT_SERVICE_NAME: 'terminal-agent-test.service',
       TERMINAL_HEALTH_URL: 'https://health.invalid/health',
     },
   });

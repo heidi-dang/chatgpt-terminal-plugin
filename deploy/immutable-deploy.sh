@@ -7,6 +7,7 @@ revision=${3:-}
 : "${TERMINAL_DEPLOY_ROOT:?TERMINAL_DEPLOY_ROOT is required}"
 : "${TERMINAL_SERVICE_NAME:?TERMINAL_SERVICE_NAME is required}"
 : "${TERMINAL_HEALTH_URL:?TERMINAL_HEALTH_URL is required}"
+agent_service=${TERMINAL_AGENT_SERVICE_NAME:-}
 [[ -f "$archive" && -f "$checksum_file" ]] || { echo "release archive/checksum missing" >&2; exit 66; }
 [[ "$revision" =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "invalid revision" >&2; exit 64; }
 
@@ -47,6 +48,7 @@ rollback() {
       ln -s "$previous" "$rollback_link"
       mv -Tf "$rollback_link" "$current"
       sudo systemctl restart "$TERMINAL_SERVICE_NAME" || true
+      [[ -z "$agent_service" ]] || sudo systemctl restart "$agent_service" || true
     else
       rm -f "$current"
     fi
@@ -64,6 +66,7 @@ else
   tar -xzf "$archive" -C "$staging"
   [[ "$(cat "$staging/REVISION")" == "$revision" ]] || { echo "release revision mismatch" >&2; exit 65; }
   [[ -f "$staging/packages/mcp-server/dist/cli.js" ]] || { echo "MCP CLI missing from release" >&2; exit 65; }
+  [[ -f "$staging/packages/local-agent/dist/cli.js" ]] || { echo "local-agent CLI missing from release" >&2; exit 65; }
   [[ -f "$staging/packages/terminal-ui/dist/index.html" ]] || { echo "Terminal UI missing from release" >&2; exit 65; }
   (cd "$staging" && node --input-type=module -e "await import('./packages/mcp-server/dist/index.js');")
   printf '%s\n' "$expected" > "$staging/ARTIFACT_SHA256"
@@ -79,6 +82,10 @@ switched=1
 sudo systemctl restart "$TERMINAL_SERVICE_NAME"
 sudo systemctl is-active --quiet "$TERMINAL_SERVICE_NAME"
 curl --retry 8 --retry-delay 1 --retry-all-errors --connect-timeout 5 --max-time 10 -fsS "$TERMINAL_HEALTH_URL" >/dev/null
+if [[ -n "$agent_service" ]]; then
+  sudo systemctl restart "$agent_service"
+  sudo systemctl is-active --quiet "$agent_service"
+fi
 switched=0
 trap - ERR
 printf 'deployed_revision=%s\n' "$revision"

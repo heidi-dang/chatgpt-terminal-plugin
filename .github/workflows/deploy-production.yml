@@ -72,6 +72,7 @@ jobs:
           DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
           DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          AGENT_SERVICE_NAME: ${{ vars.TERMINAL_AGENT_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
           SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
           SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
@@ -79,7 +80,7 @@ jobs:
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
         run: |
-          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
+          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME AGENT_SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
             [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
           done
           if [[ -z "$SMOKE_TOKEN" && ( -z "$SMOKE_CF_ACCESS_CLIENT_ID" || -z "$SMOKE_CF_ACCESS_CLIENT_SECRET" ) ]]; then
@@ -104,6 +105,7 @@ jobs:
           DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
           DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          AGENT_SERVICE_NAME: ${{ vars.TERMINAL_AGENT_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
         run: |
           set -euo pipefail
@@ -119,13 +121,14 @@ jobs:
           scp "${scp_port_args[@]}" "$archive" "$checksum" deploy/immutable-deploy.sh "$target:$remote_dir/"
           qroot=$(printf '%q' "$DEPLOY_ROOT")
           qservice=$(printf '%q' "$SERVICE_NAME")
+          qagentservice=$(printf '%q' "$AGENT_SERVICE_NAME")
           qhealth=$(printf '%q' "$HEALTH_URL")
           qdir=$(printf '%q' "$remote_dir")
           qrev=$(printf '%q' "$GITHUB_SHA")
           base=$(basename "$archive")
           qbase=$(printf '%q' "$base")
           ssh "${port_args[@]}" "$target" \
-            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
+            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_AGENT_SERVICE_NAME=$qagentservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
       - name: Authenticated MCP functional smoke
         env:
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
