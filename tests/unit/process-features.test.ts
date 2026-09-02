@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { terminalExecuteCodeBlockToolSchema, terminalLspRequestSchema } from '../../packages/protocol/src/index.js';
 import { CodeBlockExecutor } from '../../packages/local-agent/src/code-block-executor.js';
-import { cleanEnvironment, LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
+import { cleanEnvironment, discoverLspServers, LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
 import { LspManager } from '../../packages/local-agent/src/lsp-manager.js';
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -176,6 +176,21 @@ exec "${process.execPath}" "$@"
     await delay(60);
     expect(executor.cancel('user-a', executionId)).toEqual({ execution_id: executionId, cancelled: true });
     await expect(running).rejects.toMatchObject({ code: 'REQUEST_CANCELLED' });
+  });
+});
+
+describe('LSP server discovery', () => {
+  it('discovers available LSP binaries or returns an empty dictionary gracefully', () => {
+    const discovered = discoverLspServers();
+    expect(typeof discovered).toBe('object');
+    // Test with mock candidates to verify candidate matching
+    const mockDiscovered = discoverLspServers([
+      { serverId: 'custom-sh', command: 'sh', args: ['-c'] },
+      { serverId: 'nonexistent-bin', command: 'definitely-not-installed-binary-12345', args: [] },
+    ]);
+    expect(mockDiscovered['custom-sh']).toBeDefined();
+    expect(mockDiscovered['custom-sh']?.command).toBe('sh');
+    expect(mockDiscovered['nonexistent-bin']).toBeUndefined();
   });
 });
 

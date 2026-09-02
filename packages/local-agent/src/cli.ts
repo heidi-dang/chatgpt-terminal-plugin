@@ -4,6 +4,7 @@ import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
 import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
+import { discoverLspServers } from './lsp-discovery.js';
 
 function csv(value: string | undefined): string[] {
   return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
@@ -27,9 +28,11 @@ if (parsedGatewayUrl.protocol !== 'ws:' && parsedGatewayUrl.protocol !== 'wss:')
 const roots = csv(process.env.ALLOWED_WORKSPACE_ROOTS);
 const shells = csv(process.env.AGENT_SHELLS);
 const profile = executionProfileSchema.parse(process.env.EXECUTION_PROFILE ?? 'developer');
-const lspServers = lspServerDefinitionsSchema.parse(
+const configuredLspServers = lspServerDefinitionsSchema.parse(
   process.env.TERMINAL_LSP_SERVERS_JSON ? JSON.parse(process.env.TERMINAL_LSP_SERVERS_JSON) : {},
 );
+const discoveredLspServers = process.env.AGENT_DISABLE_LSP_DISCOVERY === '1' ? {} : discoverLspServers();
+const lspServers = { ...discoveredLspServers, ...configuredLspServers };
 if (profile === 'developer' && roots.length === 0) {
   throw new Error('ALLOWED_WORKSPACE_ROOTS is required when EXECUTION_PROFILE=developer.');
 }

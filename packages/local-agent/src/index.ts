@@ -8,6 +8,7 @@ import os from 'node:os';
 import * as pty from 'node-pty';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
+export { discoverLspServers } from './lsp-discovery.js';
 import { AuditLogger } from './audit-logger.js';
 import {
   TerminalProtocolError,
