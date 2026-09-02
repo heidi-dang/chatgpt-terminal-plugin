@@ -20,6 +20,8 @@ import {
   terminalReadOutputSchema,
   terminalSearchFilesOutputSchema,
   terminalWriteFileOutputSchema,
+  terminalDeleteFileOutputSchema,
+  terminalRenameFileOutputSchema,
   type Agent,
   type CodeCancelOutput,
   type CodeExecuteOutput,
@@ -39,6 +41,8 @@ import {
   type TerminalReadOutput,
   type TerminalSearchFilesOutput,
   type TerminalWriteFileOutput,
+  type TerminalDeleteFileOutput,
+  type TerminalRenameFileOutput,
   type TerminalSession,
   type TerminalStartInput,
 } from '@terminal/protocol';
@@ -289,6 +293,26 @@ export class AgentGateway {
       type: 'request', request_id: randomUUID(), action: 'file.write',
       input: { session_id: sessionId, path, content, create_directories: createDirectories },
     }, (raw) => terminalWriteFileOutputSchema.parse(raw));
+  }
+
+  async deleteFile(userId: string, sessionId: string, path: string): Promise<TerminalDeleteFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.delete',
+      input: { session_id: sessionId, path },
+    }, (raw) => terminalDeleteFileOutputSchema.parse(raw));
+  }
+
+  async renameFile(userId: string, sessionId: string, fromPath: string, toPath: string): Promise<TerminalRenameFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.rename',
+      input: { session_id: sessionId, from_path: fromPath, to_path: toPath },
+    }, (raw) => terminalRenameFileOutputSchema.parse(raw));
   }
 
   async searchFiles(userId: string, sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<TerminalSearchFilesOutput> {

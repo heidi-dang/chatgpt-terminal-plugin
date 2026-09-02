@@ -262,6 +262,30 @@ export class TerminalService {
     return this.gateway.writeFile(identity.userId, input.session_id, input.path, input.content, input.create_directories);
   }
 
+  async deleteFile(identity: RequestIdentity, input: { session_id: string; path: string }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_delete', { path: input.path });
+    await this.audit.record({
+      action: 'file_delete',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.deleteFile(identity.userId, input.session_id, input.path);
+  }
+
+  async renameFile(identity: RequestIdentity, input: { session_id: string; from_path: string; to_path: string }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_rename', { from_path: input.from_path, to_path: input.to_path });
+    await this.audit.record({
+      action: 'file_rename',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { from_path: input.from_path, to_path: input.to_path },
+    });
+    return this.gateway.renameFile(identity.userId, input.session_id, input.from_path, input.to_path);
+  }
+
   async executeCode(identity: RequestIdentity, rawInput: TerminalExecuteCodeBlockToolArgs): Promise<CodeExecuteOutput> {
     const input = terminalExecuteCodeBlockToolSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_execute_code_block', {
