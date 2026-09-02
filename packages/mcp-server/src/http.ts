@@ -367,6 +367,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   const httpServer = createServer(app);
+  let closePromise: Promise<void> | undefined;
   httpServer.on('upgrade', (request, socket, head) => {
     if (!isAllowedUpgradeHost(request.headers.host, config.allowedHosts)) {
       socket.destroy();
@@ -384,25 +385,27 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     httpServer,
     gateway,
     deviceRegistry,
-    async close() {
-      const httpClosed = httpServer.listening
-        ? new Promise<void>((resolve, reject) => {
-            httpServer.close((error) => error ? reject(error) : resolve());
-          })
-        : Promise.resolve();
-      clearInterval(transcriptRetentionTimer);
-      stopUiWatcher();
-      for (const client of uiReloadClients) client.end();
-      uiReloadClients.clear();
-      for (const client of terminalStreamClients) client.end();
-      terminalStreamClients.clear();
-      httpServer.closeIdleConnections();
-      turnRegistry.dispose();
-      gateway.closeAll();
-      for (const session of sessions.values()) await session.server.close();
-      sessions.clear();
-      await httpClosed;
-      await audit.flush();
+    close() {
+      return closePromise ??= (async () => {
+        const httpClosed = httpServer.listening
+          ? new Promise<void>((resolve, reject) => {
+              httpServer.close((error) => error ? reject(error) : resolve());
+            })
+          : Promise.resolve();
+        clearInterval(transcriptRetentionTimer);
+        stopUiWatcher();
+        for (const client of uiReloadClients) client.end();
+        uiReloadClients.clear();
+        for (const client of terminalStreamClients) client.end();
+        terminalStreamClients.clear();
+        httpServer.closeIdleConnections();
+        turnRegistry.dispose();
+        gateway.closeAll();
+        for (const session of sessions.values()) await session.server.close();
+        sessions.clear();
+        await httpClosed;
+        await audit.flush();
+      })();
     },
   };
 }

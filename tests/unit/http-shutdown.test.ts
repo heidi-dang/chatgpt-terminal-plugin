@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../packages/mcp-server/src/config.js';
 import { createTerminalHttpRuntime } from '../../packages/mcp-server/src/http.js';
 import { StreamTokenService } from '../../packages/mcp-server/src/stream-token.js';
@@ -30,6 +30,29 @@ describe('HTTP shutdown lifecycle', () => {
     const closing = runtime.close();
     expect(runtime.httpServer.listening).toBe(false);
     await closing;
+  });
+
+  it('coalesces concurrent runtime close calls into one teardown', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      MCP_HOST: '127.0.0.1',
+      MCP_PORT: '8787',
+      MCP_PUBLIC_URL: 'http://127.0.0.1:8787/mcp',
+      MCP_AUTH_MODE: 'development',
+      MCP_DEVELOPMENT_TOKEN: 'http-shutdown-concurrent-token-0123456789',
+      DEVELOPMENT_USER_ID: 'user-shutdown-concurrent',
+      STREAM_TOKEN_SECRET: 'http-shutdown-concurrent-secret-0123456789abcdef',
+    });
+    const runtime = await createTerminalHttpRuntime(config);
+    await new Promise<void>((resolve, reject) => {
+      runtime.httpServer.once('error', reject);
+      runtime.httpServer.listen(0, '127.0.0.1', resolve);
+    });
+    const closeAll = vi.spyOn(runtime.gateway, 'closeAll');
+
+    await Promise.all([runtime.close(), runtime.close()]);
+
+    expect(closeAll).toHaveBeenCalledTimes(1);
   });
 
   it('closes active terminal SSE responses instead of waiting for capability expiry', async () => {
