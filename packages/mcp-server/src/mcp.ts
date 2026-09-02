@@ -32,6 +32,10 @@ import {
   terminalListFilesOutputSchema,
   terminalWriteFileInputSchema,
   terminalWriteFileOutputSchema,
+  terminalDeleteFileInputSchema,
+  terminalDeleteFileOutputSchema,
+  terminalRenameFileInputSchema,
+  terminalRenameFileOutputSchema,
   terminalSearchFilesInputSchema,
   terminalSearchFilesOutputSchema,
   terminalTranscriptInputSchema,
@@ -386,6 +390,36 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     async (input, ctx) => resultFrom(async () => {
       const result = await deps.service.writeFile(identityFromContext(ctx), input);
       return terminalWriteFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_delete_file',
+    {
+      title: 'Delete a file',
+      description: 'Delete a file within the workspace of an active terminal session. Paths outside configured workspace roots or pointing to symbolic links/directories are rejected.',
+      inputSchema: terminalDeleteFileInputSchema,
+      outputSchema: terminalDeleteFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.deleteFile(identityFromContext(ctx), input);
+      return terminalDeleteFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_rename_file',
+    {
+      title: 'Rename or move a file',
+      description: 'Rename or move a file within the workspace of an active terminal session. Both source and destination paths must be within configured workspace roots.',
+      inputSchema: terminalRenameFileInputSchema,
+      outputSchema: terminalRenameFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.renameFile(identityFromContext(ctx), input);
+      return terminalRenameFileOutputSchema.parse(result);
     }),
   );
 
