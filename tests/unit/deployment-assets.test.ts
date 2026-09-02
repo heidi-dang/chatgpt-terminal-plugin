@@ -40,6 +40,36 @@ describe('deployment assets', () => {
     expect(perAgent).toBeGreaterThan(0);
   });
 
+  it('bounds production shutdown and persists restart-recovery state', async () => {
+    const unit = await readFile(new URL('deploy/systemd/chatgpt-terminal-mcp.service.example', root), 'utf8');
+    const environment = await readFile(new URL('deploy/server-environment.example', root), 'utf8');
+    const timeout = Number(unit.match(/^TimeoutStopSec=(\d+)$/m)?.[1]);
+
+    expect(timeout).toBeGreaterThan(0);
+    expect(timeout).toBeLessThanOrEqual(5);
+    expect(unit).toContain('KillMode=mixed');
+    expect(environment).toContain('MCP_SHUTDOWN_GRACE_MS=2000');
+    expect(environment).toContain('TERMINAL_TURN_STATE_PATH=/var/lib/chatgpt-terminal/terminal-turns.json');
+  });
+
+  it('keeps enrollment credentials out of the shipped systemd unit', async () => {
+    const unit = await readFile(new URL('deploy/systemd/chatgpt-terminal-agent.service.example', root), 'utf8');
+
+    expect(unit).toContain('EnvironmentFile=%h/.config/chatgpt-terminal-plugin/agent.env');
+    expect(unit).not.toMatch(/^Environment=AGENT_ENROLLMENT_TOKEN=/m);
+  });
+
+  it('ships a deployment single-flight gate and authenticated MCP functional smoke', async () => {
+    const deploy = await readFile(new URL('deploy/immutable-deploy.sh', root), 'utf8');
+    const workflow = await readFile(new URL('.github/workflows/deploy-production.yml', root), 'utf8');
+    const smoke = await readFile(new URL('scripts/mcp-smoke.mjs', root), 'utf8');
+
+    expect(workflow).toContain('group: terminal-mcp-production');
+    expect(workflow).toContain('TERMINAL_SMOKE_BEARER_TOKEN');
+    expect(deploy).toContain('flock -n 9');
+    expect(smoke).toContain("name: 'terminal_list_agents'");
+  });
+
   it('does not advertise unsupported local-agent queue controls', async () => {
     const source = await readFile(new URL('deploy/local-agent-environment.example', root), 'utf8');
 

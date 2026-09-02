@@ -66,7 +66,9 @@ export const TERMINAL_UI_URI = 'ui://terminal/v13.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
 const terminalSurfaceInputSchema = z.object({});
+const terminalSurfaceCloseInputSchema = z.object({ surface_id: z.string().uuid().optional() });
 const terminalSurfaceStatusInputSchema = z.object({ surface_id: z.string().uuid(), session_id: z.string().nullable().optional() });
+const terminalStartViewInputSchema = terminalStartInputSchema.extend({ surface_id: z.string().uuid().optional() });
 const terminalSurfaceOutputSchema = z.object({
   surface_id: z.string().nullable(),
   surface_open: z.boolean(),
@@ -194,6 +196,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     },
     async (input, ctx) => resultFrom(async () => {
       const identity = identityFromContext(ctx);
+      await deps.turnRegistry.recover(identity, input.surface_id);
       const state = deps.turnRegistry.status(identity, input.surface_id);
       return terminalSurfaceOutputSchema.parse(state.session_id === input.session_id ? state : await terminalSurfaceView(deps, identity, state));
     }),
@@ -203,32 +206,38 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_turn_close',
     {
       title: 'Close terminal turn',
-      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface.',
-      inputSchema: terminalSurfaceInputSchema,
+      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface. Pass surface_id from terminal_surface when available so cleanup can recover safely after an MCP restart.',
+      inputSchema: terminalSurfaceCloseInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       _meta: { ui: { visibility: ['model'] } },
     },
-    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identityFromContext(ctx)))),
+    async (input, ctx) => resultFrom(async () => {
+      const identity = identityFromContext(ctx);
+      await deps.turnRegistry.recover(identity, input.surface_id);
+      return terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identity));
+    }),
   );
 
   server.registerTool(
     'terminal_start',
     {
       title: 'Start terminal session',
-      description: 'Start a fresh PTY inside the already-open terminal_surface for this assistant turn. If another PTY is active in this turn, it is killed first and the same Terminal UI switches to this new stream. Never renders another Terminal UI.',
-      inputSchema: terminalStartInputSchema,
+      description: 'Start a fresh PTY inside the already-open terminal_surface for this assistant turn. Pass surface_id from terminal_surface when available so the same surface can be recovered after an MCP restart. If another PTY is active in this turn, it is killed first and the same Terminal UI switches to this new stream. Never renders another Terminal UI.',
+      inputSchema: terminalStartViewInputSchema,
       outputSchema: terminalStartViewOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async (input, ctx) => {
       try {
         const identity = identityFromContext(ctx);
+        const { surface_id: surfaceId, ...startInput } = input;
+        if (!deps.turnRegistry.current(identity).surface_open) await deps.turnRegistry.recover(identity, surfaceId);
         if (!deps.turnRegistry.current(identity).surface_open) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
         }
         await deps.turnRegistry.clearActive(identity);
-        const started = await deps.service.start(identity, input);
+        const started = await deps.service.start(identity, startInput);
         const turn = await deps.turnRegistry.activate(identity, started.session_id);
         const record = deps.gateway.getSessionForUser(identity.userId, started.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
@@ -708,6 +717,7 @@ function identityFromContext(ctx: ServerContext): RequestIdentity {
     userId,
     clientId: auth.clientId,
     executionProfile: executionProfile.data,
+    ...(ctx.sessionId ? { mcpSessionId: ctx.sessionId } : {}),
     ...(chatgptSessionId ? { chatgptSessionId } : {}),
   };
 }

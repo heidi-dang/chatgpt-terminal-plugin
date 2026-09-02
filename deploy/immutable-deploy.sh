@@ -14,6 +14,14 @@ expected=$(awk 'NR==1 { print $1 }' "$checksum_file")
 actual=$(sha256sum "$archive" | awk '{ print $1 }')
 [[ -n "$expected" && "$actual" == "$expected" ]] || { echo "artifact checksum mismatch" >&2; exit 65; }
 
+mkdir -p "$TERMINAL_DEPLOY_ROOT"
+lock_path=${TERMINAL_DEPLOY_LOCK_PATH:-"$TERMINAL_DEPLOY_ROOT/.deploy.lock"}
+exec 9>"$lock_path"
+if ! flock -n 9; then
+  echo "another Terminal deployment is already in progress" >&2
+  exit 75
+fi
+
 releases="$TERMINAL_DEPLOY_ROOT/releases"
 current="$TERMINAL_DEPLOY_ROOT/current"
 release_dir="$releases/$revision"

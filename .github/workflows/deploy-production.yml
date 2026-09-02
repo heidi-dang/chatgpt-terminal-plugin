@@ -73,12 +73,19 @@ jobs:
           DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+          SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
+          SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
+          SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
         run: |
           for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
             [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
           done
+          if [[ -z "$SMOKE_TOKEN" && ( -z "$SMOKE_CF_ACCESS_CLIENT_ID" || -z "$SMOKE_CF_ACCESS_CLIENT_SECRET" ) ]]; then
+            echo "configure TERMINAL_SMOKE_BEARER_TOKEN or both Cloudflare Access smoke credentials" >&2
+            exit 64
+          fi
           if [[ -n "$DEPLOY_PORT" && ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then echo "DEPLOY_PORT must be numeric" >&2; exit 64; fi
       - name: Configure SSH trust
         env:
@@ -119,3 +126,18 @@ jobs:
           qbase=$(printf '%q' "$base")
           ssh "${port_args[@]}" "$target" \
             "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
+      - name: Authenticated MCP functional smoke
+        env:
+          HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+          SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
+          SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
+          SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$HEALTH_URL" == */health ]] || { echo "TERMINAL_HEALTH_URL must end in /health" >&2; exit 64; }
+          smoke_url="${HEALTH_URL%/health}/mcp"
+          TERMINAL_SMOKE_URL="$smoke_url" \
+            TERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" \
+            TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID="$SMOKE_CF_ACCESS_CLIENT_ID" \
+            TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET="$SMOKE_CF_ACCESS_CLIENT_SECRET" \
+            node scripts/mcp-smoke.mjs
