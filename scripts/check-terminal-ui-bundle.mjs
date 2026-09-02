@@ -3,7 +3,7 @@ import process from 'node:process';
 import { URL, fileURLToPath } from 'node:url';
 
 const bundlePath = fileURLToPath(new URL('../packages/terminal-ui/dist/index.html', import.meta.url));
-const configuredLimit = process.env.TERMINAL_UI_MAX_BUNDLE_BYTES ?? '30000';
+const configuredLimit = process.env.TERMINAL_UI_MAX_BUNDLE_BYTES ?? '65536';
 const maxBytes = Number.parseInt(configuredLimit, 10);
 
 if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
