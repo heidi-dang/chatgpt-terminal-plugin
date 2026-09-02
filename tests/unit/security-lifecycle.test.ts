@@ -74,6 +74,37 @@ describe('security and lifecycle hardening', () => {
     expect(transcript).toContain('new');
   });
 
+  it('keeps flush pending for writes enqueued while an earlier tail is draining', async () => {
+    const logger = new AuditLogger('/tmp/audit-flush-race.jsonl', undefined);
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let secondStarted!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const secondStartedPromise = new Promise<void>((resolve) => { secondStarted = resolve; });
+    const internal = logger as unknown as {
+      fileTails: Map<string, Promise<void>>;
+      enqueue(path: string | undefined, operation: () => Promise<void>): Promise<void>;
+    };
+    internal.fileTails.set('/tmp/audit-flush-race.jsonl', first);
+
+    let flushed = false;
+    const flushing = logger.flush().then(() => { flushed = true; });
+    const second = internal.enqueue('/tmp/audit-flush-race.jsonl', async () => {
+      secondStarted();
+      await secondGate;
+    });
+
+    releaseFirst();
+    await secondStartedPromise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(flushed).toBe(false);
+
+    releaseSecond();
+    await Promise.all([flushing, second]);
+    expect(flushed).toBe(true);
+  });
+
   it('restores owner-only permissions when an audit file is externally rotated and recreated', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-audit-rotate-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

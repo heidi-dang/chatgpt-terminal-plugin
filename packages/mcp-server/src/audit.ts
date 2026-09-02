@@ -116,7 +116,11 @@ export class AuditLogger {
   }
 
   async flush(): Promise<void> {
-    await Promise.all(this.fileTails.values());
+    while (true) {
+      const tails = [...this.fileTails.entries()];
+      await Promise.all(tails.map(([, tail]) => tail));
+      if (tails.length === this.fileTails.size && tails.every(([key, tail]) => this.fileTails.get(key) === tail)) return;
+    }
   }
 
   private enqueue(path: string | undefined, operation: () => Promise<void>): Promise<void> {
