@@ -13,6 +13,7 @@ import { AuditLogger } from './audit-logger.js';
 import {
   TerminalProtocolError,
   type Agent,
+  type AgentHealthTelemetry,
   type CodeCancelOutput,
   type CodeExecuteInput,
   type CodeExecuteOutput,
@@ -68,6 +69,7 @@ interface ManagedSession {
 
 export interface TerminalAgentApi {
   describe(): Agent;
+  getTelemetry(): AgentHealthTelemetry;
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -337,8 +339,25 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.auditLogger = new AuditLogger(options.auditLogPath);
   }
 
+  getTelemetry(): AgentHealthTelemetry {
+    const runningSessions = [...this.sessions.values()].filter((s) => s.metadata.status === 'running').length;
+    return {
+      cpu_load: os.loadavg(),
+      freemem_bytes: os.freemem(),
+      totalmem_bytes: os.totalmem(),
+      uptime_seconds: os.uptime(),
+      active_sessions: runningSessions,
+      active_lsp_processes: this.lspManager.activeCount,
+      active_code_executions: this.codeExecutor.activeCount,
+    };
+  }
+
   describe(): Agent {
-    return { ...this.agent, capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] } };
+    return {
+      ...this.agent,
+      telemetry: this.getTelemetry(),
+      capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] },
+    };
   }
 
   listSessions(): TerminalSession[] {

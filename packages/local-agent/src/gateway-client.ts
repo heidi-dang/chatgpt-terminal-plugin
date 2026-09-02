@@ -342,7 +342,7 @@ export class AgentGatewayClient {
   private startHeartbeat(): void {
     this.clearHeartbeat();
     this.heartbeat = setInterval(() => {
-      this.send({ type: 'heartbeat', timestamp: new Date().toISOString() });
+      this.send({ type: 'heartbeat', timestamp: new Date().toISOString(), telemetry: this.agent.getTelemetry() });
     }, this.options.heartbeatMs);
     this.heartbeat.unref();
   }

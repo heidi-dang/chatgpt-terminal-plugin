@@ -94,6 +94,10 @@ export class CodeBlockExecutor {
     return { execution_id: executionId, cancelled: true };
   }
 
+  get activeCount(): number {
+    return this.active.size;
+  }
+
   shutdown(): void {
     for (const active of this.active.values()) this.terminate(active);
     this.active.clear();

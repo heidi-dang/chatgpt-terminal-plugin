@@ -186,6 +186,10 @@ export class LspManager {
     return { lsp_id: lspId, stopped: true };
   }
 
+  get activeCount(): number {
+    return this.processes.size;
+  }
+
   stopAll(): void {
     for (const managed of this.processes.values()) {
       managed.stopping = true;
