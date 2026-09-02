@@ -824,17 +824,28 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
-  it('releases widget resources on host teardown without ending the assistant turn', async () => {
+  it('closes the active turn and releases widget resources on host teardown', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
+    app.ontoolresult?.({
+      structuredContent: {
+        surface_id: '11111111-1111-4111-8111-111111111111',
+        surface_open: true,
+        surface_active: false,
+        session_id: null,
+      },
+    });
     app.ontoolresult?.(initialResult());
     const source = terminalSource();
 
     await app.onteardown?.();
 
     expect(source.close).toHaveBeenCalledTimes(1);
-    expect(app.callServerTool).not.toHaveBeenCalledWith({ name: 'terminal_turn_close', arguments: {} });
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_turn_close',
+      arguments: { surface_id: '11111111-1111-4111-8111-111111111111' },
+    });
   });
 
   it('ignores an in-flight surface heartbeat after viewer destruction', async () => {

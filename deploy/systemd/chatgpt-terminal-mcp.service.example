@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=chatgpt-terminal
 Group=chatgpt-terminal
-WorkingDirectory=/opt/chatgpt-terminal-plugin
+WorkingDirectory=/opt/chatgpt-terminal-plugin/current
 EnvironmentFile=/etc/chatgpt-terminal/mcp.env
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # Run the verified built release directly; pnpm is required for install/build, not service runtime.

@@ -17,6 +17,7 @@ describe('quality workflow', () => {
     expect(source).toContain('run: pnpm lint');
     expect(source).toContain('run: pnpm test');
     expect(source).toContain('run: pnpm test:e2e');
+    expect(source).toContain('run: pnpm test:soak');
     expect(source).toContain('run: pnpm build');
   });
 });

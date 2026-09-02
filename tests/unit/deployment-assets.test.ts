@@ -48,8 +48,10 @@ describe('deployment assets', () => {
     expect(timeout).toBeGreaterThan(0);
     expect(timeout).toBeLessThanOrEqual(5);
     expect(unit).toContain('KillMode=mixed');
+    expect(unit).toContain('WorkingDirectory=/opt/chatgpt-terminal-plugin/current');
     expect(environment).toContain('MCP_SHUTDOWN_GRACE_MS=2000');
     expect(environment).toContain('TERMINAL_TURN_STATE_PATH=/var/lib/chatgpt-terminal/terminal-turns.json');
+    expect(environment).toContain('TERMINAL_SURFACE_RETENTION_MS=2592000000');
   });
 
   it('keeps enrollment credentials out of the shipped systemd unit', async () => {
@@ -66,11 +68,17 @@ describe('deployment assets', () => {
 
     expect(workflow).toContain('group: terminal-mcp-production');
     expect(workflow).toContain('TERMINAL_SMOKE_BEARER_TOKEN');
-    expect(workflow).toContain('mandatory loopback MCP smoke already passed inside the atomic deploy');
+    expect(workflow).toContain('Public ChatGPT widget boundary smoke');
+    expect(workflow).toContain('TERMINAL_SMOKE_REQUIRE_AGENT=1');
+    expect(workflow).not.toContain('Public OAuth smoke skipped');
     expect(deploy).toContain('flock -n 9');
     expect(deploy).toContain('TERMINAL_SMOKE_LOCAL=1');
+    expect(deploy).toContain('TERMINAL_SMOKE_WIDGET_ORIGIN=');
     expect(deploy).toContain('scripts/mcp-smoke.mjs');
-    expect(smoke).toContain("name: 'terminal_list_agents'");
+    expect(smoke).toContain("callTool('terminal_list_agents'");
+    expect(smoke).toContain("callTool('terminal_start'");
+    expect(smoke).toContain("callTool('terminal_write'");
+    expect(smoke).toContain('fetchFirstSseFrame');
     expect(smoke).toContain("'x-terminal-deployment-smoke': '1'");
   });
 

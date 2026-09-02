@@ -77,6 +77,7 @@ const configSchema = z.object({
   TERMINAL_IDLE_TIMEOUT_MS: positiveInt(30 * 60_000, 7 * 24 * 60 * 60_000),
   TERMINAL_MAX_LIFETIME_MS: positiveInt(8 * 60 * 60_000, 30 * 24 * 60 * 60_000),
   TERMINAL_TURN_LEASE_MS: positiveInt(120_000, 60 * 60_000),
+  TERMINAL_SURFACE_RETENTION_MS: positiveInt(30 * 24 * 60 * 60_000, 365 * 24 * 60 * 60_000),
   TERMINAL_TURN_STATE_PATH: optionalString,
   TERMINAL_CLOSED_SESSION_RETENTION_MS: positiveInt(15 * 60_000, 7 * 24 * 60 * 60_000),
   TERMINAL_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
@@ -147,6 +148,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     }
   }
 
+  if (parsed.TERMINAL_SURFACE_RETENTION_MS < parsed.TERMINAL_TURN_LEASE_MS) {
+    throw new Error('TERMINAL_SURFACE_RETENTION_MS must be greater than or equal to TERMINAL_TURN_LEASE_MS.');
+  }
+
   if (parsed.MCP_EXTENSION_ROOT && !isAbsolute(parsed.MCP_EXTENSION_ROOT)) {
     throw new Error('MCP_EXTENSION_ROOT must be an absolute administrator-controlled path.');
   }
@@ -203,6 +208,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     terminalIdleTimeoutMs: parsed.TERMINAL_IDLE_TIMEOUT_MS,
     terminalMaxLifetimeMs: parsed.TERMINAL_MAX_LIFETIME_MS,
     terminalTurnLeaseMs: parsed.TERMINAL_TURN_LEASE_MS,
+    terminalSurfaceRetentionMs: parsed.TERMINAL_SURFACE_RETENTION_MS,
     terminalTurnStatePath: parsed.TERMINAL_TURN_STATE_PATH
       ?? (parsed.AGENT_DEVICE_REGISTRY_PATH ? join(dirname(parsed.AGENT_DEVICE_REGISTRY_PATH), 'terminal-turns.json') : undefined),
     closedSessionRetentionMs: parsed.TERMINAL_CLOSED_SESSION_RETENTION_MS,

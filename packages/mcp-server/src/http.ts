@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { Request, Response, NextFunction } from 'express';
-import { createMcpExpressApp, getOAuthProtectedResourceMetadataUrl, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
+import express, { type Request, type Response, type NextFunction } from 'express';
+import { getOAuthProtectedResourceMetadataUrl, hostHeaderValidation, localhostHostValidation, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
 import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema, type TerminalEvent } from '@terminal/protocol';
@@ -34,11 +34,29 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const allowedHosts = config.nodeEnv === 'production'
     ? [...new Set([...config.allowedHosts, '127.0.0.1', 'localhost', '::1'])]
     : config.allowedHosts;
-  const app = createMcpExpressApp({
-    host: config.host,
-    ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
-    ...(config.allowedOrigins.length > 0 ? { allowedOrigins: config.allowedOrigins } : {}),
-    jsonLimit: '512kb',
+  const app = express();
+  app.use(express.json({ limit: '512kb' }));
+  if (allowedHosts.length > 0) app.use(hostHeaderValidation(allowedHosts));
+  else if (isLoopbackHost(config.host)) app.use(localhostHostValidation());
+  app.use((req, res, next) => {
+    const origin = req.get('origin');
+    if (!origin) {
+      next();
+      return;
+    }
+    const widgetRoute = isWidgetBrowserRoute(req.path);
+    const allowed = isConfiguredBrowserOrigin(origin, config.allowedOrigins)
+      || (widgetRoute && isOpenAiWidgetOrigin(origin));
+    if (!allowed) {
+      res.status(403).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: `Invalid Origin: ${origin}` },
+        id: null,
+      });
+      return;
+    }
+    if (widgetRoute) setWidgetCorsHeaders(origin, res);
+    next();
   });
   const audit = new AuditLogger(config.auditLogPath, config.transcriptLogPath);
   await audit.pruneTranscript(config.transcriptRetentionDays);
@@ -75,6 +93,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     async (identity, sessionId) => service.close(identity, sessionId).then(() => undefined),
     config.terminalTurnLeaseMs,
     config.terminalTurnStatePath,
+    config.terminalSurfaceRetentionMs,
   );
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
@@ -116,7 +135,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       terminalUiStyleVersion = styles.version;
       res.setHeader('content-type', 'text/css; charset=utf-8');
       res.setHeader('cache-control', 'no-store, max-age=0');
-      res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
       res.setHeader('x-content-type-options', 'nosniff');
       res.status(200).send(styles.css);
@@ -130,7 +148,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
-    res.setHeader('access-control-allow-origin', '*');
     res.setHeader('cross-origin-resource-policy', 'cross-origin');
     res.setHeader('connection', 'keep-alive');
     res.setHeader('x-accel-buffering', 'no');
@@ -319,7 +336,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
 
       res.status(200);
       res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-      res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
       res.setHeader('cache-control', 'no-cache, no-store');
       res.setHeader('connection', 'keep-alive');
@@ -442,6 +458,50 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       })();
     },
   };
+}
+
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+function isWidgetBrowserRoute(pathname: string): boolean {
+  return pathname === '/terminal-ui/styles.css'
+    || pathname === '/terminal-ui/reload'
+    || /^\/terminal\/[^/]+\/events$/.test(pathname);
+}
+
+function isOpenAiWidgetOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return false;
+    const hostname = url.hostname.toLowerCase();
+    return hostname === 'web-sandbox.oaiusercontent.com'
+      || hostname.endsWith('.web-sandbox.oaiusercontent.com');
+  } catch {
+    return false;
+  }
+}
+
+function isConfiguredBrowserOrigin(origin: string, allowedOrigins: readonly string[]): boolean {
+  let actual: string;
+  try {
+    actual = new URL(origin).origin.toLowerCase();
+  } catch {
+    return false;
+  }
+  return allowedOrigins.some((allowed) => {
+    try {
+      return new URL(allowed).origin.toLowerCase() === actual;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function setWidgetCorsHeaders(origin: string, res: Response): void {
+  res.setHeader('access-control-allow-origin', origin);
+  res.append('vary', 'Origin');
 }
 
 function deviceIdFromBody(body: unknown): string {

@@ -3,6 +3,9 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { RequestIdentity } from './service.js';
 
+const DEFAULT_SURFACE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export interface TerminalTurnState {
   surface_id: string | null;
   surface_open: boolean;
@@ -14,22 +17,37 @@ interface TerminalTurnRecord {
   identity: RequestIdentity;
   surfaceId: string;
   sessionId: string | null;
-  expiresAt: number;
-  leaseTimer: NodeJS.Timeout | undefined;
+  surfaceExpiresAt: number;
+  activeExpiresAt: number | null;
+  expiryTimer: NodeJS.Timeout | undefined;
 }
 
-interface PersistedTurnRecord {
+interface PersistedTurnRecordV1 {
   identity: RequestIdentity;
   surfaceId: string;
   sessionId: string | null;
   expiresAt: number;
 }
 
-interface PersistedTurnState {
+interface PersistedTurnStateV1 {
   version: 1;
-  records: PersistedTurnRecord[];
+  records: PersistedTurnRecordV1[];
 }
 
+interface PersistedTurnRecordV2 {
+  identity: RequestIdentity;
+  surfaceId: string;
+  sessionId: string | null;
+  surfaceExpiresAt: number;
+  activeExpiresAt: number | null;
+}
+
+interface PersistedTurnStateV2 {
+  version: 2;
+  records: PersistedTurnRecordV2[];
+}
+
+type PersistedTurnState = PersistedTurnStateV1 | PersistedTurnStateV2;
 type CloseTerminal = (identity: RequestIdentity, sessionId: string) => Promise<void>;
 
 export class TerminalTurnRegistry {
@@ -40,12 +58,18 @@ export class TerminalTurnRegistry {
 
   constructor(
     private readonly closeTerminal: CloseTerminal,
-    private readonly leaseMs: number,
+    private readonly activeLeaseMs: number,
     private readonly statePath?: string,
+    private readonly surfaceRetentionMs = DEFAULT_SURFACE_RETENTION_MS,
   ) {}
 
-  static async load(closeTerminal: CloseTerminal, leaseMs: number, statePath?: string): Promise<TerminalTurnRegistry> {
-    const registry = new TerminalTurnRegistry(closeTerminal, leaseMs, statePath);
+  static async load(
+    closeTerminal: CloseTerminal,
+    activeLeaseMs: number,
+    statePath?: string,
+    surfaceRetentionMs = DEFAULT_SURFACE_RETENTION_MS,
+  ): Promise<TerminalTurnRegistry> {
+    const registry = new TerminalTurnRegistry(closeTerminal, activeLeaseMs, statePath, surfaceRetentionMs);
     await registry.restore();
     return registry;
   }
@@ -55,7 +79,9 @@ export class TerminalTurnRegistry {
     const existing = this.records.get(key);
     if (existing) {
       existing.identity = { ...existing.identity, ...identity };
-      this.armLease(key, existing);
+      this.renewSurface(existing);
+      if (existing.sessionId) this.renewActive(existing);
+      this.scheduleExpiry(key, existing);
       await this.persist();
       return stateFromRecord(existing);
     }
@@ -64,19 +90,28 @@ export class TerminalTurnRegistry {
       identity: { ...identity },
       surfaceId: randomUUID(),
       sessionId: null,
-      expiresAt: Date.now() + this.leaseMs,
-      leaseTimer: undefined,
+      surfaceExpiresAt: Date.now() + this.surfaceRetentionMs,
+      activeExpiresAt: null,
+      expiryTimer: undefined,
     };
     this.records.set(key, record);
     this.surfaceKeys.set(record.surfaceId, key);
-    this.armLease(key, record);
+    this.scheduleExpiry(key, record);
     await this.persist();
     return stateFromRecord(record);
   }
 
   async recover(identity: RequestIdentity, surfaceId?: string): Promise<TerminalTurnState> {
-    const current = this.records.get(turnKey(identity));
-    if (current) return stateFromRecord(current);
+    const currentKey = turnKey(identity);
+    const current = this.records.get(currentKey);
+    if (current) {
+      if (surfaceId && current.surfaceId !== surfaceId) return closedState(surfaceId);
+      this.renewSurface(current);
+      if (current.sessionId) this.renewActive(current);
+      this.scheduleExpiry(currentKey, current);
+      await this.persist();
+      return stateFromRecord(current);
+    }
 
     let candidate: TerminalTurnRecord | undefined;
     let oldKey: string | undefined;
@@ -88,11 +123,9 @@ export class TerminalTurnRegistry {
       if (matches.length === 1) [oldKey, candidate] = matches[0]!;
     }
     if (!candidate || !oldKey || !samePrincipal(candidate.identity, identity)) return closedState(surfaceId ?? null);
-    if (candidate.expiresAt <= Date.now()) {
-      await this.closeRecord(oldKey, candidate);
-      await this.persist();
-      return closedState(surfaceId ?? candidate.surfaceId);
-    }
+
+    await this.expireDue(oldKey, candidate);
+    if (this.records.get(oldKey) !== candidate) return closedState(surfaceId ?? candidate.surfaceId);
 
     const newKey = turnKey(identity);
     const conflict = this.records.get(newKey);
@@ -101,7 +134,9 @@ export class TerminalTurnRegistry {
     candidate.identity = { ...candidate.identity, ...identity };
     this.records.set(newKey, candidate);
     this.surfaceKeys.set(candidate.surfaceId, newKey);
-    this.armLease(newKey, candidate);
+    this.renewSurface(candidate);
+    if (candidate.sessionId) this.renewActive(candidate);
+    this.scheduleExpiry(newKey, candidate);
     await this.persist();
     return stateFromRecord(candidate);
   }
@@ -128,10 +163,23 @@ export class TerminalTurnRegistry {
         }
       }
       record.sessionId = sessionId;
-      this.armLease(key, record);
+      this.renewSurface(record);
+      this.renewActive(record);
+      this.scheduleExpiry(key, record);
       await this.persist();
       return stateFromRecord(record);
     });
+  }
+
+  touch(identity: RequestIdentity, sessionId: string): TerminalTurnState {
+    const key = turnKey(identity);
+    const record = this.records.get(key);
+    if (!record || record.sessionId !== sessionId) return record ? stateFromRecord(record) : closedState(null);
+    this.renewSurface(record);
+    this.renewActive(record);
+    this.scheduleExpiry(key, record);
+    void this.persist().catch((error) => logPersistenceFailure(error));
+    return stateFromRecord(record);
   }
 
   async clearActive(identity: RequestIdentity): Promise<TerminalTurnState> {
@@ -140,8 +188,10 @@ export class TerminalTurnRegistry {
     if (!record) return closedState(null);
     const sessionId = record.sessionId;
     record.sessionId = null;
+    record.activeExpiresAt = null;
     if (sessionId) await this.safeClose(record.identity, sessionId);
-    this.armLease(key, record);
+    this.renewSurface(record);
+    this.scheduleExpiry(key, record);
     await this.persist();
     return stateFromRecord(record);
   }
@@ -151,7 +201,9 @@ export class TerminalTurnRegistry {
     const record = this.records.get(key);
     if (!record || record.sessionId !== sessionId) return record ? stateFromRecord(record) : closedState(null);
     record.sessionId = null;
-    this.armLease(key, record);
+    record.activeExpiresAt = null;
+    this.renewSurface(record);
+    this.scheduleExpiry(key, record);
     void this.persist().catch((error) => logPersistenceFailure(error));
     return stateFromRecord(record);
   }
@@ -165,7 +217,9 @@ export class TerminalTurnRegistry {
     const key = turnKey(identity);
     const record = this.records.get(key);
     if (!record || record.surfaceId !== surfaceId) return closedState(surfaceId);
-    this.armLease(key, record);
+    this.renewSurface(record);
+    if (record.sessionId) this.renewActive(record);
+    this.scheduleExpiry(key, record);
     void this.persist().catch((error) => logPersistenceFailure(error));
     return stateFromRecord(record);
   }
@@ -175,7 +229,7 @@ export class TerminalTurnRegistry {
   }
 
   dispose(): void {
-    for (const record of this.records.values()) this.clearLease(record);
+    for (const record of this.records.values()) this.clearExpiry(record);
     this.records.clear();
     this.surfaceKeys.clear();
     this.activationTails.clear();
@@ -193,15 +247,21 @@ export class TerminalTurnRegistry {
     if (!isPersistedTurnState(parsed)) throw new Error('Persisted Terminal turn state is invalid.');
     const now = Date.now();
     for (const persisted of parsed.records) {
-      if (persisted.expiresAt <= now) continue;
-      const record: TerminalTurnRecord = { ...persisted, identity: { ...persisted.identity }, leaseTimer: undefined };
+      const record = normalizePersistedRecord(parsed.version, persisted, now, this.surfaceRetentionMs);
+      if (record.sessionId && record.activeExpiresAt !== null && record.activeExpiresAt <= now) {
+        const expiredSession = record.sessionId;
+        record.sessionId = null;
+        record.activeExpiresAt = null;
+        await this.safeClose(record.identity, expiredSession);
+      }
+      if (!record.sessionId && record.surfaceExpiresAt <= now) continue;
       const key = turnKey(record.identity);
       const existing = this.records.get(key);
-      if (existing && existing.expiresAt >= record.expiresAt) continue;
+      if (existing && existing.surfaceExpiresAt >= record.surfaceExpiresAt) continue;
       if (existing) this.surfaceKeys.delete(existing.surfaceId);
       this.records.set(key, record);
       this.surfaceKeys.set(record.surfaceId, key);
-      this.armLease(key, record, false);
+      this.scheduleExpiry(key, record);
     }
     await this.persist();
   }
@@ -221,34 +281,54 @@ export class TerminalTurnRegistry {
     }
   }
 
-  private armLease(key: string, record: TerminalTurnRecord, renew = true): void {
-    this.clearLease(record);
+  private renewSurface(record: TerminalTurnRecord): void {
+    record.surfaceExpiresAt = Date.now() + this.surfaceRetentionMs;
+  }
+
+  private renewActive(record: TerminalTurnRecord): void {
+    record.activeExpiresAt = Date.now() + this.activeLeaseMs;
+  }
+
+  private scheduleExpiry(key: string, record: TerminalTurnRecord): void {
+    this.clearExpiry(record);
+    const deadlines = [record.surfaceExpiresAt];
+    if (record.sessionId && record.activeExpiresAt !== null) deadlines.push(record.activeExpiresAt);
+    const deadline = Math.min(...deadlines);
+    record.expiryTimer = setTimeout(() => {
+      void this.expireDue(key, record).catch((error) => logPersistenceFailure(error));
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, deadline - Date.now())));
+    record.expiryTimer.unref?.();
+  }
+
+  private async expireDue(key: string, record: TerminalTurnRecord): Promise<void> {
+    if (this.records.get(key) !== record) return;
+    this.clearExpiry(record);
     const now = Date.now();
-    if (renew) record.expiresAt = now + this.leaseMs;
-    const remainingMs = Math.max(1, record.expiresAt - now);
-    record.leaseTimer = setTimeout(() => {
-      const current = this.records.get(key);
-      if (current !== record) return;
+    let changed = false;
+
+    if (record.sessionId && record.activeExpiresAt !== null && record.activeExpiresAt <= now) {
+      const sessionId = record.sessionId;
+      record.sessionId = null;
+      record.activeExpiresAt = null;
+      changed = true;
+      await this.safeClose(record.identity, sessionId);
+    }
+
+    if (!record.sessionId && record.surfaceExpiresAt <= now) {
       this.records.delete(key);
       this.surfaceKeys.delete(record.surfaceId);
-      this.clearLease(record);
-      if (record.sessionId) void this.safeClose(record.identity, record.sessionId);
-      void this.persist().catch((error) => logPersistenceFailure(error));
-    }, remainingMs);
-    record.leaseTimer.unref?.();
+      changed = true;
+    } else {
+      this.scheduleExpiry(key, record);
+    }
+
+    if (changed) await this.persist();
   }
 
-  private clearLease(record: TerminalTurnRecord): void {
-    if (!record.leaseTimer) return;
-    clearTimeout(record.leaseTimer);
-    record.leaseTimer = undefined;
-  }
-
-  private async closeRecord(key: string, record: TerminalTurnRecord): Promise<void> {
-    if (this.records.get(key) === record) this.records.delete(key);
-    this.surfaceKeys.delete(record.surfaceId);
-    this.clearLease(record);
-    if (record.sessionId) await this.safeClose(record.identity, record.sessionId);
+  private clearExpiry(record: TerminalTurnRecord): void {
+    if (!record.expiryTimer) return;
+    clearTimeout(record.expiryTimer);
+    record.expiryTimer = undefined;
   }
 
   private async persist(): Promise<void> {
@@ -259,13 +339,14 @@ export class TerminalTurnRegistry {
 
   private async writeState(): Promise<void> {
     if (!this.statePath) return;
-    const state: PersistedTurnState = {
-      version: 1,
+    const state: PersistedTurnStateV2 = {
+      version: 2,
       records: [...this.records.values()].map((record) => ({
         identity: { ...record.identity },
         surfaceId: record.surfaceId,
         sessionId: record.sessionId,
-        expiresAt: record.expiresAt,
+        surfaceExpiresAt: record.surfaceExpiresAt,
+        activeExpiresAt: record.activeExpiresAt,
       })),
     };
     await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
@@ -293,6 +374,34 @@ export class TerminalTurnRegistry {
       }));
     }
   }
+}
+
+function normalizePersistedRecord(
+  version: 1 | 2,
+  persisted: PersistedTurnRecordV1 | PersistedTurnRecordV2,
+  now: number,
+  surfaceRetentionMs: number,
+): TerminalTurnRecord {
+  if (version === 1) {
+    const legacy = persisted as PersistedTurnRecordV1;
+    return {
+      identity: { ...legacy.identity },
+      surfaceId: legacy.surfaceId,
+      sessionId: legacy.sessionId,
+      surfaceExpiresAt: now + surfaceRetentionMs,
+      activeExpiresAt: legacy.sessionId ? legacy.expiresAt : null,
+      expiryTimer: undefined,
+    };
+  }
+  const current = persisted as PersistedTurnRecordV2;
+  return {
+    identity: { ...current.identity },
+    surfaceId: current.surfaceId,
+    sessionId: current.sessionId,
+    surfaceExpiresAt: current.surfaceExpiresAt,
+    activeExpiresAt: current.activeExpiresAt,
+    expiryTimer: undefined,
+  };
 }
 
 function stateFromRecord(record: TerminalTurnRecord): TerminalTurnState {
@@ -324,22 +433,43 @@ function samePrincipal(left: RequestIdentity, right: RequestIdentity): boolean {
 
 function isPersistedTurnState(value: unknown): value is PersistedTurnState {
   if (!value || typeof value !== 'object') return false;
-  const state = value as Partial<PersistedTurnState>;
-  return state.version === 1 && Array.isArray(state.records) && state.records.every(isPersistedTurnRecord);
+  const state = value as { version?: unknown; records?: unknown };
+  if (!Array.isArray(state.records)) return false;
+  if (state.version === 1) return state.records.every(isPersistedTurnRecordV1);
+  if (state.version === 2) return state.records.every(isPersistedTurnRecordV2);
+  return false;
 }
 
-function isPersistedTurnRecord(value: unknown): value is PersistedTurnRecord {
+function isPersistedIdentity(identity: unknown): identity is RequestIdentity {
+  if (!identity || typeof identity !== 'object') return false;
+  const candidate = identity as Partial<RequestIdentity>;
+  return typeof candidate.userId === 'string'
+    && typeof candidate.clientId === 'string'
+    && isExecutionProfile(candidate.executionProfile);
+}
+
+function isPersistedTurnRecordV1(value: unknown): value is PersistedTurnRecordV1 {
   if (!value || typeof value !== 'object') return false;
-  const record = value as Partial<PersistedTurnRecord>;
+  const record = value as Partial<PersistedTurnRecordV1>;
   return Boolean(
-    record.identity
-    && typeof record.identity.userId === 'string'
-    && typeof record.identity.clientId === 'string'
-    && isExecutionProfile(record.identity.executionProfile)
+    isPersistedIdentity(record.identity)
     && typeof record.surfaceId === 'string'
     && (record.sessionId === null || typeof record.sessionId === 'string')
     && typeof record.expiresAt === 'number'
     && Number.isFinite(record.expiresAt),
+  );
+}
+
+function isPersistedTurnRecordV2(value: unknown): value is PersistedTurnRecordV2 {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<PersistedTurnRecordV2>;
+  return Boolean(
+    isPersistedIdentity(record.identity)
+    && typeof record.surfaceId === 'string'
+    && (record.sessionId === null || typeof record.sessionId === 'string')
+    && typeof record.surfaceExpiresAt === 'number'
+    && Number.isFinite(record.surfaceExpiresAt)
+    && (record.activeExpiresAt === null || (typeof record.activeExpiresAt === 'number' && Number.isFinite(record.activeExpiresAt))),
   );
 }
 

@@ -106,7 +106,7 @@ case "$mcp_host" in
 esac
 [[ "$mcp_port" =~ ^[0-9]+$ ]] || { echo "MCP_PORT is missing or invalid for deployment smoke" >&2; exit 1; }
 [[ -f "$release_dir/scripts/mcp-smoke.mjs" ]] || { echo "deployment smoke client missing from release" >&2; exit 1; }
-TERMINAL_SMOKE_URL="http://$smoke_host:$mcp_port/mcp" TERMINAL_SMOKE_LOCAL=1 node "$release_dir/scripts/mcp-smoke.mjs"
+TERMINAL_SMOKE_URL="http://$smoke_host:$mcp_port/mcp" TERMINAL_SMOKE_LOCAL=1 TERMINAL_SMOKE_WIDGET_ORIGIN="https://web-sandbox.oaiusercontent.com" node "$release_dir/scripts/mcp-smoke.mjs"
 
 switched=0
 trap - ERR

@@ -210,7 +210,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       inputSchema: terminalSurfaceCloseInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-      _meta: { ui: { visibility: ['model'] } },
+      _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
     async (input, ctx) => resultFrom(async () => {
       const identity = identityFromContext(ctx);
@@ -278,7 +278,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.read(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.read(identityWithTerminalActivity(deps, ctx, input.session_id), input)),
   );
 
   server.registerTool(
@@ -290,7 +290,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.write(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.write(identityWithTerminalActivity(deps, ctx, input.session_id), input)),
   );
 
   server.registerTool(
@@ -302,7 +302,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.resize(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.resize(identityWithTerminalActivity(deps, ctx, input.session_id), input)),
   );
 
   server.registerTool(
@@ -314,7 +314,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.interrupt(identityFromContext(ctx), input.session_id)),
+    async (input, ctx) => resultFrom(() => deps.service.interrupt(identityWithTerminalActivity(deps, ctx, input.session_id), input.session_id)),
   );
 
   server.registerTool(
@@ -327,7 +327,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.status(identityFromContext(ctx), input.session_id)),
+    async (input, ctx) => resultFrom(() => deps.service.status(identityWithTerminalActivity(deps, ctx, input.session_id), input.session_id)),
   );
 
   server.registerTool(
@@ -342,7 +342,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     },
     (input, ctx) => {
       try {
-        const identity = identityFromContext(ctx);
+        const identity = identityWithTerminalActivity(deps, ctx, input.session_id);
         const record = deps.gateway.getSessionForUser(identity.userId, input.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const stream = deps.streamTokens.issue(identity.userId, input.session_id);
@@ -387,7 +387,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.transcript(identityFromContext(ctx), input);
+      const result = await deps.service.transcript(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalTranscriptOutputSchema.parse(result);
     }),
   );
@@ -404,7 +404,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.readFile(identityFromContext(ctx), input);
+      const result = await deps.service.readFile(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalReadFileOutputSchema.parse(result);
     }),
   );
@@ -419,7 +419,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.listFiles(identityFromContext(ctx), input);
+      const result = await deps.service.listFiles(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalListFilesOutputSchema.parse(result);
     }),
   );
@@ -434,7 +434,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.writeFile(identityFromContext(ctx), input);
+      const result = await deps.service.writeFile(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalWriteFileOutputSchema.parse(result);
     }),
   );
@@ -449,7 +449,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.deleteFile(identityFromContext(ctx), input);
+      const result = await deps.service.deleteFile(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalDeleteFileOutputSchema.parse(result);
     }),
   );
@@ -464,7 +464,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.renameFile(identityFromContext(ctx), input);
+      const result = await deps.service.renameFile(identityWithTerminalActivity(deps, ctx, input.session_id), input);
       return terminalRenameFileOutputSchema.parse(result);
     }),
   );
@@ -479,7 +479,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
+      const result = await deps.service.searchFiles(identityWithTerminalActivity(deps, ctx, input.session_id), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
   );
@@ -705,6 +705,17 @@ async function terminalSurfaceView(
     }
     throw error;
   }
+}
+
+
+function identityWithTerminalActivity(
+  deps: McpServerDependencies,
+  ctx: ServerContext,
+  sessionId: string,
+): RequestIdentity {
+  const identity = identityFromContext(ctx);
+  deps.turnRegistry.touch(identity, sessionId);
+  return identity;
 }
 
 function identityFromContext(ctx: ServerContext): RequestIdentity {

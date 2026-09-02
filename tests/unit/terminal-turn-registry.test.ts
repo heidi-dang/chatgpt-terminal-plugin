@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -146,6 +146,39 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('migrates persisted v1 surface state without losing the existing widget capability', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-turn-v1-migration-'));
+    const statePath = join(root, 'turns.json');
+    const surfaceId = '77777777-7777-4777-8777-777777777777';
+    const legacyIdentity: RequestIdentity = { ...identity, mcpSessionId: 'mcp-legacy', chatgptSessionId: undefined };
+
+    try {
+      await writeFile(statePath, `${JSON.stringify({
+        version: 1,
+        records: [{
+          identity: legacyIdentity,
+          surfaceId,
+          sessionId: null,
+          expiresAt: Date.now() + 60_000,
+        }],
+      })}\n`);
+
+      const registry = await TerminalTurnRegistry.load(async () => undefined, 5_000, statePath, 20_000);
+      expect(registry.current(legacyIdentity)).toEqual(expect.objectContaining({
+        surface_id: surfaceId,
+        surface_open: true,
+        surface_active: false,
+        session_id: null,
+      }));
+      const migrated = JSON.parse(await readFile(statePath, 'utf8')) as { version: number; records: unknown[] };
+      expect(migrated.version).toBe(2);
+      expect(migrated.records).toHaveLength(1);
+      registry.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('recovers the exact persisted surface after an MCP process restart before terminal_start', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-turn-restart-'));
     const statePath = join(root, 'turns.json');
@@ -236,9 +269,29 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('renews an active PTY lease from matching model-side terminal activity', async () => {
+    vi.useFakeTimers();
+    const closed: string[] = [];
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000, undefined, 20_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-1');
+    await vi.advanceTimersByTimeAsync(4_000);
+    registry.touch(identity, 'session-1');
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(closed).toEqual([]);
+    expect(registry.current(identity).session_id).toBe('session-1');
+    registry.touch(identity, 'different-session');
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(closed).toEqual(['session-1']);
+    expect(registry.current(identity).surface_open).toBe(true);
+    registry.dispose();
+  });
+
   it('expires an abandoned surface even when no PTY was started', async () => {
     vi.useFakeTimers();
-    const registry = new TerminalTurnRegistry(async () => undefined, 5_000);
+    const registry = new TerminalTurnRegistry(async () => undefined, 1_000, undefined, 5_000);
 
     const surface = await registry.begin(identity);
     expect(registry.status(identity, surface.surface_id!).surface_open).toBe(true);
@@ -251,14 +304,14 @@ describe('TerminalTurnRegistry', () => {
   it('expires an abandoned PTY after the configured turn lease', async () => {
     vi.useFakeTimers();
     const closed: string[] = [];
-    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000);
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000, undefined, 20_000);
 
-    await registry.begin(identity);
+    const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-1');
     await vi.advanceTimersByTimeAsync(5_001);
 
     expect(closed).toEqual(['session-1']);
-    expect(registry.current(identity).session_id).toBeNull();
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, session_id: null }));
     registry.dispose();
   });
   it('treats already-missing PTYs as successful idempotent cleanup', async () => {

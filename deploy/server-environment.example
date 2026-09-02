@@ -49,6 +49,8 @@ TERMINAL_MAX_SESSIONS_PER_AGENT=8
 TERMINAL_IDLE_TIMEOUT_MS=1800000
 TERMINAL_MAX_LIFETIME_MS=28800000
 TERMINAL_TURN_LEASE_MS=120000
+# Keep the one conversation widget recoverable across later turns while abandoned PTYs still use the short lease above.
+TERMINAL_SURFACE_RETENTION_MS=2592000000
 # Persist the surface lease so a new MCP process can reclaim the same ChatGPT surface after a deployment restart.
 TERMINAL_TURN_STATE_PATH=/var/lib/chatgpt-terminal/terminal-turns.json
 # Keep final session metadata/events briefly for status, UI reconnect, and post-mortem reads, then release memory.

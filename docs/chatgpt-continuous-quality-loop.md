@@ -31,7 +31,7 @@ pnpm test:e2e
 pnpm build
 ```
 
-The Terminal UI bundle currently has a hard repository budget of 30,000 bytes. At creation of this playbook the built single-file UI was 29,956 bytes, so bundle headroom is a priority performance risk. UI improvements must recover and preserve meaningful headroom rather than simply adding weight until the hard limit is hit.
+The Terminal UI bundle currently has a hard repository budget of 65,536 bytes (64 KiB). The current single-file UI is roughly 30 KiB, so bundle headroom is a priority performance risk. UI improvements must recover and preserve meaningful headroom rather than simply adding weight until the hard limit is hit.
 
 ## Non-negotiable Git / PR invariant
 
@@ -135,7 +135,7 @@ Audit and measure:
 
 Performance changes require before/after evidence, not intuition.
 
-For the current UI, recover meaningful space below the 30,000-byte hard limit. A UI change that leaves only trivial headroom is not 10/10 unless there is strong evidence that further reduction would cause a meaningful regression.
+For the current UI, recover meaningful space below the 65,536-byte hard limit while avoiding unnecessary growth. A UI change that leaves only trivial headroom is not 10/10 unless there is strong evidence that further reduction would cause a meaningful regression.
 
 #### D. Refactoring and maintainability
 

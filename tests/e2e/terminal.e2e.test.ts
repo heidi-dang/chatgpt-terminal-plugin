@@ -187,8 +187,8 @@ describe('terminal MCP end-to-end', () => {
     const turnCloseTool = listed.tools.find((tool) => tool.name === 'terminal_turn_close');
     const turnCloseMeta = turnCloseTool?._meta as Record<string, unknown> | undefined;
     const turnCloseUi = turnCloseMeta?.ui as Record<string, unknown> | undefined;
-    expect(turnCloseUi?.visibility).toEqual(['model']);
-    expect(turnCloseMeta?.['openai/widgetAccessible']).toBeUndefined();
+    expect(turnCloseUi?.visibility).toEqual(['model', 'app']);
+    expect(turnCloseMeta?.['openai/widgetAccessible']).toBe(true);
 
     const continuation = structured(await client.callTool({ name: 'terminal_continue_task', arguments: {} }));
     expect(continuation).toMatchObject({
