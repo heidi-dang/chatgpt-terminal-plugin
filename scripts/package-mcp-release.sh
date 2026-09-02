@@ -21,6 +21,7 @@ head_revision=$(git rev-parse HEAD)
 revision="$resolved_revision"
 [[ -f packages/mcp-server/dist/index.js ]] || { echo "build MCP server before packaging" >&2; exit 65; }
 [[ -f packages/protocol/dist/index.js ]] || { echo "build protocol before packaging" >&2; exit 65; }
+[[ -f packages/local-agent/dist/cli.js ]] || { echo "build local agent before packaging" >&2; exit 65; }
 [[ -f packages/terminal-ui/dist/index.html ]] || { echo "build Terminal UI before packaging" >&2; exit 65; }
 
 mkdir -p "$output_dir"
@@ -28,6 +29,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/release/packages"
 pnpm --filter @terminal/mcp-server deploy --prod --legacy --reporter=append-only "$stage/release/packages/mcp-server"
+pnpm --filter @terminal/local-agent deploy --prod --legacy --reporter=append-only "$stage/release/packages/local-agent"
 mkdir -p "$stage/release/packages/terminal-ui/dist" "$stage/release/packages/terminal-ui/src"
 cp -p packages/terminal-ui/dist/index.html "$stage/release/packages/terminal-ui/dist/index.html"
 cp -p packages/terminal-ui/src/main.ts "$stage/release/packages/terminal-ui/src/main.ts"
@@ -35,6 +37,7 @@ cp -p packages/terminal-ui/src/styles.css "$stage/release/packages/terminal-ui/s
 printf '%s\n' "$revision" > "$stage/release/REVISION"
 
 node --input-type=module -e "await import(process.argv[1]);" "$stage/release/packages/mcp-server/dist/index.js"
+node --check "$stage/release/packages/local-agent/dist/cli.js"
 node --input-type=module -e "const runtime = await import(process.argv[1]); await runtime.readTerminalUiDocument(); await runtime.readTerminalUiStyles();" "$stage/release/packages/mcp-server/dist/ui-runtime.js"
 archive="$output_dir/chatgpt-terminal-mcp-${revision}.tar.gz"
 tar -C "$stage/release" -czf "$archive" .

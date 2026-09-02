@@ -1,0 +1,33 @@
+[Unit]
+Description=ChatGPT Terminal co-located local agent
+After=network-online.target chatgpt-terminal-mcp.service
+Wants=network-online.target chatgpt-terminal-mcp.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/chatgpt-terminal-plugin/current
+EnvironmentFile=/etc/chatgpt-terminal/agent.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# The immutable release contains both MCP and agent artifacts. The stable current symlink
+# is switched atomically before this service is restarted; never pin this unit to releases/<sha>.
+ExecStart=/usr/bin/env node packages/local-agent/dist/cli.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

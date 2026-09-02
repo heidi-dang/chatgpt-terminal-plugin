@@ -72,6 +72,7 @@ jobs:
           DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
           DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          AGENT_SERVICE_NAME: ${{ vars.TERMINAL_AGENT_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
           MCP_URL: ${{ vars.TERMINAL_MCP_URL }}
           SMOKE_HEADER_NAME: ${{ vars.TERMINAL_SMOKE_HEADER_NAME }}
@@ -79,7 +80,7 @@ jobs:
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
         run: |
-          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME HEALTH_URL MCP_URL SMOKE_HEADER_NAME SMOKE_TOKEN SSH_KEY KNOWN_HOSTS; do
+          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME AGENT_SERVICE_NAME HEALTH_URL MCP_URL SMOKE_HEADER_NAME SMOKE_TOKEN SSH_KEY KNOWN_HOSTS; do
             [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
           done
           if [[ -n "$DEPLOY_PORT" && ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then echo "DEPLOY_PORT must be numeric" >&2; exit 64; fi
@@ -100,6 +101,7 @@ jobs:
           DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
           DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
           SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          AGENT_SERVICE_NAME: ${{ vars.TERMINAL_AGENT_SERVICE_NAME }}
           HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
         run: |
           set -euo pipefail
@@ -116,15 +118,17 @@ jobs:
           qroot=$(printf '%q' "$DEPLOY_ROOT")
           qservice=$(printf '%q' "$SERVICE_NAME")
           qhealth=$(printf '%q' "$HEALTH_URL")
+          qagent=$(printf '%q' "$AGENT_SERVICE_NAME")
           qdir=$(printf '%q' "$remote_dir")
           qrev=$(printf '%q' "$GITHUB_SHA")
           base=$(basename "$archive")
           qbase=$(printf '%q' "$base")
           ssh "${port_args[@]}" "$target" \
-            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
+            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_AGENT_SERVICE_NAME=$qagent TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"
       - name: Real MCP post-deployment smoke
         env:
           MCP_SMOKE_URL: ${{ vars.TERMINAL_MCP_URL }}
           MCP_SMOKE_HEADER_NAME: ${{ vars.TERMINAL_SMOKE_HEADER_NAME }}
           MCP_SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_TOKEN }}
+          MCP_SMOKE_WIDGET_ORIGIN: https://web-sandbox.oaiusercontent.com
         run: node scripts/mcp-smoke.mjs

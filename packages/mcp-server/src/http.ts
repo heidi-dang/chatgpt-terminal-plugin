@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import type { Request, Response, NextFunction } from 'express';
-import { createMcpExpressApp, getOAuthProtectedResourceMetadataUrl, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
+import express, { type Request, type Response, type NextFunction } from 'express';
+import { getOAuthProtectedResourceMetadataUrl, hostHeaderValidation, localhostHostValidation, mcpAuthMetadataRouter, requireBearerAuth } from '@modelcontextprotocol/express';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
 import { TerminalProtocolError, deviceEnrollmentOutputSchema, deviceEnrollmentRequestSchema, type TerminalEvent } from '@terminal/protocol';
@@ -31,11 +31,29 @@ export interface TerminalHttpRuntime {
 }
 
 export async function createTerminalHttpRuntime(config: ServerConfig): Promise<TerminalHttpRuntime> {
-  const app = createMcpExpressApp({
-    host: config.host,
-    ...(config.allowedHosts.length > 0 ? { allowedHosts: config.allowedHosts } : {}),
-    ...(config.allowedOrigins.length > 0 ? { allowedOrigins: config.allowedOrigins } : {}),
-    jsonLimit: '512kb',
+  const app = express();
+  app.use(express.json({ limit: '512kb' }));
+  if (config.allowedHosts.length > 0) app.use(hostHeaderValidation([...config.allowedHosts]));
+  else if (isLoopbackHost(config.host)) app.use(localhostHostValidation());
+  app.use((req, res, next) => {
+    const origin = req.get('origin');
+    if (!origin) {
+      next();
+      return;
+    }
+    const widgetRoute = isWidgetBrowserRoute(req.path);
+    const allowed = isConfiguredBrowserOrigin(origin, config.allowedOrigins)
+      || (widgetRoute && isOpenAiWidgetOrigin(origin));
+    if (!allowed) {
+      res.status(403).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: `Invalid Origin: ${origin}` },
+        id: null,
+      });
+      return;
+    }
+    if (widgetRoute) setWidgetCorsHeaders(req, res);
+    next();
   });
   const audit = new AuditLogger(config.auditLogPath, config.transcriptLogPath);
   await audit.pruneTranscript(config.transcriptRetentionDays);
@@ -112,7 +130,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       terminalUiStyleVersion = styles.version;
       res.setHeader('content-type', 'text/css; charset=utf-8');
       res.setHeader('cache-control', 'no-store, max-age=0');
-      res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
       res.setHeader('x-content-type-options', 'nosniff');
       res.status(200).send(styles.css);
@@ -126,7 +143,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
-    res.setHeader('access-control-allow-origin', '*');
     res.setHeader('cross-origin-resource-policy', 'cross-origin');
     res.setHeader('connection', 'keep-alive');
     res.setHeader('x-accel-buffering', 'no');
@@ -301,7 +317,6 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
 
       res.status(200);
       res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-      res.setHeader('access-control-allow-origin', '*');
       res.setHeader('cross-origin-resource-policy', 'cross-origin');
       res.setHeader('cache-control', 'no-cache, no-store');
       res.setHeader('connection', 'keep-alive');
@@ -422,6 +437,53 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       })();
     },
   };
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+function isWidgetBrowserRoute(pathname: string): boolean {
+  return pathname === '/terminal-ui/styles.css'
+    || pathname === '/terminal-ui/reload'
+    || /^\/terminal\/[^/]+\/events$/.test(pathname);
+}
+
+function isOpenAiWidgetOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return false;
+    const hostname = url.hostname.toLowerCase();
+    return hostname === 'web-sandbox.oaiusercontent.com'
+      || hostname.endsWith('.web-sandbox.oaiusercontent.com');
+  } catch {
+    return false;
+  }
+}
+
+function isConfiguredBrowserOrigin(origin: string, allowedOrigins: readonly string[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return allowedOrigins.some((allowed) => {
+    const candidate = allowed.trim();
+    if (!candidate) return false;
+    try {
+      return new URL(candidate).hostname.toLowerCase() === hostname;
+    } catch {
+      return candidate.toLowerCase() === hostname;
+    }
+  });
+}
+
+function setWidgetCorsHeaders(req: Request, res: Response): void {
+  const origin = req.get('origin');
+  if (!origin) return;
+  res.setHeader('access-control-allow-origin', origin);
+  res.append('vary', 'Origin');
 }
 
 function deviceIdFromBody(body: unknown): string {
