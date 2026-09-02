@@ -8,6 +8,7 @@ export const terminalExecuteCodeBlockToolSchema = z.object({
   execution_id: z.string().uuid().optional(),
   runtime: codeRuntimeSchema,
   code: z.string().min(1).max(262_144),
+  stdin: z.string().max(262_144).optional(),
   cwd: z.string().min(1).max(4096).optional(),
   timeout_ms: z.number().int().positive().max(120_000).optional(),
 });

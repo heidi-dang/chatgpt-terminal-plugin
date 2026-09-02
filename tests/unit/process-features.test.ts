@@ -96,6 +96,47 @@ exec "${process.execPath}" "$@"
     await expect(access(marker)).resolves.toBeUndefined();
   });
 
+  it('passes stdin content to executing code processes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-stdin-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment() });
+    cleanup.push(() => executor.shutdown());
+
+    const output = await executor.execute('user-a', {
+      execution_id: randomUUID(),
+      runtime: 'node',
+      code: 'import { readFileSync } from "node:fs"; const input = readFileSync(0, "utf8"); console.log("ECHO:" + input.trim());',
+      stdin: 'hello-from-stdin',
+      timeout_ms: 2_000,
+    }, root);
+
+    expect(output.exit_code).toBe(0);
+    expect(output.stdout.trim()).toBe('ECHO:hello-from-stdin');
+  });
+
+  it('does not allocate a writable stdin pipe when stdin is omitted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-no-stdin-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment() });
+    cleanup.push(() => executor.shutdown());
+
+    const output = await executor.execute('user-a', {
+      execution_id: randomUUID(), runtime: 'node',
+      code: 'import { readFileSync } from "node:fs"; console.log(JSON.stringify(readFileSync(0, "utf8")))',
+      timeout_ms: 2_000,
+    }, root);
+
+    expect(output.exit_code).toBe(0);
+    expect(output.stdout.trim()).toBe('""');
+  });
+
+  it('enforces the stdin payload bound at the protocol boundary', () => {
+    const parsed = terminalExecuteCodeBlockToolSchema.safeParse({
+      agent_id: 'agent-a', runtime: 'node', code: 'process.exit(0)', stdin: 'x'.repeat(262_145),
+    });
+    expect(parsed.success).toBe(false);
+  });
+
   it('streams stdout and stderr chunks in real time via onChunk callback', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-code-stream-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
