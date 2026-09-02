@@ -25,6 +25,9 @@ import {
   terminalStatusOutputSchema,
   terminalStreamRefreshInputSchema,
   terminalStreamRefreshOutputSchema,
+  terminalWorkspaceRootsInputSchema,
+  terminalWorkspaceRootMutationInputSchema,
+  terminalWorkspaceRootsOutputSchema,
   terminalWriteInputSchema,
   terminalReadFileInputSchema,
   terminalReadFileOutputSchema,
@@ -436,6 +439,42 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
+  );
+
+  server.registerTool(
+    'terminal_workspace_roots',
+    {
+      title: 'List agent workspace roots',
+      description: 'List the persisted workspace roots currently authorized on a selected local agent.',
+      inputSchema: terminalWorkspaceRootsInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.getWorkspaceRoots(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_workspace_root_add',
+    {
+      title: 'Add agent workspace root',
+      description: 'Authorize and persist an additional local workspace root for future terminal, code, and LSP operations.',
+      inputSchema: terminalWorkspaceRootMutationInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.addWorkspaceRoot(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_workspace_root_remove',
+    {
+      title: 'Remove agent workspace root',
+      description: 'Remove and persist a local workspace authorization. Removal is rejected while an active terminal session is using that root.',
+      inputSchema: terminalWorkspaceRootMutationInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.removeWorkspaceRoot(identityFromContext(ctx), input)),
   );
 
   server.registerTool(

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { constants, readlinkSync, realpathSync } from 'node:fs';
+import { constants, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
@@ -41,6 +41,7 @@ export interface LocalTerminalAgentOptions {
   maxLifetimeMs?: number;
   closedSessionRetentionMs?: number;
   sweepIntervalMs?: number;
+  workspaceRootsStatePath?: string;
 }
 
 export interface AgentSessionSnapshot {
@@ -65,6 +66,9 @@ interface ManagedSession {
 export interface TerminalAgentApi {
   describe(): Agent;
   getTelemetry(): AgentHealthTelemetry;
+  getWorkspaceRoots(): string[];
+  addWorkspaceRoot(root: string): string[];
+  removeWorkspaceRoot(root: string): string[];
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -170,12 +174,30 @@ function defaultShells(): string[] {
 }
 
 export class WorkspacePolicy {
-  private readonly roots: string[];
+  private roots: string[];
 
   constructor(
     roots: string[],
     private readonly profile: ExecutionProfile,
   ) {
+    this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
+  }
+
+  getRoots(): string[] {
+    return [...this.roots];
+  }
+
+  addRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = unique([...this.roots, canonical]);
+  }
+
+  removeRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = this.roots.filter((r) => r !== canonical);
+  }
+
+  setRoots(roots: string[]): void {
     this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
   }
 
@@ -252,6 +274,41 @@ function canonicalWorkspacePath(path: string): string {
   }
 }
 
+function isPathWithin(root: string, candidate: string): boolean {
+  const delta = relative(root, candidate);
+  return delta === '' || (!delta.startsWith('..') && !isAbsolute(delta));
+}
+
+function loadWorkspaceRoots(statePath: string | undefined, fallback: string[]): string[] {
+  if (!statePath) return fallback;
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || !('roots' in parsed) || !Array.isArray((parsed as { roots?: unknown }).roots)) {
+      throw new Error('workspace root state must contain a roots array');
+    }
+    const roots = (parsed as { roots: unknown[] }).roots;
+    if (!roots.every((root) => typeof root === 'string' && root.length > 0 && root.length <= 4096) || roots.length > 256) {
+      throw new Error('workspace root state contains invalid roots');
+    }
+    return roots as string[];
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return fallback;
+    throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot load workspace root state: ${errorMsg(error)}`);
+  }
+}
+
+function persistWorkspaceRoots(statePath: string | undefined, roots: string[]): void {
+  if (!statePath) return;
+  mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+  const tempPath = `${statePath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify({ version: 1, roots })}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tempPath, statePath);
+  } catch (error) {
+    throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot persist workspace root state: ${errorMsg(error)}`);
+  }
+}
+
 function isTerminalFinal(status: TerminalSession['status']): boolean {
   return status === 'closed' || status === 'exited' || status === 'failed';
 }
@@ -300,9 +357,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     };
     this.sweepTimer = setInterval(() => this.sweepExpiredSessions(), options.sweepIntervalMs ?? 30_000);
     this.sweepTimer.unref();
-    this.workspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, options.executionProfile);
+    const workspaceRoots = loadWorkspaceRoots(options.workspaceRootsStatePath, options.allowedWorkspaceRoots);
+    this.workspacePolicy = new WorkspacePolicy(workspaceRoots, options.executionProfile);
     // Code and LSP execution are intentionally workspace-contained even for owner-full.
-    this.executionWorkspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, 'developer');
+    this.executionWorkspacePolicy = new WorkspacePolicy(workspaceRoots, 'developer');
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
@@ -320,6 +378,45 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       active_lsp_processes: this.lspManager.activeCount,
       active_code_executions: this.codeExecutor.activeCount,
     };
+  }
+
+  getWorkspaceRoots(): string[] {
+    return this.workspacePolicy.getRoots();
+  }
+
+  addWorkspaceRoot(root: string): string[] {
+    const previous = this.getWorkspaceRoots();
+    try {
+      this.workspacePolicy.addRoot(root);
+      this.executionWorkspacePolicy.addRoot(root);
+      const roots = this.getWorkspaceRoots();
+      persistWorkspaceRoots(this.options.workspaceRootsStatePath, roots);
+      return roots;
+    } catch (error) {
+      this.workspacePolicy.setRoots(previous);
+      this.executionWorkspacePolicy.setRoots(previous);
+      throw error;
+    }
+  }
+
+  removeWorkspaceRoot(root: string): string[] {
+    const canonical = canonicalWorkspacePath(root);
+    const active = [...this.sessions.values()].find((managed) => !isTerminalFinal(managed.metadata.status) && isPathWithin(canonical, managed.metadata.cwd));
+    if (active) {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot remove workspace root while terminal session ${active.metadata.session_id} is active within it.`);
+    }
+    const previous = this.getWorkspaceRoots();
+    try {
+      this.workspacePolicy.removeRoot(canonical);
+      this.executionWorkspacePolicy.removeRoot(canonical);
+      const roots = this.getWorkspaceRoots();
+      persistWorkspaceRoots(this.options.workspaceRootsStatePath, roots);
+      return roots;
+    } catch (error) {
+      this.workspacePolicy.setRoots(previous);
+      this.executionWorkspacePolicy.setRoots(previous);
+      throw error;
+    }
   }
 
   describe(): Agent {
@@ -344,7 +441,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'The effective execution profile does not allow terminal creation.');
     }
 
-    const cwd = new WorkspacePolicy(this.options.allowedWorkspaceRoots, effectiveProfile).resolveCwd(input.cwd);
+    const cwd = new WorkspacePolicy(this.workspacePolicy.getRoots(), effectiveProfile).resolveCwd(input.cwd);
     const shell = input.shell ?? this.shells[0];
     if (!shell || !this.shells.includes(shell)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Requested shell is not enabled for this agent.');
@@ -801,7 +898,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<CodeExecuteOutput> {
     this.assertProcessExecutionAllowed(requestedProfile);
-    const fallbackRoot = this.options.allowedWorkspaceRoots[0];
+    const fallbackRoot = this.executionWorkspacePolicy.getRoots()[0];
     const requestedCwd = input.cwd ?? fallbackRoot;
     if (!requestedCwd) {
       throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace root is configured for code execution.');

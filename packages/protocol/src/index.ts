@@ -336,6 +336,24 @@ export const terminalSearchFilesOutputSchema = z.object({
 });
 export type TerminalSearchFilesOutput = z.infer<typeof terminalSearchFilesOutputSchema>;
 
+export const terminalWorkspaceRootsInputSchema = z.object({
+  agent_id: z.string().min(1).max(256),
+});
+export type TerminalWorkspaceRootsInput = z.infer<typeof terminalWorkspaceRootsInputSchema>;
+
+export const terminalWorkspaceRootMutationInputSchema = z.object({
+  agent_id: z.string().min(1).max(256),
+  root: z.string().min(1).max(4096),
+});
+export type TerminalWorkspaceRootMutationInput = z.infer<typeof terminalWorkspaceRootMutationInputSchema>;
+
+export const terminalWorkspaceRootsOutputSchema = z.object({
+  roots: z.array(z.string().min(1).max(4096)).max(256),
+});
+export type TerminalWorkspaceRootsOutput = z.infer<typeof terminalWorkspaceRootsOutputSchema>;
+
+const agentWorkspaceRootInputSchema = z.object({ root: z.string().min(1).max(4096) });
+
 export const terminalTranscriptEntrySchema = z.object({
   type: z.enum(['command', 'output', 'error', 'status']),
   timestamp: z.string(),
@@ -433,6 +451,24 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     request_id: z.string().min(1),
     action: z.literal('file.rename'),
     input: terminalRenameFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.get'),
+    input: z.object({}),
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.add'),
+    input: agentWorkspaceRootInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.remove'),
+    input: agentWorkspaceRootInputSchema,
   }),
   z.object({
     type: z.literal('request'),

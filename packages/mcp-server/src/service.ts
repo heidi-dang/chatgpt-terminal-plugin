@@ -14,6 +14,8 @@ import {
   terminalStatusOutputSchema,
   terminalWriteInputSchema,
   terminalResizeInputSchema,
+  terminalWorkspaceRootsInputSchema,
+  terminalWorkspaceRootMutationInputSchema,
   type CodeCancelOutput,
   type CodeExecuteOutput,
   type ExecutionProfile,
@@ -32,6 +34,7 @@ import {
   type TerminalStartInput,
   type TerminalStartOutput,
   type TerminalStatusOutput,
+  type TerminalWorkspaceRootsOutput,
 } from '@terminal/protocol';
 import type { AuditLogger } from './audit.js';
 import type { ServerConfig } from './config.js';
@@ -284,6 +287,38 @@ export class TerminalService {
       input: { from_path: input.from_path, to_path: input.to_path },
     });
     return this.gateway.renameFile(identity.userId, input.session_id, input.from_path, input.to_path);
+  }
+
+  async getWorkspaceRoots(identity: RequestIdentity, rawInput: { agent_id: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootsInputSchema.parse(rawInput);
+    const output = await this.gateway.getWorkspaceRoots(identity.userId, input.agent_id);
+    await this.audit.record({
+      action: 'workspace_roots_list', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', output_metadata: { root_count: output.roots.length },
+    });
+    return output;
+  }
+
+  async addWorkspaceRoot(identity: RequestIdentity, rawInput: { agent_id: string; root: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootMutationInputSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'workspace_root_add', { agent_id: input.agent_id, root: input.root });
+    const output = await this.gateway.addWorkspaceRoot(identity.userId, input.agent_id, input.root);
+    await this.audit.record({
+      action: 'workspace_root_add', ...auditIdentity(identity), agent_id: input.agent_id, authorization: 'allow',
+      input: { root: input.root }, output_metadata: { root_count: output.roots.length },
+    });
+    return output;
+  }
+
+  async removeWorkspaceRoot(identity: RequestIdentity, rawInput: { agent_id: string; root: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootMutationInputSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'workspace_root_remove', { agent_id: input.agent_id, root: input.root });
+    const output = await this.gateway.removeWorkspaceRoot(identity.userId, input.agent_id, input.root);
+    await this.audit.record({
+      action: 'workspace_root_remove', ...auditIdentity(identity), agent_id: input.agent_id, authorization: 'allow',
+      input: { root: input.root }, output_metadata: { root_count: output.roots.length },
+    });
+    return output;
   }
 
   async executeCode(
