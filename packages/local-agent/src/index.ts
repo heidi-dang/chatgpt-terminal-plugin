@@ -70,6 +70,9 @@ interface ManagedSession {
 export interface TerminalAgentApi {
   describe(): Agent;
   getTelemetry(): AgentHealthTelemetry;
+  getWorkspaceRoots(): string[];
+  addWorkspaceRoot(root: string): void;
+  removeWorkspaceRoot(root: string): void;
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -195,13 +198,27 @@ function defaultShells(): string[] {
 }
 
 export class WorkspacePolicy {
-  private readonly roots: string[];
+  private roots: string[];
 
   constructor(
     roots: string[],
     private readonly profile: ExecutionProfile,
   ) {
     this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
+  }
+
+  getRoots(): string[] {
+    return [...this.roots];
+  }
+
+  addRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = unique([...this.roots, canonical]);
+  }
+
+  removeRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = this.roots.filter((r) => r !== canonical);
   }
 
   resolveCwd(requested?: string): string {
@@ -350,6 +367,20 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       active_lsp_processes: this.lspManager.activeCount,
       active_code_executions: this.codeExecutor.activeCount,
     };
+  }
+
+  getWorkspaceRoots(): string[] {
+    return this.workspacePolicy.getRoots();
+  }
+
+  addWorkspaceRoot(root: string): void {
+    this.workspacePolicy.addRoot(root);
+    this.executionWorkspacePolicy.addRoot(root);
+  }
+
+  removeWorkspaceRoot(root: string): void {
+    this.workspacePolicy.removeRoot(root);
+    this.executionWorkspacePolicy.removeRoot(root);
   }
 
   describe(): Agent {
