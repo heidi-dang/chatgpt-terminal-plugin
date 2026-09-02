@@ -19,6 +19,15 @@ function intEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+function boolEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return fallback;
+  if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+  throw new Error(`${name} must be a boolean (true/false or 1/0).`);
+}
+
+
 const gatewayUrl = process.env.AGENT_GATEWAY_URL;
 if (!gatewayUrl) throw new Error('AGENT_GATEWAY_URL is required.');
 const parsedGatewayUrl = parseGatewayUrl(gatewayUrl);
@@ -61,6 +70,17 @@ const agent = new LocalTerminalAgent({
   maxLifetimeMs: intEnv('TERMINAL_MAX_LIFETIME_MS', 8 * 60 * 60_000),
   closedSessionRetentionMs: intEnv('TERMINAL_CLOSED_SESSION_RETENTION_MS', 15 * 60_000),
   sweepIntervalMs: intEnv('TERMINAL_SWEEP_INTERVAL_MS', 30_000),
+  terminationGraceMs: intEnv('TERMINAL_TERMINATION_GRACE_MS', 750),
+  outputFlushIntervalMs: intEnv('TERMINAL_OUTPUT_FLUSH_INTERVAL_MS', 8),
+  outputFlushBytes: intEnv('TERMINAL_OUTPUT_FLUSH_BYTES', 32 * 1024),
+  ...(process.env.TERMINAL_EVENT_JOURNAL_DIR
+    ? {
+        eventJournalDir: process.env.TERMINAL_EVENT_JOURNAL_DIR,
+        eventJournalMaxBytes: intEnv('TERMINAL_EVENT_JOURNAL_MAX_BYTES', 8 * 1024 * 1024),
+        eventJournalRetentionMs: intEnv('TERMINAL_EVENT_JOURNAL_RETENTION_MS', 7 * 24 * 60 * 60_000),
+        eventJournalIncludeInput: boolEnv('TERMINAL_EVENT_JOURNAL_INCLUDE_INPUT', false),
+      }
+    : {}),
 });
 
 const client = new AgentGatewayClient(agent, {

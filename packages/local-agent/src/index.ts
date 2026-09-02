@@ -4,7 +4,12 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { constants, readlinkSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
-import * as pty from 'node-pty';
+import { NodePtyTerminalRuntime, type TerminalProcess, type TerminalRuntime, type TerminalRuntimeMetrics } from './terminal-runtime.js';
+import { SessionEventJournal } from './event-journal.js';
+export { NodePtyTerminalRuntime } from './terminal-runtime.js';
+export { SessionEventJournal } from './event-journal.js';
+export type { SessionEventJournalOptions, JournalReadResult } from './event-journal.js';
+export type { TerminalProcess, TerminalRuntime, TerminalRuntimeMetrics, TerminalSpawnOptions } from './terminal-runtime.js';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
 import {
@@ -39,6 +44,14 @@ export interface LocalTerminalAgentOptions {
   maxLifetimeMs?: number;
   closedSessionRetentionMs?: number;
   sweepIntervalMs?: number;
+  terminationGraceMs?: number;
+  outputFlushIntervalMs?: number;
+  outputFlushBytes?: number;
+  terminalRuntime?: TerminalRuntime;
+  eventJournalDir?: string;
+  eventJournalMaxBytes?: number;
+  eventJournalRetentionMs?: number;
+  eventJournalIncludeInput?: boolean;
 }
 
 export interface AgentSessionSnapshot {
@@ -48,7 +61,7 @@ export interface AgentSessionSnapshot {
 }
 
 interface ManagedSession {
-  pty: pty.IPty;
+  process: TerminalProcess;
   metadata: TerminalSession;
   events: TerminalEvent[];
   eventSizes: number[];
@@ -58,10 +71,14 @@ interface ManagedSession {
   earliestSequence: number;
   closeRequest?: { actor: TerminalEventActor; reason: string; finalized: boolean };
   cwdRefreshTimer?: NodeJS.Timeout;
+  outputFlushTimer: NodeJS.Timeout | undefined;
+  outputBuffer: string;
+  outputBufferBytes: number;
 }
 
 export interface TerminalAgentApi {
   describe(): Agent;
+  runtimeMetrics(): TerminalRuntimeMetrics;
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -251,12 +268,35 @@ function isTerminalFinal(status: TerminalSession['status']): boolean {
   return status === 'closed' || status === 'exited' || status === 'failed';
 }
 
+function splitUtf8ByBytes(text: string, maxBytes: number): string[] {
+  if (maxBytes <= 0 || Buffer.byteLength(text) <= maxBytes) return [text];
+  const chunks: string[] = [];
+  let current = '';
+  let currentBytes = 0;
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char);
+    if (current && currentBytes + charBytes > maxBytes) {
+      chunks.push(current);
+      current = '';
+      currentBytes = 0;
+    }
+    current += char;
+    currentBytes += charBytes;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly eventEmitter = new EventEmitter();
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly shells: string[];
   private readonly bufferHighWaterBytes: number;
   private readonly maxEventBytes: number;
+  private readonly outputFlushIntervalMs: number;
+  private readonly outputFlushBytes: number;
+  private readonly runtime: TerminalRuntime;
+  private readonly eventJournal: SessionEventJournal | undefined;
   private readonly idleTimeoutMs: number;
   private readonly maxLifetimeMs: number;
   private readonly closedSessionRetentionMs: number;
@@ -271,6 +311,18 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.shells = unique(options.shells ?? defaultShells());
     this.bufferHighWaterBytes = options.bufferHighWaterBytes ?? 1024 * 1024;
     this.maxEventBytes = options.maxEventBytes ?? 64 * 1024;
+    this.outputFlushIntervalMs = options.outputFlushIntervalMs ?? 8;
+    this.outputFlushBytes = Math.min(options.outputFlushBytes ?? 32 * 1024, this.maxEventBytes);
+    this.runtime = options.terminalRuntime ?? new NodePtyTerminalRuntime({ terminationGraceMs: options.terminationGraceMs ?? 750 });
+    this.eventJournal = options.eventJournalDir
+      ? new SessionEventJournal({
+          dir: options.eventJournalDir,
+          maxBytesPerSession: options.eventJournalMaxBytes ?? 8 * 1024 * 1024,
+          retentionMs: options.eventJournalRetentionMs ?? 7 * 24 * 60 * 60_000,
+          includeCommandInput: options.eventJournalIncludeInput ?? false,
+          sweepIntervalMs: options.sweepIntervalMs ?? 30_000,
+        })
+      : undefined;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000;
     this.maxLifetimeMs = options.maxLifetimeMs ?? 8 * 60 * 60_000;
     this.closedSessionRetentionMs = options.closedSessionRetentionMs ?? 15 * 60_000;
@@ -305,6 +357,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
   describe(): Agent {
     return { ...this.agent, capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] } };
+  }
+
+  runtimeMetrics(): TerminalRuntimeMetrics {
+    return this.runtime.metrics();
   }
 
   listSessions(): TerminalSession[] {
@@ -344,9 +400,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       exit_code: null,
     };
 
-    let terminal: pty.IPty;
+    let terminal: TerminalProcess;
     try {
-      terminal = pty.spawn(shell, [], {
+      terminal = this.runtime.spawn({
+        shell,
         name: process.env.TERM ?? 'xterm-256color',
         cols: input.cols,
         rows: input.rows,
@@ -362,7 +419,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
     metadata.status = 'running';
     const managed: ManagedSession = {
-      pty: terminal,
+      process: terminal,
       metadata,
       events: [],
       eventSizes: [],
@@ -370,15 +427,19 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       sequence: 0,
       retainedBytes: 0,
       earliestSequence: 1,
+      outputFlushTimer: undefined,
+      outputBuffer: '',
+      outputBufferBytes: 0,
     };
     this.sessions.set(sessionId, managed);
 
     terminal.onData((text) => {
       if (managed.closeRequest?.finalized) return;
-      this.recordEvent(managed, 'agent', 'terminal.stdout', { text });
+      this.enqueueOutput(managed, text);
       this.scheduleCwdRefresh(managed);
     });
     terminal.onExit(({ exitCode, signal }) => {
+      this.flushOutput(managed);
       managed.metadata.exit_code = exitCode;
       managed.metadata.last_activity_at = new Date().toISOString();
       const closeRequest = managed.closeRequest;
@@ -415,14 +476,14 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     if (byteLength > this.maxEventBytes) {
       throw new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Terminal input exceeds the configured event size limit.');
     }
-    managed.pty.write(text);
+    managed.process.write(text);
     this.recordEvent(managed, actor, 'command.input', { text });
     return this.snapshot(managed);
   }
 
   resize(sessionId: string, cols: number, rows: number): AgentSessionSnapshot {
     const managed = this.requireWritableSession(sessionId);
-    managed.pty.resize(cols, rows);
+    managed.process.resize(cols, rows);
     managed.metadata.cols = cols;
     managed.metadata.rows = rows;
     this.recordEvent(managed, 'chatgpt', 'terminal.resize', { cols, rows });
@@ -431,7 +492,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
   interrupt(sessionId: string): AgentSessionSnapshot {
     const managed = this.requireWritableSession(sessionId);
-    managed.pty.write('\u0003');
+    managed.process.interrupt();
     this.recordEvent(managed, 'chatgpt', 'terminal.signal', { signal: 'SIGINT' });
     return this.snapshot(managed);
   }
@@ -449,7 +510,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   readEvents(sessionId: string, after: number, maxBytes: number): { events: TerminalEvent[]; nextCursor: number; hasMore: boolean } {
     const managed = this.requireSession(sessionId);
     if (after < managed.earliestSequence - 1) {
-      throw new TerminalProtocolError('INVALID_CURSOR', 'Requested cursor is older than the retained terminal buffer.');
+      const replay = this.readJournalEvents(managed, after, maxBytes);
+      if (replay) return replay;
+      throw new TerminalProtocolError('INVALID_CURSOR', 'Requested cursor is older than the retained terminal buffer and durable replay is unavailable.');
     }
     if (after > managed.sequence) {
       throw new TerminalProtocolError('INVALID_CURSOR', 'Requested cursor is ahead of the terminal event stream.');
@@ -763,15 +826,18 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       if (managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'closing') continue;
       this.closeManaged(managed, 'system', 'agent_shutdown');
     }
+    this.eventJournal?.close();
     this.eventEmitter.removeAllListeners();
   }
 
   private sweepExpiredSessions(): void {
     const now = Date.now();
+    this.eventJournal?.sweep(now);
     for (const [sessionId, managed] of this.sessions) {
       const activityMs = Date.parse(managed.metadata.last_activity_at);
       if (isTerminalFinal(managed.metadata.status)) {
         if (Number.isFinite(activityMs) && now - activityMs >= this.closedSessionRetentionMs) {
+          if (managed.outputFlushTimer) clearTimeout(managed.outputFlushTimer);
           this.sessions.delete(sessionId);
         }
         continue;
@@ -797,8 +863,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     managed.closeRequest = closeRequest;
     managed.metadata.status = 'closing';
     managed.metadata.last_activity_at = new Date().toISOString();
+    this.flushOutput(managed);
     try {
-      managed.pty.kill();
+      managed.process.terminate();
     } catch (error) {
       closeRequest.finalized = true;
       managed.metadata.status = 'closed';
@@ -823,13 +890,78 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return managed;
   }
 
+  private readJournalEvents(
+    managed: ManagedSession,
+    after: number,
+    maxBytes: number,
+  ): { events: TerminalEvent[]; nextCursor: number; hasMore: boolean } | undefined {
+    if (!this.eventJournal) return undefined;
+    const replay = this.eventJournal.read(managed.metadata.session_id);
+    if (replay.earliestSequence === undefined || after < replay.earliestSequence - 1) return undefined;
+
+    const events: TerminalEvent[] = [];
+    let bytes = 0;
+    for (let index = 0; index < replay.events.length; index += 1) {
+      const event = replay.events[index];
+      const eventBytes = replay.eventBytes[index];
+      if (!event || eventBytes === undefined || event.sequence <= after) continue;
+      if (events.length === 0 && event.sequence !== after + 1) return undefined;
+      if (events.length > 0 && bytes + eventBytes > maxBytes) break;
+      if (events.length === 0 && eventBytes > maxBytes) {
+        throw new TerminalProtocolError(
+          'OUTPUT_LIMIT_REACHED',
+          `The next terminal event requires ${eventBytes} bytes, which exceeds max_bytes=${maxBytes}.`,
+        );
+      }
+      events.push(event);
+      bytes += eventBytes;
+    }
+
+    const nextCursor = events.at(-1)?.sequence ?? after;
+    return { events, nextCursor, hasMore: nextCursor < managed.sequence };
+  }
+
+  private enqueueOutput(managed: ManagedSession, text: string): void {
+    if (!text) return;
+    for (const chunk of splitUtf8ByBytes(text, this.outputFlushBytes)) {
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (managed.outputBufferBytes > 0 && managed.outputBufferBytes + chunkBytes > this.outputFlushBytes) {
+        this.flushOutput(managed);
+      }
+      managed.outputBuffer += chunk;
+      managed.outputBufferBytes += chunkBytes;
+      if (managed.outputBufferBytes >= this.outputFlushBytes) this.flushOutput(managed);
+    }
+
+    if (managed.outputBufferBytes > 0 && !managed.outputFlushTimer) {
+      managed.outputFlushTimer = setTimeout(() => {
+        managed.outputFlushTimer = undefined;
+        if (managed.closeRequest?.finalized) return;
+        this.flushOutput(managed);
+      }, this.outputFlushIntervalMs);
+      managed.outputFlushTimer.unref();
+    }
+  }
+
+  private flushOutput(managed: ManagedSession): void {
+    if (managed.outputFlushTimer) {
+      clearTimeout(managed.outputFlushTimer);
+      managed.outputFlushTimer = undefined;
+    }
+    if (managed.outputBufferBytes === 0) return;
+    const text = managed.outputBuffer;
+    managed.outputBuffer = '';
+    managed.outputBufferBytes = 0;
+    this.recordEvent(managed, 'agent', 'terminal.stdout', { text });
+  }
+
   private scheduleCwdRefresh(managed: ManagedSession): void {
     if (process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
     managed.cwdRefreshTimer = setTimeout(() => {
       delete managed.cwdRefreshTimer;
       if (isTerminalFinal(managed.metadata.status) || managed.closeRequest?.finalized) return;
       try {
-        const cwd = readlinkSync(`/proc/${managed.pty.pid}/cwd`);
+        const cwd = readlinkSync(`/proc/${managed.process.pid}/cwd`);
         if (cwd && cwd !== managed.metadata.cwd) {
           managed.metadata.cwd = cwd;
           this.recordEvent(managed, 'agent', 'cwd.changed', { cwd });
@@ -872,6 +1004,12 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     managed.eventSizes.push(eventBytes);
     managed.retainedBytes += eventBytes;
     managed.metadata.last_activity_at = now;
+    try {
+      this.eventJournal?.append(event);
+    } catch {
+      // Durable replay is optional. A disk-full or permission error must not
+      // interrupt the live terminal stream or recursively emit another event.
+    }
 
     while (managed.retainedBytes > this.bufferHighWaterBytes && managed.events.length - managed.eventHead > 1) {
       const removed = managed.events[managed.eventHead];

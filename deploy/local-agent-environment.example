@@ -18,6 +18,16 @@ TERMINAL_IDLE_TIMEOUT_MS=1800000
 TERMINAL_MAX_LIFETIME_MS=28800000
 TERMINAL_CLOSED_SESSION_RETENTION_MS=900000
 TERMINAL_SWEEP_INTERVAL_MS=30000
+# PTY runtime hardening: graceful tree shutdown before forced kill, plus bounded output coalescing.
+TERMINAL_TERMINATION_GRACE_MS=750
+TERMINAL_OUTPUT_FLUSH_INTERVAL_MS=8
+TERMINAL_OUTPUT_FLUSH_BYTES=32768
+
+# Optional durable terminal event replay. Disabled unless DIR is set. Command input is redacted by default.
+# TERMINAL_EVENT_JOURNAL_DIR=/home/your-user/.local/state/chatgpt-terminal-plugin/events
+# TERMINAL_EVENT_JOURNAL_MAX_BYTES=8388608
+# TERMINAL_EVENT_JOURNAL_RETENTION_MS=604800000
+# TERMINAL_EVENT_JOURNAL_INCLUDE_INPUT=false
 
 # Bootstrap enrollment values. Supply for initial enrollment/key rotation, then remove the token from the persistent service environment.
 # AGENT_ENROLLMENT_URL=https://terminal.example.com/agent/enroll
