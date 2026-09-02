@@ -6,6 +6,7 @@ const identity: RequestIdentity = {
   userId: 'user-a',
   clientId: 'client-a',
   executionProfile: 'owner-full',
+  mcpSessionId: 'mcp-a',
   chatgptSessionId: 'chat-a',
 };
 
@@ -179,6 +180,48 @@ describe('TerminalTurnRegistry', () => {
     expect(registry.current(identity).session_id).toBeNull();
     registry.dispose();
   });
+  it('isolates two concurrent MCP sessions for the same OAuth principal', async () => {
+    const closed: string[] = [];
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
+    const conversationA = { ...identity, mcpSessionId: 'mcp-conversation-a', chatgptSessionId: undefined };
+    const conversationB = { ...identity, mcpSessionId: 'mcp-conversation-b', chatgptSessionId: undefined };
+
+    const surfaceA = await registry.begin(conversationA);
+    const surfaceB = await registry.begin(conversationB);
+    await registry.activate(conversationA, 'pty-a');
+    await registry.activate(conversationB, 'pty-b');
+
+    expect(surfaceA.surface_id).not.toBe(surfaceB.surface_id);
+    expect(registry.current(conversationA).session_id).toBe('pty-a');
+    expect(registry.current(conversationB).session_id).toBe('pty-b');
+    expect(closed).toEqual([]);
+
+    await registry.begin(conversationA);
+    expect(closed).toEqual(['pty-a']);
+    expect(registry.current(conversationB).session_id).toBe('pty-b');
+    registry.dispose();
+  });
+
+  it('recovers an exact surface capability after an MCP process restart', async () => {
+    const first = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const surface = await first.begin(identity);
+    first.dispose();
+
+    const restartedIdentity = { ...identity, mcpSessionId: 'mcp-after-restart' };
+    const restarted = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const recovered = restarted.recover(restartedIdentity, surface.surface_id!);
+
+    expect(recovered).toEqual(expect.objectContaining({
+      surface_id: surface.surface_id,
+      surface_open: true,
+      surface_active: false,
+      session_id: null,
+    }));
+    await restarted.activate(restartedIdentity, 'pty-after-restart');
+    expect(restarted.current(restartedIdentity).session_id).toBe('pty-after-restart');
+    restarted.dispose();
+  });
+
   it('treats already-missing PTYs as successful idempotent cleanup', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const registry = new TerminalTurnRegistry(async () => {

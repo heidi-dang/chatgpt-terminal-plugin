@@ -44,6 +44,7 @@ export interface RequestIdentity {
   userId: string;
   clientId: string;
   executionProfile: ExecutionProfile;
+  mcpSessionId: string;
   chatgptSessionId?: string;
 }
 
@@ -425,6 +426,7 @@ function auditIdentity(identity: RequestIdentity) {
     user_id: identity.userId,
     client_id: identity.clientId,
     execution_profile: identity.executionProfile,
+    mcp_session_id: identity.mcpSessionId,
     ...(identity.chatgptSessionId ? { chatgpt_session_id: identity.chatgptSessionId } : {}),
   };
 }

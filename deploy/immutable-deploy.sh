@@ -7,6 +7,13 @@ revision=${3:-}
 : "${TERMINAL_DEPLOY_ROOT:?TERMINAL_DEPLOY_ROOT is required}"
 : "${TERMINAL_SERVICE_NAME:?TERMINAL_SERVICE_NAME is required}"
 : "${TERMINAL_HEALTH_URL:?TERMINAL_HEALTH_URL is required}"
+lock_file=${TERMINAL_DEPLOY_LOCK_FILE:-$TERMINAL_DEPLOY_ROOT/.deploy.lock}
+mkdir -p "$(dirname "$lock_file")"
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "another Terminal deployment is already in progress" >&2
+  exit 75
+fi
 [[ -f "$archive" && -f "$checksum_file" ]] || { echo "release archive/checksum missing" >&2; exit 66; }
 [[ "$revision" =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "invalid revision" >&2; exit 64; }
 

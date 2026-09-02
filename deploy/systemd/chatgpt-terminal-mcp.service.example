@@ -14,7 +14,9 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env node packages/mcp-server/dist/cli.js
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=20
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
 KillSignal=SIGTERM
 UMask=0077
 StateDirectory=chatgpt-terminal

@@ -47,6 +47,12 @@ describe('deployment assets', () => {
     expect(source).toContain('TERMINAL_BUFFER_HIGH_WATER_BYTES=');
   });
 
+  it('keeps the agent enrollment credential out of the systemd unit', async () => {
+    const source = await readFile(new URL('deploy/systemd/chatgpt-terminal-agent.service.example', root), 'utf8');
+    expect(source).toContain('EnvironmentFile=');
+    expect(source).not.toMatch(/^Environment=AGENT_ENROLLMENT_TOKEN=/m);
+  });
+
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
     const cases = [
       ['deploy/systemd/chatgpt-terminal-mcp.service.example', 'packages/mcp-server/dist/cli.js'],

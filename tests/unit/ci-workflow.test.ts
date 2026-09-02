@@ -20,3 +20,17 @@ describe('quality workflow', () => {
     expect(source).toContain('run: pnpm build');
   });
 });
+
+
+const deployWorkflow = new URL('../../.github/workflows/deploy-production.yml', import.meta.url);
+
+describe('production deployment workflow', () => {
+  it('uses single-flight deployment and a real authenticated MCP tool smoke', async () => {
+    const source = await readFile(deployWorkflow, 'utf8');
+    expect(source).toContain('group: terminal-mcp-production');
+    expect(source).toContain('cancel-in-progress: false');
+    expect(source).toContain('TERMINAL_MCP_URL');
+    expect(source).toContain('TERMINAL_SMOKE_TOKEN');
+    expect(source).toContain('node scripts/mcp-smoke.mjs');
+  });
+});

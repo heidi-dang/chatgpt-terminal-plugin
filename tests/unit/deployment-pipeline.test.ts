@@ -32,6 +32,13 @@ describe('immutable production deployment', () => {
     expect(await readFile(fixture.sudoLog, 'utf8')).toContain('systemctl restart terminal-test.service');
   });
 
+  it('serializes remote deployments with an OS lock', async () => {
+    const source = await readFile(deployScript, 'utf8');
+    expect(source).toContain('flock -n 9');
+    expect(source).toContain('another Terminal deployment is already in progress');
+    expect(source).toContain('TERMINAL_DEPLOY_LOCK_FILE');
+  });
+
   it('restores the previous release when the health gate fails', async () => {
     const fixture = await createFixture();
     const previous = 'b'.repeat(40);

@@ -91,7 +91,9 @@ export interface McpServerDependencies {
   streamTokens: StreamTokenService;
   turnRegistry: TerminalTurnRegistry;
   audit: AuditLogger;
+  mcpSessionId: () => string;
 }
+
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
   const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.13.0' });
@@ -133,7 +135,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalListAgentsOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async (ctx) => resultFrom(() => deps.service.listAgents(identityFromContext(ctx))),
+    async (ctx) => resultFrom(() => deps.service.listAgents(identityFromContext(ctx, deps.mcpSessionId()))),
   );
 
   server.registerTool(
@@ -149,7 +151,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         'openai/outputTemplate': TERMINAL_UI_URI,
       },
     },
-    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.begin(identityFromContext(ctx)))),
+    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.begin(identityFromContext(ctx, deps.mcpSessionId())))),
   );
 
   server.registerTool(
@@ -163,8 +165,9 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       _meta: { ui: { visibility: ['app'] }, 'openai/widgetAccessible': true },
     },
     async (input, ctx) => resultFrom(async () => {
-      const identity = identityFromContext(ctx);
-      const state = deps.turnRegistry.status(identity, input.surface_id);
+      const identity = identityFromContext(ctx, deps.mcpSessionId());
+      const current = deps.turnRegistry.current(identity);
+      const state = current.surface_open ? deps.turnRegistry.status(identity, input.surface_id) : deps.turnRegistry.recover(identity, input.surface_id);
       return terminalSurfaceOutputSchema.parse(state.session_id === input.session_id ? state : await terminalSurfaceView(deps, identity, state));
     }),
   );
@@ -179,7 +182,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       _meta: { ui: { visibility: ['model'] } },
     },
-    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identityFromContext(ctx)))),
+    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.end(identityFromContext(ctx, deps.mcpSessionId())))),
   );
 
   server.registerTool(
@@ -193,9 +196,15 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     },
     async (input, ctx) => {
       try {
-        const identity = identityFromContext(ctx);
-        if (!deps.turnRegistry.current(identity).surface_open) {
-          throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
+        const identity = identityFromContext(ctx, deps.mcpSessionId());
+        const currentTurn = deps.turnRegistry.current(identity);
+        if (!currentTurn.surface_open) {
+          if (!input.surface_id) {
+            throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
+          }
+          deps.turnRegistry.recover(identity, input.surface_id);
+        } else if (input.surface_id && currentTurn.surface_id !== input.surface_id) {
+          throw new TerminalProtocolError('INVALID_ARGUMENT', 'terminal_start surface_id does not match the active Terminal surface.');
         }
         await deps.turnRegistry.clearActive(identity);
         const started = await deps.service.start(identity, input);
@@ -235,7 +244,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.read(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.read(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -247,7 +256,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.write(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.write(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -259,7 +268,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.resize(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.resize(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -271,7 +280,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.interrupt(identityFromContext(ctx), input.session_id)),
+    async (input, ctx) => resultFrom(() => deps.service.interrupt(identityFromContext(ctx, deps.mcpSessionId()), input.session_id)),
   );
 
   server.registerTool(
@@ -284,7 +293,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true },
     },
-    async (input, ctx) => resultFrom(() => deps.service.status(identityFromContext(ctx), input.session_id)),
+    async (input, ctx) => resultFrom(() => deps.service.status(identityFromContext(ctx, deps.mcpSessionId()), input.session_id)),
   );
 
   server.registerTool(
@@ -299,7 +308,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     },
     (input, ctx) => {
       try {
-        const identity = identityFromContext(ctx);
+        const identity = identityFromContext(ctx, deps.mcpSessionId());
         const record = deps.gateway.getSessionForUser(identity.userId, input.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const stream = deps.streamTokens.issue(identity.userId, input.session_id);
@@ -327,7 +336,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const identity = identityFromContext(ctx);
+      const identity = identityFromContext(ctx, deps.mcpSessionId());
       const result = await deps.service.close(identity, input.session_id);
       deps.turnRegistry.deactivate(identity, input.session_id);
       return result;
@@ -344,7 +353,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.transcript(identityFromContext(ctx), input);
+      const result = await deps.service.transcript(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalTranscriptOutputSchema.parse(result);
     }),
   );
@@ -361,7 +370,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.readFile(identityFromContext(ctx), input);
+      const result = await deps.service.readFile(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalReadFileOutputSchema.parse(result);
     }),
   );
@@ -376,7 +385,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.listFiles(identityFromContext(ctx), input);
+      const result = await deps.service.listFiles(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalListFilesOutputSchema.parse(result);
     }),
   );
@@ -391,7 +400,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.writeFile(identityFromContext(ctx), input);
+      const result = await deps.service.writeFile(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalWriteFileOutputSchema.parse(result);
     }),
   );
@@ -406,7 +415,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.deleteFile(identityFromContext(ctx), input);
+      const result = await deps.service.deleteFile(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalDeleteFileOutputSchema.parse(result);
     }),
   );
@@ -421,7 +430,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.renameFile(identityFromContext(ctx), input);
+      const result = await deps.service.renameFile(identityFromContext(ctx, deps.mcpSessionId()), input);
       return terminalRenameFileOutputSchema.parse(result);
     }),
   );
@@ -436,7 +445,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(async () => {
-      const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
+      const result = await deps.service.searchFiles(identityFromContext(ctx, deps.mcpSessionId()), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
   );
@@ -450,7 +459,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalWorkspaceRootsOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.getWorkspaceRoots(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.getWorkspaceRoots(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -462,7 +471,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalWorkspaceRootsOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.addWorkspaceRoot(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.addWorkspaceRoot(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -474,7 +483,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalWorkspaceRootsOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.removeWorkspaceRoot(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.removeWorkspaceRoot(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -487,7 +496,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async (input, ctx) => resultFrom(async () => {
-      const identity = identityFromContext(ctx);
+      const identity = identityFromContext(ctx, deps.mcpSessionId());
       const executionId = input.execution_id ?? randomUUID();
       const executeInput = { ...input, execution_id: executionId };
       if (ctx.mcpReq.signal.aborted) throw new TerminalProtocolError('REQUEST_CANCELLED', 'Code execution request was cancelled.');
@@ -530,7 +539,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: codeCancelOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.cancelCode(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.cancelCode(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -542,7 +551,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: lspStartOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.startLsp(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.startLsp(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -554,7 +563,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: lspRequestOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.requestLsp(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.requestLsp(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   server.registerTool(
@@ -566,7 +575,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: lspStopOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async (input, ctx) => resultFrom(() => deps.service.stopLsp(identityFromContext(ctx), input)),
+    async (input, ctx) => resultFrom(() => deps.service.stopLsp(identityFromContext(ctx, deps.mcpSessionId()), input)),
   );
 
   if (deps.config.extensionRoot) {
@@ -585,7 +594,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         outputSchema: terminalReloadAgentOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       },
-      async (input, ctx) => resultFrom(() => extensionLoader.reload(identityFromContext(ctx), input.extension_id)),
+      async (input, ctx) => resultFrom(() => extensionLoader.reload(identityFromContext(ctx, deps.mcpSessionId()), input.extension_id)),
     );
   }
 
@@ -627,7 +636,7 @@ async function terminalSurfaceView(
   }
 }
 
-function identityFromContext(ctx: ServerContext): RequestIdentity {
+function identityFromContext(ctx: ServerContext, mcpSessionId: string): RequestIdentity {
   const auth = ctx.http?.authInfo;
   if (!auth) throw new TerminalProtocolError('PERMISSION_DENIED', 'Authenticated MCP context is required.');
   const userId = typeof auth.extra?.user_id === 'string' ? auth.extra.user_id : undefined;
@@ -636,11 +645,13 @@ function identityFromContext(ctx: ServerContext): RequestIdentity {
   if (!executionProfile.success) {
     throw new TerminalProtocolError('PERMISSION_DENIED', 'Access token is missing a valid execution profile.');
   }
+  if (!mcpSessionId) throw new TerminalProtocolError('PERMISSION_DENIED', 'MCP transport session identity is unavailable.');
   const chatgptSessionId = typeof auth.extra?.chatgpt_session_id === 'string' ? auth.extra.chatgpt_session_id : undefined;
   return {
     userId,
     clientId: auth.clientId,
     executionProfile: executionProfile.data,
+    mcpSessionId,
     ...(chatgptSessionId ? { chatgptSessionId } : {}),
   };
 }

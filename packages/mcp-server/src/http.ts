@@ -243,10 +243,15 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
           return;
         }
 
-        const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry, audit });
+        let boundMcpSessionId = '';
+        const mcpServer = createTerminalMcpServer({
+          config, gateway, service, streamTokens, turnRegistry, audit,
+          mcpSessionId: () => boundMcpSessionId,
+        });
         const transport = new NodeStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {
+            boundMcpSessionId = sessionId;
             sessions.set(sessionId, { transport, server: mcpServer, ...principal });
           },
         });
@@ -407,6 +412,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         for (const client of terminalStreamClients) client.end();
         terminalStreamClients.clear();
         httpServer.closeIdleConnections();
+        httpServer.closeAllConnections();
         turnRegistry.dispose();
         gateway.closeAll();
         for (const session of sessions.values()) await session.server.close();

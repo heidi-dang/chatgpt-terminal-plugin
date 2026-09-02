@@ -144,6 +144,7 @@ export class TerminalProtocolError extends Error {
 }
 
 export const terminalStartInputSchema = z.object({
+  surface_id: z.string().uuid().optional(),
   agent_id: z.string().min(1),
   cwd: z.string().min(1).optional(),
   shell: z.string().min(1).optional(),

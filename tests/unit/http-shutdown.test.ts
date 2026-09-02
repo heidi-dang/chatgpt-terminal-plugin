@@ -32,6 +32,23 @@ describe('HTTP shutdown lifecycle', () => {
     await closing;
   });
 
+  it('force-closes persistent HTTP connections so deploy restarts do not wait for keep-alive timeouts', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'test', MCP_HOST: '127.0.0.1', MCP_PORT: '8787',
+      MCP_PUBLIC_URL: 'http://127.0.0.1:8787/mcp', MCP_AUTH_MODE: 'development',
+      MCP_DEVELOPMENT_TOKEN: 'http-shutdown-force-token-0123456789', DEVELOPMENT_USER_ID: 'user-force',
+      STREAM_TOKEN_SECRET: 'http-shutdown-force-secret-0123456789abcdef',
+    });
+    const runtime = await createTerminalHttpRuntime(config);
+    await new Promise<void>((resolve, reject) => {
+      runtime.httpServer.once('error', reject);
+      runtime.httpServer.listen(0, '127.0.0.1', resolve);
+    });
+    const closeAllConnections = vi.spyOn(runtime.httpServer, 'closeAllConnections');
+    await runtime.close();
+    expect(closeAllConnections).toHaveBeenCalledOnce();
+  });
+
   it('coalesces concurrent runtime close calls into one teardown', async () => {
     const config = loadConfig({
       NODE_ENV: 'test',

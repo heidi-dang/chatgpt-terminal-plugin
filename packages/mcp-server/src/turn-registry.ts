@@ -20,6 +20,7 @@ type CloseTerminal = (identity: RequestIdentity, sessionId: string) => Promise<v
 export class TerminalTurnRegistry {
   private readonly records = new Map<string, TerminalTurnRecord>();
   private readonly activationTails = new Map<string, Promise<void>>();
+  private readonly closedSurfaces = new Set<string>();
 
   constructor(
     private readonly closeTerminal: CloseTerminal,
@@ -34,6 +35,28 @@ export class TerminalTurnRegistry {
     const record: TerminalTurnRecord = {
       identity: { ...identity },
       surfaceId: randomUUID(),
+      sessionId: null,
+      leaseTimer: undefined,
+    };
+    this.records.set(key, record);
+    this.armLease(key, record);
+    return stateFromRecord(record);
+  }
+
+
+  recover(identity: RequestIdentity, surfaceId: string): TerminalTurnState {
+    if (this.closedSurfaces.has(surfaceId)) return closedState(surfaceId);
+    const key = turnKey(identity);
+    const current = this.records.get(key);
+    if (current) {
+      if (current.surfaceId !== surfaceId) return closedState(surfaceId);
+      this.armLease(key, current);
+      return stateFromRecord(current);
+    }
+
+    const record: TerminalTurnRecord = {
+      identity: { ...identity },
+      surfaceId,
       sessionId: null,
       leaseTimer: undefined,
     };
@@ -94,6 +117,7 @@ export class TerminalTurnRegistry {
 
   status(identity: RequestIdentity, surfaceId: string): TerminalTurnState {
     const key = turnKey(identity);
+    if (this.closedSurfaces.has(surfaceId)) return closedState(surfaceId);
     const record = this.records.get(key);
     if (!record || record.surfaceId !== surfaceId) return closedState(surfaceId);
     this.armLease(key, record);
@@ -113,6 +137,7 @@ export class TerminalTurnRegistry {
     for (const record of this.records.values()) this.clearLease(record);
     this.records.clear();
     this.activationTails.clear();
+    this.closedSurfaces.clear();
   }
 
   private async withActivationLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
@@ -152,6 +177,7 @@ export class TerminalTurnRegistry {
 
   private async closeRecord(key: string, record: TerminalTurnRecord): Promise<void> {
     if (this.records.get(key) === record) this.records.delete(key);
+    this.closedSurfaces.add(record.surfaceId);
     this.clearLease(record);
     if (record.sessionId) await this.safeClose(record.identity, record.sessionId);
   }
@@ -190,8 +216,9 @@ function closedState(surfaceId: string | null): TerminalTurnState {
 }
 
 function turnKey(identity: RequestIdentity): string {
-  return [identity.userId, identity.clientId, identity.chatgptSessionId ?? 'mcp-session'].join('\u0000');
+  return [identity.userId, identity.clientId, identity.mcpSessionId].join('\u0000');
 }
+
 
 function isErrorCode(error: unknown, code: string): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === code);

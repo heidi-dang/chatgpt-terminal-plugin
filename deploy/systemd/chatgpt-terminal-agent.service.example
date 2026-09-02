@@ -10,6 +10,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin
 EnvironmentFile=%h/.config/chatgpt-terminal-plugin/agent.env
+# The enrollment token must remain in the EnvironmentFile (mode 0600), never in Environment= lines.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Run the verified built release directly; pnpm is required for install/build, not service runtime.
 ExecStart=/usr/bin/env node packages/local-agent/dist/cli.js
