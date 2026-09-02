@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { codeCancelInputSchema, codeExecuteInputSchema, codeExecutionChunkSchema } from './code-block.js';
 import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
+import { semanticCloseInputSchema, semanticOpenInputSchema, semanticQueryInputSchema } from './semantic.js';
 
 export const GATEWAY_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
@@ -492,6 +493,30 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
     type: z.literal('request'),
     request_id: z.string().min(1),
+    action: z.literal('semantic.open'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticOpenInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.query'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticQueryInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.close'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticCloseInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
     action: z.literal('lsp.start'),
     user_id: z.string().min(1),
     execution_profile: executionProfileSchema,
@@ -600,3 +625,4 @@ export type TerminalStreamRefreshOutput = z.infer<typeof terminalStreamRefreshOu
 
 export * from './code-block.js';
 export * from './lsp.js';
+export * from './semantic.js';

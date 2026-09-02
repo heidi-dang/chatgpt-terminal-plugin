@@ -10,11 +10,25 @@ import {
   lspRequestOutputSchema,
   lspStartOutputSchema,
   lspStopOutputSchema,
+  semanticCloseOutputSchema,
+  semanticDiagnosticsOutputSchema,
+  semanticLocationsOutputSchema,
+  semanticOpenOutputSchema,
+  semanticSymbolsOutputSchema,
+  semanticWorkspaceSymbolsOutputSchema,
   terminalCancelCodeToolSchema,
   terminalExecuteCodeBlockToolSchema,
   terminalLspRequestSchema,
   terminalLspStartSchema,
   terminalLspStopSchema,
+  terminalSemanticCloseSchema,
+  terminalSemanticDefinitionSchema,
+  terminalSemanticDiagnosticsSchema,
+  terminalSemanticFindSymbolsSchema,
+  terminalSemanticImplementationsSchema,
+  terminalSemanticOpenSchema,
+  terminalSemanticReferencesSchema,
+  terminalSemanticSymbolsSchema,
   terminalMutationOutputSchema,
   terminalReadInputSchema,
   terminalReadOutputSchema,
@@ -611,6 +625,102 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       host_reentry_scheduled: false,
       message: 'Continue with the next already-authorized step while this turn remains active. Stop if the user cancels or if a required authorization or confirmation boundary is reached.',
     }))),
+  );
+
+  server.registerTool(
+    'terminal_semantic_open',
+    {
+      title: 'Open semantic code workspace',
+      description: 'Open a Serena-style semantic code workspace backed by an administrator-configured language server. Performs LSP initialize/initialized negotiation and confines all later semantic reads to the authorized workspace root.',
+      inputSchema: terminalSemanticOpenSchema,
+      outputSchema: semanticOpenOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.openSemantic(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_symbols',
+    {
+      title: 'Get file symbols',
+      description: 'Return the structured symbols defined in one source file. The file is synchronized with the language server before the query, including edits made through shell commands or other tools.',
+      inputSchema: terminalSemanticSymbolsSchema,
+      outputSchema: semanticSymbolsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticSymbols(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_find_symbols',
+    {
+      title: 'Find workspace symbols',
+      description: 'Find classes, functions, methods, variables, and other code symbols across the semantic workspace using language-server indexing instead of text grep.',
+      inputSchema: terminalSemanticFindSymbolsSchema,
+      outputSchema: semanticWorkspaceSymbolsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticFindSymbols(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_references',
+    {
+      title: 'Find symbol references',
+      description: 'Find semantic references for the symbol at a source position after synchronizing the file with the language server.',
+      inputSchema: terminalSemanticReferencesSchema,
+      outputSchema: semanticLocationsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticReferences(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_definition',
+    {
+      title: 'Find symbol definition',
+      description: 'Resolve the definition or declaration of the symbol at a source position using the initialized semantic language-server workspace.',
+      inputSchema: terminalSemanticDefinitionSchema,
+      outputSchema: semanticLocationsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticDefinition(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_implementations',
+    {
+      title: 'Find symbol implementations',
+      description: 'Resolve implementations of the interface, method, type, or symbol at a source position using language-server semantics.',
+      inputSchema: terminalSemanticImplementationsSchema,
+      outputSchema: semanticLocationsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticImplementations(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_diagnostics',
+    {
+      title: 'Get semantic diagnostics',
+      description: 'Return the latest bounded language-server diagnostics for a synchronized source file, including diagnostics published after file changes outside the semantic tools.',
+      inputSchema: terminalSemanticDiagnosticsSchema,
+      outputSchema: semanticDiagnosticsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.semanticDiagnostics(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_close',
+    {
+      title: 'Close semantic code workspace',
+      description: 'Close an owned semantic workspace and stop its underlying language-server process.',
+      inputSchema: terminalSemanticCloseSchema,
+      outputSchema: semanticCloseOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.closeSemantic(identityFromContext(ctx), input)),
   );
 
   server.registerTool(

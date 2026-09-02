@@ -1,6 +1,6 @@
 # ChatGPT Terminal Plugin
 
-A production-oriented **MCP v2 terminal bridge for ChatGPT**. It connects an authenticated ChatGPT session to an enrolled computer, runs a real persistent PTY on that computer, streams terminal output into an MCP App UI, and exposes bounded terminal, file, code-execution, and LSP tools to the model.
+A production-oriented **MCP v2 terminal bridge for ChatGPT**. It connects an authenticated ChatGPT session to an enrolled computer, runs a real persistent PTY on that computer, streams terminal output into an MCP App UI, and exposes bounded terminal, file, code-execution, raw LSP, and Serena-style semantic code-intelligence tools to the model.
 
 The public server is a control plane. **Commands execute on the local agent, not on the MCP server.**
 
@@ -18,7 +18,7 @@ The public server is a control plane. **Commands execute on the local agent, not
 - **Outbound agent connection** — local machines connect to the public gateway over authenticated WebSocket; no inbound SSH port is required on the workstation.
 - **Strong device identity** — per-device Ed25519 keys, expiring challenge-response authentication, replay protection, enrollment, rotation, and revocation.
 - **Least-privilege profiles** — `read-only`, `developer`, and `owner-full`, enforced independently by server and agent.
-- **Structured developer tools** — bounded file read/list/write/search, allowlisted code-block execution, transcripts, session metrics, and LSP JSON-RPC.
+- **Structured developer tools** — bounded file read/list/write/search, allowlisted code-block execution, transcripts, session metrics, raw LSP JSON-RPC, and Serena-style symbol/reference/definition/implementation/diagnostic queries.
 - **Streaming safety** — monotonic event sequences, ACK/backpressure, reconnect/resume, duplicate suppression, bounded buffers, and short-lived UI stream capabilities.
 - **Production deployment assets** — Caddy, systemd, server/agent environment templates, health checks, audit logging, and E2E coverage.
 - **One-command bootstrap** — `./install.sh` installs, builds, and verifies the monorepo.
@@ -238,11 +238,27 @@ For the complete authentication, reverse-proxy, enrollment, smoke-test, upgrade,
 | `terminal_search_files` | Bounded regex search with file/result limits. |
 | `terminal_execute_code_block` | Run allowlisted `bash`, `python3`, `node`, or `typescript` code with bounded MCP output excerpts and explicit truncation metadata. |
 | `terminal_cancel_code` | Cancel an owned running code execution. |
-| `terminal_lsp_start` | Start an administrator-configured language server. |
-| `terminal_lsp_request` | Send a bounded ownership-checked LSP JSON-RPC request. |
-| `terminal_lsp_stop` | Stop an owned language-server process. |
+| `terminal_semantic_open` | Open an initialized Serena-style semantic workspace on an administrator-configured language server. |
+| `terminal_semantic_symbols` | Return structured symbols for a synchronized source file. |
+| `terminal_semantic_find_symbols` | Search workspace symbols through language-server indexing. |
+| `terminal_semantic_references` | Find semantic references at a source position. |
+| `terminal_semantic_definition` | Resolve a symbol definition/declaration. |
+| `terminal_semantic_implementations` | Resolve semantic implementations. |
+| `terminal_semantic_diagnostics` | Return the latest synchronized language-server diagnostics for a file. |
+| `terminal_semantic_close` | Close an owned semantic workspace and its language-server process. |
+| `terminal_lsp_start` | Start an administrator-configured language server for advanced raw JSON-RPC use. |
+| `terminal_lsp_request` | Send a bounded ownership-checked raw LSP JSON-RPC request. |
+| `terminal_lsp_stop` | Stop an owned raw language-server process. |
 
 The MCP App also uses restricted application-facing lifecycle/stream operations to refresh short-lived terminal stream capabilities and synchronize the active surface.
+
+### Serena-style semantic code intelligence
+
+The semantic tools are a native TypeScript integration inspired by Serena's high-level code-navigation model; they do **not** embed Serena's Python runtime or replace the terminal transport. `terminal_semantic_open` performs the LSP `initialize`/`initialized` handshake and creates a per-user semantic workspace. File-based semantic operations synchronize the current filesystem contents with `didOpen`/full-text `didChange`, so edits made through the shell, Git, formatters, or other tools are reflected before the next query.
+
+Semantic output is bounded to 200 top-level results and 64 KiB of serialized result data, with `truncated=true` when the result is shortened. `textDocument/publishDiagnostics` notifications are cached only for files inside the authorized workspace root. Safe server-to-client requests required by common language servers (`workspace/configuration`, `workspace/workspaceFolders`, and work-done progress creation) are handled explicitly; server-driven edits and all other unapproved requests remain fail-closed.
+
+The fixed semantic read surface is available to the `read-only` execution profile because it cannot select arbitrary LSP methods. The lower-level `terminal_lsp_*` surface remains separately authorization-gated for advanced use. See [`docs/semantic-code-intelligence.md`](docs/semantic-code-intelligence.md).
 
 ## Execution profiles
 

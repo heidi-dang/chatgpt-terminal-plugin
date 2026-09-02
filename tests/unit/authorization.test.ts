@@ -36,6 +36,11 @@ function fakeGateway() {
     startLsp: vi.fn(),
     requestLsp: vi.fn(),
     stopLsp: vi.fn(),
+    openSemantic: vi.fn(async () => ({ semantic_id: '00000000-0000-4000-8000-000000000010', lsp_id: '00000000-0000-4000-8000-000000000011', server_id: 'typescript', root: '/workspace', capabilities: {} })),
+    querySemantic: vi.fn(async (_userId, _agentId, input) => input.operation === 'workspace_symbols'
+      ? ({ semantic_id: input.semantic_id, query: input.query, symbols: [], truncated: false })
+      : ({ semantic_id: input.semantic_id, path: input.path, diagnostics: [], truncated: false })),
+    closeSemantic: vi.fn(async () => ({ semantic_id: '00000000-0000-4000-8000-000000000010', stopped: true })),
   };
 }
 
@@ -111,4 +116,31 @@ describe('server execution-profile authorization', () => {
     expect(gateway.requestLsp).not.toHaveBeenCalled();
     expect(gateway.stopLsp).not.toHaveBeenCalled();
   });
+  it('allows the fixed Serena-style semantic read surface under read-only identities', async () => {
+    const gateway = fakeGateway();
+    const service = new TerminalService(
+      gateway as unknown as AgentGateway,
+      testConfig(),
+      new AuditLogger(undefined, undefined),
+    );
+    const semanticId = '00000000-0000-4000-8000-000000000010';
+
+    await expect(service.openSemantic(readOnlyIdentity, {
+      agent_id: 'agent-a', server_id: 'typescript', root: '/workspace',
+    })).resolves.toMatchObject({ semantic_id: semanticId, server_id: 'typescript' });
+    await expect(service.semanticFindSymbols(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId, query: 'TerminalService',
+    })).resolves.toMatchObject({ semantic_id: semanticId, symbols: [] });
+    await expect(service.semanticDiagnostics(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId, path: 'src/service.ts',
+    })).resolves.toMatchObject({ semantic_id: semanticId, diagnostics: [] });
+    await expect(service.closeSemantic(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId,
+    })).resolves.toEqual({ semantic_id: semanticId, stopped: true });
+
+    expect(gateway.openSemantic).toHaveBeenCalledWith('user-read-only', expect.objectContaining({ agent_id: 'agent-a' }), 'read-only');
+    expect(gateway.querySemantic).toHaveBeenCalledTimes(2);
+    expect(gateway.closeSemantic).toHaveBeenCalledTimes(1);
+  });
+
 });

@@ -12,6 +12,7 @@ export type { SessionEventJournalOptions, JournalReadResult } from './event-jour
 export type { TerminalProcess, TerminalRuntime, TerminalRuntimeMetrics, TerminalSpawnOptions } from './terminal-runtime.js';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
+import { SemanticLspManager } from './semantic-lsp.js';
 import { discoverFilesWithRipgrep } from './ripgrep-discovery.js';
 export { discoverLspServers, resolveLspServers } from './lsp-discovery.js';
 import {
@@ -29,6 +30,12 @@ import {
   type LspStartInput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticCloseInput,
+  type SemanticCloseOutput,
+  type SemanticOpenInput,
+  type SemanticOpenOutput,
+  type SemanticQueryInput,
+  type SemanticQueryOutput,
   type TerminalEvent,
   type TerminalEventActor,
   type TerminalEventType,
@@ -119,6 +126,9 @@ export interface TerminalAgentApi {
   startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput>;
   requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput>;
   stopLsp(userId: string, lspId: string, requestedProfile: ExecutionProfile): LspStopOutput;
+  openSemantic(userId: string, input: SemanticOpenInput, requestedProfile: ExecutionProfile): Promise<SemanticOpenOutput>;
+  querySemantic(userId: string, input: SemanticQueryInput, requestedProfile: ExecutionProfile): Promise<SemanticQueryOutput>;
+  closeSemantic(userId: string, input: SemanticCloseInput, requestedProfile: ExecutionProfile): SemanticCloseOutput;
   stopProcessFeatures(): void;
   onEvent(listener: (event: TerminalEvent) => void): () => void;
   shutdown(): void;
@@ -418,6 +428,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly executionWorkspacePolicy: WorkspacePolicy;
   private readonly codeExecutor: CodeBlockExecutor;
   private readonly lspManager: LspManager;
+  private readonly semanticManager: SemanticLspManager;
   private readonly stateDir: string | undefined;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
@@ -469,6 +480,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
+    this.semanticManager = new SemanticLspManager(this.lspManager);
     this.restorePersistedSessions();
   }
 
@@ -1040,6 +1052,35 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return this.lspManager.stop(userId, lspId);
   }
 
+  async openSemantic(userId: string, input: SemanticOpenInput, _requestedProfile: ExecutionProfile): Promise<SemanticOpenOutput> {
+    void _requestedProfile;
+    const root = this.executionWorkspacePolicy.resolveCwd(input.root);
+    return this.semanticManager.open(userId, input, root);
+  }
+
+  querySemantic(userId: string, input: SemanticQueryInput, _requestedProfile: ExecutionProfile): Promise<SemanticQueryOutput> {
+    void _requestedProfile;
+    switch (input.operation) {
+      case 'document_symbols':
+        return this.semanticManager.documentSymbols(userId, input.semantic_id, input.path);
+      case 'workspace_symbols':
+        return this.semanticManager.findSymbols(userId, input.semantic_id, input.query);
+      case 'references':
+        return this.semanticManager.references(userId, input.semantic_id, input.path, input.line, input.character, input.include_declaration);
+      case 'definition':
+        return this.semanticManager.definition(userId, input.semantic_id, input.path, input.line, input.character);
+      case 'implementations':
+        return this.semanticManager.implementations(userId, input.semantic_id, input.path, input.line, input.character);
+      case 'diagnostics':
+        return this.semanticManager.diagnostics(userId, input.semantic_id, input.path);
+    }
+  }
+
+  closeSemantic(userId: string, input: SemanticCloseInput, _requestedProfile: ExecutionProfile): SemanticCloseOutput {
+    void _requestedProfile;
+    return this.semanticManager.close(userId, input.semantic_id);
+  }
+
   private assertProcessExecutionAllowed(requestedProfile: ExecutionProfile): void {
     const effectiveProfile = restrictiveExecutionProfile(this.options.executionProfile, requestedProfile);
     if (effectiveProfile === 'read-only') {
@@ -1059,6 +1100,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
   stopProcessFeatures(): void {
     this.codeExecutor.shutdown();
+    this.semanticManager.stopAll();
     this.lspManager.stopAll();
   }
 

@@ -432,6 +432,46 @@ describe('bounded LSP management', () => {
     ]);
   });
 
+  it('answers safe server-to-client LSP requests required by real language servers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-server-request-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const marker = join(root, 'server-response.json');
+    const script = await writeLspScript(root, `
+      const fs = require('node:fs');
+      let buffer = Buffer.alloc(0); let clientRequestId;
+      process.stdin.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); drain(); });
+      function send(msg) { const body = JSON.stringify(msg); process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body); }
+      function drain() {
+        for (;;) {
+          const end = buffer.indexOf('\\r\\n\\r\\n'); if (end < 0) return;
+          const m = /Content-Length:\\s*(\\d+)/i.exec(buffer.subarray(0,end).toString('ascii')); if (!m) return;
+          const len = Number(m[1]); const start = end + 4; if (buffer.length < start + len) return;
+          const msg = JSON.parse(buffer.subarray(start,start+len).toString('utf8')); buffer = buffer.subarray(start+len);
+          if (msg.method === 'test/server-requests') {
+            clientRequestId = msg.id;
+            send({ jsonrpc: '2.0', id: 99, method: 'workspace/configuration', params: { items: [{ section: 'a' }, { section: 'b' }] } });
+          } else if (msg.id === 99 && msg.method === undefined) {
+            fs.writeFileSync(process.argv[2], JSON.stringify(msg));
+            send({ jsonrpc: '2.0', id: clientRequestId, result: { ok: true } });
+          }
+        }
+      }
+      setInterval(() => {}, 1000);
+    `);
+    const manager = new LspManager({
+      servers: { serverRequests: { command: process.execPath, args: [script, marker] } },
+      environment: cleanEnvironment(),
+    });
+    cleanup.push(() => manager.stopAll());
+    const started = await manager.start('user-a', { server_id: 'serverRequests', root }, root);
+
+    await expect(manager.request('user-a', { lsp_id: started.lsp_id, method: 'test/server-requests', params: {} }))
+      .resolves.toEqual({ lsp_id: started.lsp_id, result: { ok: true } });
+    await waitUntil(async () => { try { await access(marker); return true; } catch { return false; } });
+    const response = JSON.parse(await (await import('node:fs/promises')).readFile(marker, 'utf8')) as unknown;
+    expect(response).toEqual({ jsonrpc: '2.0', id: 99, result: [null, null] });
+  });
+
   it('times out pending requests and sends LSP $/cancelRequest', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-lsp-timeout-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

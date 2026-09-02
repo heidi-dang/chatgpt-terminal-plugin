@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { signalProcessTree } from './process-tree.js';
 import {
   TerminalProtocolError,
@@ -13,6 +15,12 @@ import {
 export interface LspServerDefinition {
   command: string;
   args: string[];
+}
+
+export interface LspServerNotification {
+  lsp_id: string;
+  method: string;
+  params?: unknown;
 }
 
 export interface LspManagerOptions {
@@ -64,6 +72,7 @@ const STANDARD_LSP_CLIENT_NOTIFICATIONS = new Set([
 
 export class LspManager {
   private readonly processes = new Map<string, ManagedLsp>();
+  private readonly notificationListeners = new Set<(notification: LspServerNotification) => void>();
   private readonly startingProcesses = new Set<ManagedLsp>();
   private stopped = false;
   private readonly servers: Readonly<Record<string, LspServerDefinition>>;
@@ -202,6 +211,11 @@ export class LspManager {
     return this.processes.size;
   }
 
+  onNotification(listener: (notification: LspServerNotification) => void): () => void {
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
+  }
+
   stopAll(): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -311,12 +325,19 @@ export class LspManager {
 
     const id = message.id;
     const method = message.method;
+    if (typeof method === 'string' && id === undefined) {
+      const notification: LspServerNotification = {
+        lsp_id: managed.lspId,
+        method,
+        ...('params' in message ? { params: message.params } : {}),
+      };
+      for (const listener of this.notificationListeners) {
+        try { listener(notification); } catch { /* Listener failures must not destabilize the LSP transport. */ }
+      }
+      return;
+    }
     if (typeof method === 'string' && (typeof id === 'number' || typeof id === 'string')) {
-      void this.writeMessage(managed, {
-        jsonrpc: '2.0',
-        id,
-        error: { code: -32601, message: 'Server-initiated requests are not supported by this terminal agent.' },
-      }).catch((error: unknown) => this.failProcess(managed, normalizeLspError(error)));
+      this.handleServerRequest(managed, id, method, message.params);
       return;
     }
     if (typeof id !== 'number' || !Number.isSafeInteger(id)) return;
@@ -330,6 +351,36 @@ export class LspManager {
       return;
     }
     pending.resolve({ lsp_id: managed.lspId, ...('result' in message ? { result: message.result } : {}) });
+  }
+
+  private handleServerRequest(managed: ManagedLsp, id: number | string, method: string, params: unknown): void {
+    let response: Record<string, unknown>;
+    switch (method) {
+      case 'workspace/configuration': {
+        const request = isRecord(params) ? params : undefined;
+        const items = Array.isArray(request?.items) ? request.items : [];
+        response = { jsonrpc: '2.0', id, result: items.map(() => null) };
+        break;
+      }
+      case 'workspace/workspaceFolders':
+        response = {
+          jsonrpc: '2.0',
+          id,
+          result: [{ uri: pathToFileURL(managed.root).href.replace(/\/$/, ''), name: basename(managed.root) || managed.root }],
+        };
+        break;
+      case 'window/workDoneProgress/create':
+        response = { jsonrpc: '2.0', id, result: null };
+        break;
+      default:
+        response = {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32601, message: `Server-initiated LSP request '${method}' is not permitted by this terminal agent.` },
+        };
+    }
+    void this.writeMessage(managed, response)
+      .catch((error: unknown) => this.failProcess(managed, normalizeLspError(error)));
   }
 
   private handleStderr(managed: ManagedLsp, chunk: Buffer): void {

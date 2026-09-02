@@ -6,6 +6,14 @@ import {
   terminalLspRequestSchema,
   terminalLspStartSchema,
   terminalLspStopSchema,
+  terminalSemanticCloseSchema,
+  terminalSemanticDefinitionSchema,
+  terminalSemanticDiagnosticsSchema,
+  terminalSemanticFindSymbolsSchema,
+  terminalSemanticImplementationsSchema,
+  terminalSemanticOpenSchema,
+  terminalSemanticReferencesSchema,
+  terminalSemanticSymbolsSchema,
   terminalMutationOutputSchema,
   terminalReadInputSchema,
   terminalSessionIdInputSchema,
@@ -22,11 +30,25 @@ import {
   type LspRequestOutput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticCloseOutput,
+  type SemanticDiagnosticsOutput,
+  type SemanticLocationsOutput,
+  type SemanticOpenOutput,
+  type SemanticSymbolsOutput,
+  type SemanticWorkspaceSymbolsOutput,
   type TerminalCancelCodeToolArgs,
   type TerminalExecuteCodeBlockToolArgs,
   type TerminalLspRequestArgs,
   type TerminalLspStartArgs,
   type TerminalLspStopArgs,
+  type TerminalSemanticCloseArgs,
+  type TerminalSemanticDefinitionArgs,
+  type TerminalSemanticDiagnosticsArgs,
+  type TerminalSemanticFindSymbolsArgs,
+  type TerminalSemanticImplementationsArgs,
+  type TerminalSemanticOpenArgs,
+  type TerminalSemanticReferencesArgs,
+  type TerminalSemanticSymbolsArgs,
   type TerminalListAgentsOutput,
   type TerminalMutationOutput,
   type TerminalReadInput,
@@ -369,6 +391,107 @@ export class TerminalService {
       authorization: 'allow', input: { execution_id: input.execution_id }, output_metadata: { cancelled: output.cancelled },
     });
     return output;
+  }
+
+  async openSemantic(identity: RequestIdentity, rawInput: TerminalSemanticOpenArgs): Promise<SemanticOpenOutput> {
+    const input = terminalSemanticOpenSchema.parse(rawInput);
+    const output = await this.gateway.openSemantic(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_open', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { server_id: input.server_id, root: input.root },
+      output_metadata: { semantic_id: output.semantic_id, lsp_id: output.lsp_id },
+    });
+    return output;
+  }
+
+  async semanticSymbols(identity: RequestIdentity, rawInput: TerminalSemanticSymbolsArgs): Promise<SemanticSymbolsOutput> {
+    const input = terminalSemanticSymbolsSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'document_symbols', path: input.path,
+    }, identity.executionProfile) as SemanticSymbolsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_symbols',
+      { semantic_id: input.semantic_id, path: input.path }, output.symbols.length, output.truncated);
+    return output;
+  }
+
+  async semanticFindSymbols(identity: RequestIdentity, rawInput: TerminalSemanticFindSymbolsArgs): Promise<SemanticWorkspaceSymbolsOutput> {
+    const input = terminalSemanticFindSymbolsSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'workspace_symbols', query: input.query,
+    }, identity.executionProfile) as SemanticWorkspaceSymbolsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_find_symbols',
+      { semantic_id: input.semantic_id, query: input.query }, output.symbols.length, output.truncated);
+    return output;
+  }
+
+  async semanticReferences(identity: RequestIdentity, rawInput: TerminalSemanticReferencesArgs): Promise<SemanticLocationsOutput> {
+    const input = terminalSemanticReferencesSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'references', path: input.path,
+      line: input.line, character: input.character, include_declaration: input.include_declaration,
+    }, identity.executionProfile) as SemanticLocationsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_references',
+      { semantic_id: input.semantic_id, path: input.path, line: input.line, character: input.character },
+      output.locations.length, output.truncated);
+    return output;
+  }
+
+  async semanticDefinition(identity: RequestIdentity, rawInput: TerminalSemanticDefinitionArgs): Promise<SemanticLocationsOutput> {
+    const input = terminalSemanticDefinitionSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'definition', path: input.path,
+      line: input.line, character: input.character,
+    }, identity.executionProfile) as SemanticLocationsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_definition',
+      { semantic_id: input.semantic_id, path: input.path, line: input.line, character: input.character },
+      output.locations.length, output.truncated);
+    return output;
+  }
+
+  async semanticImplementations(identity: RequestIdentity, rawInput: TerminalSemanticImplementationsArgs): Promise<SemanticLocationsOutput> {
+    const input = terminalSemanticImplementationsSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'implementations', path: input.path,
+      line: input.line, character: input.character,
+    }, identity.executionProfile) as SemanticLocationsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_implementations',
+      { semantic_id: input.semantic_id, path: input.path, line: input.line, character: input.character },
+      output.locations.length, output.truncated);
+    return output;
+  }
+
+  async semanticDiagnostics(identity: RequestIdentity, rawInput: TerminalSemanticDiagnosticsArgs): Promise<SemanticDiagnosticsOutput> {
+    const input = terminalSemanticDiagnosticsSchema.parse(rawInput);
+    const output = await this.gateway.querySemantic(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, operation: 'diagnostics', path: input.path,
+    }, identity.executionProfile) as SemanticDiagnosticsOutput;
+    await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_diagnostics',
+      { semantic_id: input.semantic_id, path: input.path }, output.diagnostics.length, output.truncated);
+    return output;
+  }
+
+  async closeSemantic(identity: RequestIdentity, rawInput: TerminalSemanticCloseArgs): Promise<SemanticCloseOutput> {
+    const input = terminalSemanticCloseSchema.parse(rawInput);
+    const output = await this.gateway.closeSemantic(identity.userId, input, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_close', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id }, output_metadata: { stopped: output.stopped },
+    });
+    return output;
+  }
+
+  private async auditSemanticQuery(
+    identity: RequestIdentity,
+    agentId: string,
+    action: string,
+    input: unknown,
+    resultCount: number,
+    truncated: boolean,
+  ): Promise<void> {
+    await this.audit.record({
+      action, ...auditIdentity(identity), agent_id: agentId, authorization: 'allow', input,
+      output_metadata: { result_count: resultCount, truncated },
+    });
   }
 
   async startLsp(identity: RequestIdentity, rawInput: TerminalLspStartArgs): Promise<LspStartOutput> {

@@ -16,6 +16,9 @@ import {
   lspRequestOutputSchema,
   lspStartOutputSchema,
   lspStopOutputSchema,
+  semanticCloseOutputSchema,
+  semanticOpenOutputSchema,
+  semanticQueryOutputSchema,
   terminalListFilesOutputSchema,
   terminalReadFileOutputSchema,
   terminalReadOutputSchema,
@@ -33,10 +36,16 @@ import {
   type LspRequestOutput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticCloseOutput,
+  type SemanticOpenOutput,
+  type SemanticQueryInput,
+  type SemanticQueryOutput,
   type TerminalExecuteCodeBlockToolArgs,
   type TerminalLspRequestArgs,
   type TerminalLspStartArgs,
   type TerminalLspStopArgs,
+  type TerminalSemanticCloseArgs,
+  type TerminalSemanticOpenArgs,
   type AgentSessionSnapshot,
   type TerminalEvent,
   type TerminalListFilesOutput,
@@ -390,6 +399,35 @@ export class AgentGateway {
       type: 'request', request_id: randomUUID(), action: 'code.cancel', user_id: userId,
       execution_profile: executionProfile, input: { execution_id: executionId },
     }, (raw) => codeCancelOutputSchema.parse(raw));
+  }
+
+  async openSemantic(userId: string, input: TerminalSemanticOpenArgs, executionProfile: ExecutionProfile): Promise<SemanticOpenOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.open', user_id: userId,
+      execution_profile: executionProfile, input: { server_id: input.server_id, root: input.root },
+    }, (raw) => semanticOpenOutputSchema.parse(raw));
+  }
+
+  async querySemantic(
+    userId: string,
+    agentId: string,
+    input: SemanticQueryInput,
+    executionProfile: ExecutionProfile,
+  ): Promise<SemanticQueryOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.query', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticQueryOutputSchema.parse(raw));
+  }
+
+  async closeSemantic(userId: string, input: TerminalSemanticCloseArgs, executionProfile: ExecutionProfile): Promise<SemanticCloseOutput> {
+    const connection = this.requireAgent(userId, input.agent_id);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.close', user_id: userId,
+      execution_profile: executionProfile, input: { semantic_id: input.semantic_id },
+    }, (raw) => semanticCloseOutputSchema.parse(raw));
   }
 
   async startLsp(userId: string, input: TerminalLspStartArgs, executionProfile: ExecutionProfile): Promise<LspStartOutput> {

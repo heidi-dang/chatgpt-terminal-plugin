@@ -301,6 +301,12 @@ export class AgentGatewayClient {
         });
       case 'code.cancel':
         return this.agent.cancelCode(command.user_id, command.input.execution_id, command.execution_profile);
+      case 'semantic.open':
+        return this.agent.openSemantic(command.user_id, command.input, command.execution_profile);
+      case 'semantic.query':
+        return this.agent.querySemantic(command.user_id, command.input, command.execution_profile);
+      case 'semantic.close':
+        return this.agent.closeSemantic(command.user_id, command.input, command.execution_profile);
       case 'lsp.start':
         return this.agent.startLsp(command.user_id, command.input, command.execution_profile);
       case 'lsp.request':

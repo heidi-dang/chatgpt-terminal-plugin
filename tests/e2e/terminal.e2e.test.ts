@@ -29,6 +29,7 @@ describe('terminal MCP end-to-end', () => {
     const lspScript = join(root, 'echo-lsp.cjs');
     await writeFile(lspScript, String.raw`
       let buffer = Buffer.alloc(0);
+      let rootUri = '';
       process.stdin.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); drain(); });
       function send(msg) { const body = JSON.stringify(msg); process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body); }
       function drain() {
@@ -37,7 +38,28 @@ describe('terminal MCP end-to-end', () => {
           const match = /Content-Length:\s*(\d+)/i.exec(buffer.subarray(0, end).toString('ascii')); if (!match) return;
           const length = Number(match[1]); const start = end + 4; if (buffer.length < start + length) return;
           const msg = JSON.parse(buffer.subarray(start, start + length).toString('utf8')); buffer = buffer.subarray(start + length);
-          if (msg.id !== undefined) send({ jsonrpc: '2.0', id: msg.id, result: { method: msg.method, value: msg.params?.value } });
+          if (msg.method === 'initialize') {
+            rootUri = msg.params.rootUri;
+            send({ jsonrpc: '2.0', id: msg.id, result: { capabilities: {
+              textDocumentSync: 1, documentSymbolProvider: true, workspaceSymbolProvider: true,
+              referencesProvider: true, definitionProvider: true, implementationProvider: true
+            } } });
+          } else if (msg.method === 'textDocument/didOpen') {
+            send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
+              uri: msg.params.textDocument.uri, version: msg.params.textDocument.version,
+              diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } }, severity: 2, message: 'e2e semantic warning' }]
+            } });
+          } else if (msg.method === 'textDocument/documentSymbol') {
+            send({ jsonrpc: '2.0', id: msg.id, result: [{ name: 'alpha', kind: 12, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 37 } }, selectionRange: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } } }] });
+          } else if (msg.method === 'workspace/symbol') {
+            send({ jsonrpc: '2.0', id: msg.id, result: [{ name: 'alpha', kind: 12, location: { uri: rootUri + '/sample.ts', range: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } } } }] });
+          } else if (msg.method === 'textDocument/references' || msg.method === 'textDocument/implementation') {
+            send({ jsonrpc: '2.0', id: msg.id, result: [{ uri: rootUri + '/sample.ts', range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } }] });
+          } else if (msg.method === 'textDocument/definition') {
+            send({ jsonrpc: '2.0', id: msg.id, result: { uri: rootUri + '/sample.ts', range: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } } } });
+          } else if (msg.id !== undefined) {
+            send({ jsonrpc: '2.0', id: msg.id, result: { method: msg.method, value: msg.params?.value } });
+          }
         }
       }
     `, 'utf8');
@@ -157,6 +179,14 @@ describe('terminal MCP end-to-end', () => {
       'terminal_execute_code_block',
       'terminal_cancel_code',
       'terminal_continue_task',
+      'terminal_semantic_open',
+      'terminal_semantic_symbols',
+      'terminal_semantic_find_symbols',
+      'terminal_semantic_references',
+      'terminal_semantic_definition',
+      'terminal_semantic_implementations',
+      'terminal_semantic_diagnostics',
+      'terminal_semantic_close',
       'terminal_lsp_start',
       'terminal_lsp_request',
       'terminal_lsp_stop',
@@ -384,6 +414,55 @@ describe('terminal MCP end-to-end', () => {
     await expect(abortedRunning).rejects.toThrow();
     await delay(900);
     await expect(access(abortMarker)).rejects.toBeTruthy();
+
+    await writeFile(join(workspace, 'sample.ts'), 'export function alpha() { return 1; }\nalpha();\n', 'utf8');
+    const semanticOpened = structured(await client.callTool({
+      name: 'terminal_semantic_open',
+      arguments: { agent_id: identity.agentId, server_id: 'echo', root: workspace },
+    }));
+    const semanticId = stringField(semanticOpened, 'semantic_id');
+    expect(semanticOpened).toMatchObject({ server_id: 'echo', root: workspace });
+
+    const semanticSymbols = structured(await client.callTool({
+      name: 'terminal_semantic_symbols',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts' },
+    }));
+    expect(semanticSymbols).toMatchObject({ path: 'sample.ts', truncated: false });
+    expect(semanticSymbols.symbols).toEqual([expect.objectContaining({ name: 'alpha', kind: 12 })]);
+
+    const semanticFound = structured(await client.callTool({
+      name: 'terminal_semantic_find_symbols',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, query: 'alpha' },
+    }));
+    expect(semanticFound.symbols).toEqual([expect.objectContaining({ name: 'alpha', kind: 12 })]);
+
+    const semanticReferences = structured(await client.callTool({
+      name: 'terminal_semantic_references',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts', line: 0, character: 16, include_declaration: true },
+    }));
+    expect(semanticReferences.locations).toEqual([expect.objectContaining({ uri: expect.stringContaining('/sample.ts') })]);
+
+    const semanticDefinition = structured(await client.callTool({
+      name: 'terminal_semantic_definition',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts', line: 1, character: 1 },
+    }));
+    expect(semanticDefinition.locations).toEqual([expect.objectContaining({ uri: expect.stringContaining('/sample.ts') })]);
+
+    const semanticImplementations = structured(await client.callTool({
+      name: 'terminal_semantic_implementations',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts', line: 0, character: 16 },
+    }));
+    expect(semanticImplementations.locations).toEqual([expect.objectContaining({ uri: expect.stringContaining('/sample.ts') })]);
+
+    const semanticDiagnostics = structured(await client.callTool({
+      name: 'terminal_semantic_diagnostics',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts' },
+    }));
+    expect(semanticDiagnostics.diagnostics).toEqual([expect.objectContaining({ severity: 2, message: 'e2e semantic warning' })]);
+
+    expect(structured(await client.callTool({
+      name: 'terminal_semantic_close', arguments: { agent_id: identity.agentId, semantic_id: semanticId },
+    }))).toEqual({ semantic_id: semanticId, stopped: true });
 
     const lspStarted = structured(await client.callTool({
       name: 'terminal_lsp_start', arguments: { agent_id: identity.agentId, server_id: 'echo', root: workspace },
