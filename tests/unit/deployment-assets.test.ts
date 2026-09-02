@@ -1,9 +1,17 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 const root = new URL('../..', import.meta.url);
 
 describe('deployment assets', () => {
+  it('does not ship stale checked-in source archives as deployment assets', async () => {
+    const entries = await readdir(new URL('deploy/', root));
+    const deployment = await readFile(new URL('docs/deployment.md', root), 'utf8');
+    expect(entries.filter((entry) => entry.endsWith('.tgz'))).toEqual([]);
+    expect(deployment).toContain('git archive --format=tar.gz');
+    expect(deployment).toContain('git diff --quiet && git diff --cached --quiet');
+  });
+
   it('lets systemd create and protect the server state and log directories', async () => {
     const source = await readFile(new URL('deploy/systemd/chatgpt-terminal-mcp.service.example', root), 'utf8');
 

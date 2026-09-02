@@ -48,6 +48,19 @@ pnpm test:e2e
 
 The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v12.html` MCP App resource. The terminal UI build also enforces a 30,000-byte single-file mobile bundle budget; override `TERMINAL_UI_MAX_BUNDLE_BYTES` only for an intentional, reviewed budget change.
 
+### Source release artifact
+
+Do not keep generated source archives under `deploy/`: they silently become stale as security and lifecycle fixes land. After the complete verification gate passes, create a source artifact from the exact Git commit you intend to deploy:
+
+```bash
+mkdir -p artifacts
+RELEASE_COMMIT="$(git rev-parse --verify HEAD)"
+git diff --quiet && git diff --cached --quiet
+git archive --format=tar.gz --output="artifacts/chatgpt-terminal-plugin-${RELEASE_COMMIT:0:12}.tgz" "$RELEASE_COMMIT"
+```
+
+The `artifacts/` directory is ignored by Git. Record the full commit ID alongside the artifact and deploy only a commit that has passed the repository quality gate. `git archive` packages the tracked tree for that commit, including the current installer, CI workflow, protocol, server, agent, Terminal UI, deployment templates, and documentation, without accidentally snapshotting `node_modules`, local secrets, or uncommitted edits.
+
 ### Live UI hot reload
 
 The v12 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`; a separate `/terminal-ui/reload` SSE channel is used only for stylesheet updates. The mounted document is never replaced and there is no `/terminal-ui/runtime.html` route. CSS-only changes can refresh without disturbing the active session, stream capability, fallback transport, or last accepted terminal cursor. HTML/JavaScript changes require a new MCP App resource version and the normal connector rescan/refresh process.
