@@ -5,6 +5,7 @@ import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
 import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
 import { parseGatewayUrl } from './transport-security.js';
+import { resolveEnrollmentConfig } from './enrollment-config.js';
 
 function csv(value: string | undefined): string[] {
   return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
@@ -32,18 +33,16 @@ if (profile === 'developer' && roots.length === 0) {
   throw new Error('ALLOWED_WORKSPACE_ROOTS is required when EXECUTION_PROFILE=developer.');
 }
 const identityPath = process.env.AGENT_IDENTITY_PATH ?? join(homedir(), '.config', 'chatgpt-terminal-plugin', 'device.json');
-const identity = await DeviceIdentity.loadOrCreate(identityPath, process.env.AGENT_ROTATE_KEY === '1');
+const enrollmentConfig = resolveEnrollmentConfig(process.env);
+const identity = await DeviceIdentity.loadOrCreate(identityPath, enrollmentConfig.rotateKey);
 
-if (process.env.AGENT_ENROLLMENT_URL || process.env.AGENT_ENROLLMENT_TOKEN || process.env.AGENT_OWNER_ID) {
-  if (!process.env.AGENT_ENROLLMENT_URL || !process.env.AGENT_ENROLLMENT_TOKEN || !process.env.AGENT_OWNER_ID) {
-    throw new Error('AGENT_ENROLLMENT_URL, AGENT_ENROLLMENT_TOKEN, and AGENT_OWNER_ID must be configured together.');
-  }
+if (enrollmentConfig.enrollment) {
   const status = await enrollDevice({
     identity,
-    enrollmentUrl: process.env.AGENT_ENROLLMENT_URL,
-    enrollmentToken: process.env.AGENT_ENROLLMENT_TOKEN,
-    ownerId: process.env.AGENT_OWNER_ID,
-    ...(process.env.AGENT_DISPLAY_NAME ? { displayName: process.env.AGENT_DISPLAY_NAME } : {}),
+    enrollmentUrl: enrollmentConfig.enrollment.url,
+    enrollmentToken: enrollmentConfig.enrollment.token,
+    ownerId: enrollmentConfig.enrollment.ownerId,
+    ...(enrollmentConfig.enrollment.displayName ? { displayName: enrollmentConfig.enrollment.displayName } : {}),
   });
   console.log(JSON.stringify({ level: 'info', event: 'agent.device_enrollment', status, device_id: identity.deviceId }));
   delete process.env.AGENT_ENROLLMENT_TOKEN;

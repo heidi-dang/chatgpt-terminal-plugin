@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayAuthChallengeSchema, gatewayChallengePayload } from '../../packages/protocol/src/index.js';
 import { DeviceIdentity, enrollDevice } from '../../packages/local-agent/src/device-identity.js';
+import { resolveEnrollmentConfig } from '../../packages/local-agent/src/enrollment-config.js';
 import { DeviceRegistry } from '../../packages/mcp-server/src/device-registry.js';
 import { AgentGateway } from '../../packages/mcp-server/src/gateway.js';
 
@@ -15,6 +16,21 @@ afterEach(async () => {
 });
 
 describe('device identity and enrollment', () => {
+  it('requires same-startup enrollment before rotating the local device key', () => {
+    expect(() => resolveEnrollmentConfig({ AGENT_ROTATE_KEY: '1' })).toThrow(/rotate.*enrollment/i);
+    expect(() => resolveEnrollmentConfig({
+      AGENT_ROTATE_KEY: '1',
+      AGENT_ENROLLMENT_URL: 'https://terminal.example.com/agent/enroll',
+      AGENT_ENROLLMENT_TOKEN: 'bootstrap-token',
+      AGENT_OWNER_ID: 'owner-a',
+    })).not.toThrow();
+  });
+
+  it('rejects partial enrollment configuration before identity mutation', () => {
+    expect(() => resolveEnrollmentConfig({
+      AGENT_ENROLLMENT_URL: 'https://terminal.example.com/agent/enroll',
+    })).toThrow(/configured together/i);
+  });
   it('rejects plaintext remote enrollment before sending the bootstrap token', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-device-enrollment-transport-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
