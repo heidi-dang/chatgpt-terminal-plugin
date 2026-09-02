@@ -11,6 +11,7 @@ export { discoverLspServers, resolveLspServers } from './lsp-discovery.js';
 import {
   TerminalProtocolError,
   type Agent,
+  type AgentHealthTelemetry,
   type CodeCancelOutput,
   type CodeExecuteInput,
   type CodeExecuteOutput,
@@ -63,6 +64,7 @@ interface ManagedSession {
 
 export interface TerminalAgentApi {
   describe(): Agent;
+  getTelemetry(): AgentHealthTelemetry;
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -306,8 +308,26 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
   }
 
+  getTelemetry(): AgentHealthTelemetry {
+    const runningSessions = [...this.sessions.values()].filter((s) => s.metadata.status === 'running').length;
+    const [oneMinute = 0, fiveMinutes = 0, fifteenMinutes = 0] = os.loadavg();
+    return {
+      cpu_load: [oneMinute, fiveMinutes, fifteenMinutes],
+      freemem_bytes: os.freemem(),
+      totalmem_bytes: os.totalmem(),
+      uptime_seconds: os.uptime(),
+      active_sessions: runningSessions,
+      active_lsp_processes: this.lspManager.activeCount,
+      active_code_executions: this.codeExecutor.activeCount,
+    };
+  }
+
   describe(): Agent {
-    return { ...this.agent, capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] } };
+    return {
+      ...this.agent,
+      telemetry: this.getTelemetry(),
+      capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] },
+    };
   }
 
   listSessions(): TerminalSession[] {
