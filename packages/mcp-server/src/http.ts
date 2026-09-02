@@ -35,7 +35,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     host: config.host,
     ...(config.allowedHosts.length > 0 ? { allowedHosts: config.allowedHosts } : {}),
     ...(config.allowedOrigins.length > 0 ? { allowedOrigins: config.allowedOrigins } : {}),
-    jsonLimit: '256kb',
+    jsonLimit: '512kb',
   });
   const audit = new AuditLogger(config.auditLogPath, config.transcriptLogPath);
   await audit.pruneTranscript(config.transcriptRetentionDays);
