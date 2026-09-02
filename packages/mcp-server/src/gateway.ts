@@ -4,6 +4,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+  GATEWAY_MAX_PAYLOAD_BYTES,
   TerminalProtocolError,
   agentResponseSchema,
   agentSessionSnapshotSchema,
@@ -90,7 +91,7 @@ export interface AgentGatewayOptions {
 export class AgentGateway {
   // Limit individual WebSocket message size to prevent memory exhaustion from oversized payloads.
   // Terminal events rarely exceed a few KB; 2 MB provides generous headroom while bounding risk.
-  readonly webSocketServer = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
+  readonly webSocketServer = new WebSocketServer({ noServer: true, maxPayload: GATEWAY_MAX_PAYLOAD_BYTES });
   private readonly agents = new Map<string, AgentConnection>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, SessionRecord>();

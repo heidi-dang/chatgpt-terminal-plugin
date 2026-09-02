@@ -7,6 +7,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentGatewayClient } from '../../packages/local-agent/src/gateway-client.js';
 import { LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
+import { GATEWAY_MAX_PAYLOAD_BYTES } from '../../packages/protocol/src/index.js';
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -79,6 +80,57 @@ describe('AgentGatewayClient lifecycle', () => {
     }
 
     expect(rejectedSocketWasOpen).toBe(false);
+  });
+
+  it('rejects oversized authenticated gateway frames before application parsing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-payload-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-payload', allowedWorkspaceRoots: [root], executionProfile: 'owner-full', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate gateway-client payload test port.');
+    let resolveClose!: (code: number) => void;
+    const closed = new Promise<number>((resolve) => { resolveClose = resolve; });
+    server.once('connection', (socket) => {
+      const now = Date.now();
+      socket.send(JSON.stringify({
+        type: 'auth.challenge', nonce: randomUUID(),
+        issued_at: new Date(now).toISOString(), expires_at: new Date(now + 10_000).toISOString(),
+      }));
+      let authenticated = false;
+      socket.on('message', (raw) => {
+        const message = JSON.parse(raw.toString()) as { type?: string };
+        if (!authenticated && message.type === 'auth.proof') {
+          authenticated = true;
+          socket.send(JSON.stringify({ type: 'auth.accepted', server_time: new Date().toISOString() }));
+          return;
+        }
+        if (authenticated && message.type === 'agent.register') {
+          socket.send(JSON.stringify({
+            type: 'heartbeat', timestamp: new Date().toISOString(), padding: 'x'.repeat(GATEWAY_MAX_PAYLOAD_BYTES + 1024 * 1024),
+          }));
+        }
+      });
+      socket.once('close', (code) => resolveClose(code));
+    });
+    const client = new AgentGatewayClient(agent, {
+      url: `ws://127.0.0.1:${address.port}/`,
+      identity: { deviceId: 'device-payload-test', signChallenge: () => 'signature' } as never,
+      heartbeatMs: 1_000, reconnectMaxMs: 500, outboundHighWaterBytes: 1024 * 1024,
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup.push(() => errorSpy.mockRestore());
+    const run = client.start();
+    const closeCode = await Promise.race([closed, new Promise<number>((resolve) => setTimeout(() => resolve(0), 2_000))]);
+    client.stop();
+    await run;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    expect(closeCode).toBe(1009);
   });
 
   it('stops promptly while waiting in reconnect backoff', async () => {

@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import {
+  GATEWAY_MAX_PAYLOAD_BYTES,
   TerminalProtocolError,
   agentCommandSchema,
   gatewayAuthChallengeSchema,
@@ -97,6 +98,7 @@ export class AgentGatewayClient {
       headers: {
         'x-terminal-device-id': this.options.identity.deviceId,
       },
+      maxPayload: GATEWAY_MAX_PAYLOAD_BYTES,
     });
     this.socket = socket;
     try {
@@ -111,6 +113,9 @@ export class AgentGatewayClient {
     }
     this.authenticated = true;
 
+    socket.on('error', (error) => {
+      console.error(JSON.stringify({ level: 'error', event: 'agent.gateway_socket_error', error: errorMessage(error) }));
+    });
     socket.on('message', (data) => {
       try {
         this.handleMessage(rawDataText(data));
