@@ -245,6 +245,18 @@ describe('terminal MCP end-to-end', () => {
       return chunk.execution_id === codeExecutionId && chunk.stream === 'stdout' && chunk.chunk.includes('__CODE_E2E__');
     })).toBe(true);
 
+    const stdinExecutionId = randomUUID();
+    const stdinResult = structured(await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, execution_id: stdinExecutionId, runtime: 'node', cwd: workspace,
+        code: 'import { readFileSync } from "node:fs"; process.stdout.write("__STDIN_E2E__" + readFileSync(0, "utf8"))',
+        stdin: 'piped-through-mcp', timeout_ms: 5_000,
+      },
+    }));
+    expect(stdinResult).toMatchObject({ execution_id: stdinExecutionId, exit_code: 0 });
+    expect(stdinResult.stdout).toContain('__STDIN_E2E__piped-through-mcp');
+
     const explicitCancelId = randomUUID();
     const explicitRunning = client.callTool({
       name: 'terminal_execute_code_block',

@@ -347,6 +347,7 @@ export class AgentGateway {
       execution_id: executionId,
       runtime: input.runtime,
       code: input.code,
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input.timeout_ms === undefined ? {} : { timeout_ms: input.timeout_ms }),
     };
