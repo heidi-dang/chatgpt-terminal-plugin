@@ -28,11 +28,14 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/release/packages"
 pnpm --filter @terminal/mcp-server deploy --prod --legacy --reporter=append-only "$stage/release/packages/mcp-server"
-mkdir -p "$stage/release/packages/terminal-ui/dist"
-cp packages/terminal-ui/dist/index.html "$stage/release/packages/terminal-ui/dist/index.html"
+mkdir -p "$stage/release/packages/terminal-ui/dist" "$stage/release/packages/terminal-ui/src"
+cp -p packages/terminal-ui/dist/index.html "$stage/release/packages/terminal-ui/dist/index.html"
+cp -p packages/terminal-ui/src/main.ts "$stage/release/packages/terminal-ui/src/main.ts"
+cp -p packages/terminal-ui/src/styles.css "$stage/release/packages/terminal-ui/src/styles.css"
 printf '%s\n' "$revision" > "$stage/release/REVISION"
 
 node --input-type=module -e "await import(process.argv[1]);" "$stage/release/packages/mcp-server/dist/index.js"
+node --input-type=module -e "const runtime = await import(process.argv[1]); await runtime.readTerminalUiDocument(); await runtime.readTerminalUiStyles();" "$stage/release/packages/mcp-server/dist/ui-runtime.js"
 archive="$output_dir/chatgpt-terminal-mcp-${revision}.tar.gz"
 tar -C "$stage/release" -czf "$archive" .
 archive_basename=$(basename "$archive")
