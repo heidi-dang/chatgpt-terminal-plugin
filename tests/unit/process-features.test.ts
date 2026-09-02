@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { terminalExecuteCodeBlockToolSchema, terminalLspRequestSchema } from '../../packages/protocol/src/index.js';
 import { CodeBlockExecutor } from '../../packages/local-agent/src/code-block-executor.js';
-import { cleanEnvironment, LocalTerminalAgent } from '../../packages/local-agent/src/index.js';
+import { cleanEnvironment, discoverLspServers, LocalTerminalAgent, resolveLspServers } from '../../packages/local-agent/src/index.js';
 import { LspManager } from '../../packages/local-agent/src/lsp-manager.js';
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -199,6 +199,46 @@ exec "${process.execPath}" "$@"
     await delay(60);
     expect(executor.cancel('user-a', executionId)).toEqual({ execution_id: executionId, cancelled: true });
     await expect(running).rejects.toMatchObject({ code: 'REQUEST_CANCELLED' });
+  });
+});
+
+describe('LSP server discovery', () => {
+  it('discovers executable candidates from PATH without spawning lookup subprocesses', async () => {
+    const bin = await mkdtemp(join(tmpdir(), 'terminal-lsp-discovery-'));
+    cleanup.push(() => rm(bin, { recursive: true, force: true }));
+    const executable = join(bin, 'fake-language-server');
+    await writeFile(executable, '#!/bin/sh\nexit 0\n', 'utf8');
+    await chmod(executable, 0o755);
+
+    const discovered = await discoverLspServers([
+      { serverId: 'fake', command: 'fake-language-server', args: ['--stdio'] },
+      { serverId: 'missing', command: 'not-installed-language-server', args: [] },
+    ], { PATH: bin }, 'linux');
+
+    expect(discovered).toEqual({ fake: { command: executable, args: ['--stdio'] } });
+  });
+
+  it('lets explicit configuration override discovery and supports a zero-probe disable path', async () => {
+    const configured = { typescript: { command: '/configured/ts-lsp', args: ['--stdio', '--verbose'] } };
+    const disabled = await resolveLspServers(configured, {
+      disabled: true,
+      candidates: [{ serverId: 'typescript', command: 'should-not-be-probed', args: [] }],
+      environment: { PATH: '' },
+      platform: 'linux',
+    });
+    expect(disabled).toEqual(configured);
+
+    const bin = await mkdtemp(join(tmpdir(), 'terminal-lsp-override-'));
+    cleanup.push(() => rm(bin, { recursive: true, force: true }));
+    const executable = join(bin, 'typescript-language-server');
+    await writeFile(executable, '#!/bin/sh\nexit 0\n', 'utf8');
+    await chmod(executable, 0o755);
+    const merged = await resolveLspServers(configured, {
+      candidates: [{ serverId: 'typescript', command: 'typescript-language-server', args: ['--stdio'] }],
+      environment: { PATH: bin },
+      platform: 'linux',
+    });
+    expect(merged.typescript).toEqual(configured.typescript);
   });
 });
 
