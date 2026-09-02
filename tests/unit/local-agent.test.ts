@@ -159,6 +159,22 @@ describe('LocalTerminalAgent', () => {
     await expect(agent.writeFile(started.session.session_id, 'linked.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
   });
 
+  it('submits a terminal_start command as a complete line on a fresh PTY', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-start-command-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-start-command', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-start-command', cwd: root, shell: 'bash', cols: 80, rows: 24,
+      command: "printf '__START_COMMAND_READY__\\n'",
+    }, 'developer');
+
+    const output = await waitForText(agent, started.session.session_id, 0, '__START_COMMAND_READY__');
+    expect(output.output).toContain('__START_COMMAND_READY__');
+  });
+
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-env-root-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

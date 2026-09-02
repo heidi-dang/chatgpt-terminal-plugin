@@ -401,7 +401,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
 
     this.recordEvent(managed, 'agent', 'session.started', { cwd, shell, cols: input.cols, rows: input.rows, execution_profile: effectiveProfile });
     if (input.command) {
-      this.write(sessionId, `${input.command}\r`, 'chatgpt');
+      // A newly spawned Unix PTY can receive input before the shell has enabled CR-to-NL translation.
+      // Submit startup commands with LF so they cannot remain buffered as an unterminated line.
+      this.write(sessionId, `${input.command}${process.platform === 'win32' ? '\r' : '\n'}`, 'chatgpt');
     }
 
     return this.snapshot(managed);
