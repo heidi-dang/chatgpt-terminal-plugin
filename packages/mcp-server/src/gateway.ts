@@ -25,6 +25,7 @@ import {
   type Agent,
   type CodeCancelOutput,
   type CodeExecuteOutput,
+  type CodeExecutionChunk,
   type AgentCommand,
   type ExecutionProfile,
   type LspRequestOutput,
@@ -62,6 +63,8 @@ interface PendingRequest {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
   parseResult?: ((raw: unknown) => unknown) | undefined;
+  executionId?: string | undefined;
+  onChunk?: ((stream: 'stdout' | 'stderr', chunk: string) => void) | undefined;
 }
 
 export interface SessionRecord {
@@ -332,7 +335,12 @@ export class AgentGateway {
     }, (raw) => terminalSearchFilesOutputSchema.parse(raw));
   }
 
-  async executeCode(userId: string, input: TerminalExecuteCodeBlockToolArgs, executionProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+  async executeCode(
+    userId: string,
+    input: TerminalExecuteCodeBlockToolArgs,
+    executionProfile: ExecutionProfile,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     const connection = this.requireAgent(userId, input.agent_id);
     const executionId = input.execution_id ?? randomUUID();
     const agentInput = {
@@ -343,10 +351,11 @@ export class AgentGateway {
       ...(input.timeout_ms === undefined ? {} : { timeout_ms: input.timeout_ms }),
     };
     const timeoutMs = Math.max(this.options.requestTimeoutMs, Math.min(input.timeout_ms ?? 10_000, 120_000) + 2_000);
+    const requestId = randomUUID();
     return this.request(connection, {
-      type: 'request', request_id: randomUUID(), action: 'code.execute', user_id: userId,
+      type: 'request', request_id: requestId, action: 'code.execute', user_id: userId,
       execution_profile: executionProfile, input: agentInput,
-    }, (raw) => codeExecuteOutputSchema.parse(raw), timeoutMs);
+    }, (raw) => codeExecuteOutputSchema.parse(raw), timeoutMs, executionId, onChunk);
   }
 
   async cancelCode(userId: string, agentId: string, executionId: string, executionProfile: ExecutionProfile): Promise<CodeCancelOutput> {
@@ -540,6 +549,10 @@ export class AgentGateway {
         connection.agent.last_seen = new Date(connection.lastSeenMs).toISOString();
 
         if (message.type === 'heartbeat' || message.type === 'ack') return;
+        if (message.type === 'code.chunk') {
+          this.handleCodeChunk(registeredAgentId, message);
+          return;
+        }
         if (message.type === 'event') {
           const existing = this.sessions.get(message.event.session_id);
           if (existing?.ownerId && existing.ownerId !== ownerId) {
@@ -649,6 +662,8 @@ export class AgentGateway {
     command: AgentCommand,
     parseResult?: (raw: unknown) => T,
     timeoutMs = this.options.requestTimeoutMs,
+    executionId?: string,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<T> {
     if (connection.socket.readyState !== WebSocket.OPEN) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
@@ -660,7 +675,15 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
       }, timeoutMs);
       timer.unref();
-      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
+      this.pending.set(command.request_id, {
+        agentId: connection.agent.agent_id,
+        resolve: resolve as (result: unknown) => void,
+        reject,
+        timer,
+        parseResult,
+        executionId,
+        onChunk,
+      });
       connection.socket.send(JSON.stringify(command), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -668,6 +691,12 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_OFFLINE', `Failed to send command to agent: ${error.message}`, true));
       });
     });
+  }
+
+  private handleCodeChunk(agentId: string, message: CodeExecutionChunk): void {
+    const pending = this.pending.get(message.request_id);
+    if (!pending || pending.agentId !== agentId || pending.executionId !== message.execution_id) return;
+    pending.onChunk?.(message.stream, message.chunk);
   }
 
   private resolveResponse(agentId: string, raw: unknown): void {

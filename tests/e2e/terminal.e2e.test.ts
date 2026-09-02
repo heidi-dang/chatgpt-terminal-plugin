@@ -225,16 +225,25 @@ describe('terminal MCP end-to-end', () => {
     const surfaceId = stringField(surface, 'surface_id');
     expect(surface.surface_active).toBe(false);
     const codeExecutionId = randomUUID();
+    const codeProgress: string[] = [];
     const codeResult = structured(await client.callTool({
       name: 'terminal_execute_code_block',
       arguments: {
         agent_id: identity.agentId, execution_id: codeExecutionId, runtime: 'node', cwd: workspace,
         code: `process.stdout.write('__CODE_E2E__|' + process.cwd())`, timeout_ms: 5_000,
       },
+    }, {
+      onprogress: (notification) => {
+        if (notification.message) codeProgress.push(notification.message);
+      },
     }));
     expect(codeResult.execution_id).toBe(codeExecutionId);
     expect(codeResult.stdout).toContain(`__CODE_E2E__|${workspace}`);
     expect(codeResult.exit_code).toBe(0);
+    expect(codeProgress.some((message) => {
+      const chunk = JSON.parse(message) as { execution_id: string; stream: string; chunk: string };
+      return chunk.execution_id === codeExecutionId && chunk.stream === 'stdout' && chunk.chunk.includes('__CODE_E2E__');
+    })).toBe(true);
 
     const explicitCancelId = randomUUID();
     const explicitRunning = client.callTool({

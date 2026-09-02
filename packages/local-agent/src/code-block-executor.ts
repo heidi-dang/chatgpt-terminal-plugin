@@ -59,7 +59,12 @@ export class CodeBlockExecutor {
     this.killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   }
 
-  async execute(userId: string, input: CodeExecuteInput, cwd: string): Promise<CodeExecuteOutput> {
+  async execute(
+    userId: string,
+    input: CodeExecuteInput,
+    cwd: string,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     if (this.active.has(input.execution_id)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Execution identifier is already active.');
     }
@@ -72,7 +77,7 @@ export class CodeBlockExecutor {
 
     try {
       await writeFile(scriptPath, input.code, { encoding: 'utf8', mode: 0o700, flag: 'wx' });
-      return await this.runChild(userId, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt);
+      return await this.runChild(userId, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt, onChunk);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -102,6 +107,7 @@ export class CodeBlockExecutor {
     args: string[],
     timeoutMs: number,
     startedAt: number,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<CodeExecuteOutput> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
@@ -162,6 +168,13 @@ export class CodeBlockExecutor {
             stderrBytes += slice.length;
           }
           combinedBytes += slice.length;
+          if (onChunk) {
+            try {
+              onChunk(stream, slice.toString('utf8'));
+            } catch {
+              // Ignore consumer chunk handler errors
+            }
+          }
         }
         if (allowed < chunk.length) {
           limitError = new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Code execution exceeded the configured output limit.');

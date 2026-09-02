@@ -44,3 +44,12 @@ export const codeCancelOutputSchema = z.object({
   cancelled: z.boolean(),
 });
 export type CodeCancelOutput = z.infer<typeof codeCancelOutputSchema>;
+
+export const codeExecutionChunkSchema = z.object({
+  type: z.literal('code.chunk'),
+  request_id: z.string().min(1),
+  execution_id: z.string().uuid(),
+  stream: z.enum(['stdout', 'stderr']),
+  chunk: z.string().max(131_072),
+});
+export type CodeExecutionChunk = z.infer<typeof codeExecutionChunkSchema>;

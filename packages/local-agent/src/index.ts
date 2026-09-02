@@ -77,7 +77,7 @@ export interface TerminalAgentApi {
   deleteFile(sessionId: string, filePath: string): Promise<{ path: string }>;
   renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }>;
   searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
-  executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput>;
+  executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile, onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void): Promise<CodeExecuteOutput>;
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput;
   startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput>;
   requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput>;
@@ -773,7 +773,12 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return { pattern, matches, truncated, files_searched: filesSearched };
   }
 
-  async executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+  async executeCode(
+    userId: string,
+    input: CodeExecuteInput,
+    requestedProfile: ExecutionProfile,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     this.assertProcessExecutionAllowed(requestedProfile);
     const fallbackRoot = this.options.allowedWorkspaceRoots[0];
     const requestedCwd = input.cwd ?? fallbackRoot;
@@ -781,7 +786,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace root is configured for code execution.');
     }
     const cwd = this.executionWorkspacePolicy.resolveCwd(requestedCwd);
-    return this.codeExecutor.execute(userId, input, cwd);
+    return this.codeExecutor.execute(userId, input, cwd, onChunk);
   }
 
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput {
