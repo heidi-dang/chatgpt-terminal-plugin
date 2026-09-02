@@ -68,9 +68,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
   const service = new TerminalService(gateway, config, audit);
   const streamTokens = new StreamTokenService(config.streamTokenSecret, config.streamTokenTtlSeconds);
-  const turnRegistry = new TerminalTurnRegistry(
+  const turnRegistry = await TerminalTurnRegistry.load(
     async (identity, sessionId) => service.close(identity, sessionId).then(() => undefined),
     config.terminalTurnLeaseMs,
+    config.terminalTurnStatePath,
   );
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
@@ -400,6 +401,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
               httpServer.close((error) => error ? reject(error) : resolve());
             })
           : Promise.resolve();
+        const forceCloseTimer = setTimeout(() => httpServer.closeAllConnections(), config.shutdownGraceMs);
+        forceCloseTimer.unref();
         clearInterval(transcriptRetentionTimer);
         stopUiWatcher();
         for (const client of uiReloadClients) client.end();
@@ -412,6 +415,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         for (const session of sessions.values()) await session.server.close();
         sessions.clear();
         await httpClosed;
+        clearTimeout(forceCloseTimer);
         await audit.flush();
       })();
     },

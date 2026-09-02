@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { z } from 'zod';
 
 const positiveInt = (fallback: number, max = Number.MAX_SAFE_INTEGER) =>
@@ -44,6 +44,7 @@ const configSchema = z.object({
   MCP_HOST: z.string().min(1).default('127.0.0.1'),
   MCP_PORT: positiveInt(8787, 65_535),
   MCP_PUBLIC_URL: z.string().url(),
+  MCP_SHUTDOWN_GRACE_MS: positiveInt(2_000, 10_000),
   AGENT_GATEWAY_PATH: z.string().regex(/^\//).default('/agent'),
   AGENT_ENROLLMENT_PATH: z.string().regex(/^\//).default('/agent/enroll'),
   AGENT_DEVICE_REGISTRY_PATH: optionalString,
@@ -76,6 +77,7 @@ const configSchema = z.object({
   TERMINAL_IDLE_TIMEOUT_MS: positiveInt(30 * 60_000, 7 * 24 * 60 * 60_000),
   TERMINAL_MAX_LIFETIME_MS: positiveInt(8 * 60 * 60_000, 30 * 24 * 60 * 60_000),
   TERMINAL_TURN_LEASE_MS: positiveInt(120_000, 60 * 60_000),
+  TERMINAL_TURN_STATE_PATH: optionalString,
   TERMINAL_CLOSED_SESSION_RETENTION_MS: positiveInt(15 * 60_000, 7 * 24 * 60 * 60_000),
   TERMINAL_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
   AGENT_REQUEST_TIMEOUT_MS: positiveInt(15_000, 120_000),
@@ -148,6 +150,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (parsed.MCP_EXTENSION_ROOT && !isAbsolute(parsed.MCP_EXTENSION_ROOT)) {
     throw new Error('MCP_EXTENSION_ROOT must be an absolute administrator-controlled path.');
   }
+  if (parsed.TERMINAL_TURN_STATE_PATH && !isAbsolute(parsed.TERMINAL_TURN_STATE_PATH)) {
+    throw new Error('TERMINAL_TURN_STATE_PATH must be an absolute state path.');
+  }
 
   if (parsed.MCP_AUTH_MODE === 'development' && !parsed.MCP_DEVELOPMENT_TOKEN) {
     throw new Error('Development auth requires MCP_DEVELOPMENT_TOKEN.');
@@ -158,6 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     host: parsed.MCP_HOST,
     port: parsed.MCP_PORT,
     publicUrl,
+    shutdownGraceMs: parsed.MCP_SHUTDOWN_GRACE_MS,
     agentGatewayPath: parsed.AGENT_GATEWAY_PATH,
     agentEnrollmentPath: parsed.AGENT_ENROLLMENT_PATH,
     deviceRegistryPath: parsed.AGENT_DEVICE_REGISTRY_PATH,
@@ -197,6 +203,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     terminalIdleTimeoutMs: parsed.TERMINAL_IDLE_TIMEOUT_MS,
     terminalMaxLifetimeMs: parsed.TERMINAL_MAX_LIFETIME_MS,
     terminalTurnLeaseMs: parsed.TERMINAL_TURN_LEASE_MS,
+    terminalTurnStatePath: parsed.TERMINAL_TURN_STATE_PATH
+      ?? (parsed.AGENT_DEVICE_REGISTRY_PATH ? join(dirname(parsed.AGENT_DEVICE_REGISTRY_PATH), 'terminal-turns.json') : undefined),
     closedSessionRetentionMs: parsed.TERMINAL_CLOSED_SESSION_RETENTION_MS,
     terminalSweepIntervalMs: parsed.TERMINAL_SWEEP_INTERVAL_MS,
     agentRequestTimeoutMs: parsed.AGENT_REQUEST_TIMEOUT_MS,

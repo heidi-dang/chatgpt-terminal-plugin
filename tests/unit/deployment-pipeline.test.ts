@@ -32,6 +32,24 @@ describe('immutable production deployment', () => {
     expect(await readFile(fixture.sudoLog, 'utf8')).toContain('systemctl restart terminal-test.service');
   });
 
+  it('rejects an overlapping host deployment before mutating the active release', async () => {
+    const fixture = await createFixture();
+    const revision = 'e'.repeat(40);
+    const artifact = await makeArtifact(fixture.root, revision);
+    const lockPath = join(fixture.deployRoot, '.deploy.lock');
+    await writeFile(lockPath, '');
+    const holder = execFileAsync('flock', ['-n', lockPath, 'sleep', '1']);
+    await delay(100);
+
+    try {
+      await expect(runDeploy(fixture, artifact, revision, { TERMINAL_DEPLOY_LOCK_PATH: lockPath }))
+        .rejects.toMatchObject({ code: 75 });
+      await expect(readlink(join(fixture.deployRoot, 'current'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await holder;
+    }
+  });
+
   it('restores the previous release when the health gate fails', async () => {
     const fixture = await createFixture();
     const previous = 'b'.repeat(40);
@@ -117,4 +135,8 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 async function symlinkAbsolute(target: string, path: string): Promise<void> {
   const { symlink } = await import('node:fs/promises');
   await symlink(target, path);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }

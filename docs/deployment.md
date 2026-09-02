@@ -78,6 +78,8 @@ Production requires at minimum:
 - `AGENT_DEVICE_REGISTRY_PATH`
 - `AGENT_ENROLLMENT_TOKEN`
 - finite positive `TERMINAL_MAX_SESSIONS_PER_USER` and `TERMINAL_MAX_SESSIONS_PER_AGENT` values sized for the host
+- `TERMINAL_TURN_STATE_PATH` on protected persistent storage (defaults beside `AGENT_DEVICE_REGISTRY_PATH`) so a surface lease survives an MCP process replacement
+- a short `MCP_SHUTDOWN_GRACE_MS` (the shipped production template uses 2 seconds) so stale keep-alive/SSE sockets cannot turn a restart into a long proxy 502 window
 - appropriate audit/transcript paths and retention
 
 Set `MCP_DEFAULT_EXECUTION_PROFILE` to the least privilege appropriate for tokens that do not carry an explicit profile claim. `TERMINAL_CLOSED_SESSION_RETENTION_MS` controls how long final session metadata/events remain available for status, UI reconnect, and post-mortem reads before agent/server memory is released. Use `deploy/server-environment.example` as the complete non-secret template; the runtime rejects malformed public URLs, insecure production OAuth endpoints, empty required scopes, and route collisions at startup.
@@ -125,7 +127,8 @@ Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-env
 - secrets live in an owner/root-readable environment file outside Git
 - restart on failure
 - bind the Node service to loopback when a local reverse proxy is used
-- persist the device registry and logs on protected local paths; the provided systemd unit uses `StateDirectory=chatgpt-terminal` and `LogsDirectory=chatgpt-terminal` with `0700` modes so `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` are created and owned for the service automatically
+- persist the device registry, Terminal turn-state file, and logs on protected local paths; the provided systemd unit uses `StateDirectory=chatgpt-terminal` and `LogsDirectory=chatgpt-terminal` with `0700` modes so `/var/lib/chatgpt-terminal` and `/var/log/chatgpt-terminal` are created and owned for the service automatically
+- keep `TimeoutStopSec` close to the application shutdown bound; the shipped unit uses a five-second systemd hard cap and `KillMode=mixed`
 
 ## Local-agent installation
 
@@ -150,7 +153,7 @@ AGENT_OWNER_ID=<JWT sub / server user ID>
 AGENT_ENROLLMENT_TOKEN=<bootstrap administrator token>
 ```
 
-After successful enrollment, remove the enrollment token from the persistent service environment. The CLI also deletes `AGENT_ENROLLMENT_TOKEN` from its own process environment immediately after successful enrollment so spawned PTYs cannot inherit it. Ongoing gateway authentication uses the machine's Ed25519 private key, not the bootstrap token.
+Store first-enrollment values only in the owner-readable environment file referenced by the systemd unit; never place `AGENT_ENROLLMENT_TOKEN` directly in `Environment=` lines in the unit. After successful enrollment, remove the enrollment token from that persistent environment file. The CLI also deletes `AGENT_ENROLLMENT_TOKEN` from its own process environment immediately after successful enrollment so spawned PTYs cannot inherit it. Ongoing gateway authentication uses the machine's Ed25519 private key, not the bootstrap token.
 
 A trusted server administrator with local filesystem access can enroll a public device record without reading the bootstrap token by using the server-only admin CLI. This is not an HTTP endpoint and should be run as the OS account that owns the registry so ownership remains correct:
 
@@ -232,9 +235,13 @@ Configure these **GitHub Environment secrets**:
 
 - `TERMINAL_DEPLOY_SSH_KEY` — private key for the restricted deployment account.
 - `TERMINAL_DEPLOY_KNOWN_HOSTS` — pinned SSH host-key entry. Do not replace this with disabled host-key verification or a runtime `ssh-keyscan` trust-on-first-use step.
+- For origin-managed JWT OAuth, `TERMINAL_SMOKE_BEARER_TOKEN` — a dedicated bearer accepted by the public MCP endpoint.
+- For Cloudflare Access, configure both `TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID` and `TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET` for a narrowly scoped Access service-token policy instead of a short-lived user OAuth token.
 
 The remote deployment account must be able to write `TERMINAL_DEPLOY_ROOT`, run Node.js to validate the staged MCP module, and invoke passwordless `sudo systemctl restart/is-active` for the configured MCP service. Restrict sudo policy to that service where practical. The health URL must be reachable from the deployment runner.
 
-`scripts/package-mcp-release.sh` uses `pnpm deploy --prod --legacy` after the repository build to produce a self-contained MCP dependency tree, then adds the built single-file Terminal UI, the UI source files used by runtime freshness/legacy stylesheet endpoints, and a `REVISION` marker. Packaging executes the MCP module import plus the packaged UI document and stylesheet readers before creating the archive, so missing runtime assets fail before deployment. `deploy/immutable-deploy.sh` verifies the archive digest, extracts into a same-filesystem staging directory, validates the revision and module import, marks the completed release read-only, and atomically switches `current` to `releases/<git-sha>`. If service activation or the health gate fails, the script restores the previous `current` target and restarts that previous release. On a first-ever deployment with no previous release, a failed cutover removes the new `current` link rather than leaving it pointed at an unhealthy release.
+`scripts/package-mcp-release.sh` uses `pnpm deploy --prod --legacy` after the repository build to produce a self-contained MCP dependency tree, then adds the built single-file Terminal UI, the UI source files used by runtime freshness/legacy stylesheet endpoints, and a `REVISION` marker. Packaging executes the MCP module import plus the packaged UI document and stylesheet readers before creating the archive, so missing runtime assets fail before deployment. `deploy/immutable-deploy.sh` takes a non-blocking host-level `flock` before touching release state, verifies the archive digest, extracts into a same-filesystem staging directory, validates the revision and module import, marks the completed release read-only, and atomically switches `current` to `releases/<git-sha>`. This host lock complements the workflow's GitHub concurrency group and also blocks overlapping manual deploys. If service activation or the health gate fails, the script restores the previous `current` target and restarts that previous release. On a first-ever deployment with no previous release, a failed cutover removes the new `current` link rather than leaving it pointed at an unhealthy release.
+
+After the health cutover, `scripts/mcp-smoke.mjs` performs a real MCP initialize handshake and invokes `terminal_list_agents` through the public endpoint. A deployment is therefore not accepted merely because `/health` responds while the authenticated MCP/tool path is broken.
 
 The workflow deploys the **MCP server only**. Local-agent rollout remains a separate operation so a server deployment cannot unexpectedly restart user computers. Other systemd services are not touched because the target unit is supplied explicitly through `TERMINAL_SERVICE_NAME`.
