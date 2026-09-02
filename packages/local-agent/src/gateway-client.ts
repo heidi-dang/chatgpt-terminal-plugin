@@ -250,7 +250,15 @@ export class AgentGatewayClient {
       case 'file.rename':
         return this.agent.renameFile(command.input.session_id, command.input.from_path, command.input.to_path);
       case 'code.execute':
-        return this.agent.executeCode(command.user_id, command.input, command.execution_profile);
+        return this.agent.executeCode(command.user_id, command.input, command.execution_profile, (stream, chunk) => {
+          this.send({
+            type: 'code.chunk',
+            request_id: command.request_id,
+            execution_id: command.input.execution_id,
+            stream,
+            chunk,
+          });
+        });
       case 'code.cancel':
         return this.agent.cancelCode(command.user_id, command.input.execution_id, command.execution_profile);
       case 'lsp.start':

@@ -96,6 +96,28 @@ exec "${process.execPath}" "$@"
     await expect(access(marker)).resolves.toBeUndefined();
   });
 
+  it('streams stdout and stderr chunks in real time via onChunk callback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-stream-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment() });
+    cleanup.push(() => executor.shutdown());
+
+    const chunks: Array<{ stream: string; text: string }> = [];
+    const output = await executor.execute('user-a', {
+      execution_id: randomUUID(),
+      runtime: 'node',
+      code: 'console.log("out1"); console.error("err1"); console.log("out2");',
+      timeout_ms: 2_000,
+    }, root, (stream, chunk) => {
+      chunks.push({ stream, text: chunk });
+    });
+
+    expect(output.exit_code).toBe(0);
+    expect(chunks.some(c => c.stream === 'stdout' && c.text.includes('out1'))).toBe(true);
+    expect(chunks.some(c => c.stream === 'stderr' && c.text.includes('err1'))).toBe(true);
+    expect(chunks.some(c => c.stream === 'stdout' && c.text.includes('out2'))).toBe(true);
+  });
+
   it('enforces execution timeouts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-code-timeout-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

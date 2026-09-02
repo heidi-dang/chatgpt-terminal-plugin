@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { codeCancelInputSchema, codeExecuteInputSchema } from './code-block.js';
+import { codeCancelInputSchema, codeExecuteInputSchema, codeExecutionChunkSchema } from './code-block.js';
 import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
 
 export const terminalSessionStatusSchema = z.enum([
@@ -509,6 +509,7 @@ export const gatewayMessageSchema = z.union([
   z.object({ type: z.literal('ack'), session_id: z.string(), sequence: z.number().int().nonnegative() }),
   z.object({ type: z.literal('agent.register'), agent: agentSchema, device_id: z.string().min(1) }),
   z.object({ type: z.literal('agent.resume'), agent_id: z.string(), sessions: z.array(agentSessionSnapshotSchema) }),
+  codeExecutionChunkSchema,
   gatewayResumeAckSchema,
   agentCommandSchema,
   agentResponseSchema,

@@ -456,8 +456,26 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         void deps.service.cancelCode(identity, { agent_id: input.agent_id, execution_id: executionId }).catch(() => undefined);
       };
       ctx.mcpReq.signal.addEventListener('abort', onAbort, { once: true });
+      let progress = 0;
+      let notificationTail: Promise<void> = Promise.resolve();
+      const progressToken = ctx.mcpReq._meta?.progressToken;
+      const onChunk = progressToken === undefined ? undefined : (stream: 'stdout' | 'stderr', chunk: string): void => {
+        progress += 1;
+        notificationTail = notificationTail
+          .then(() => ctx.mcpReq.notify({
+            method: 'notifications/progress',
+            params: {
+              progressToken,
+              progress,
+              message: JSON.stringify({ execution_id: executionId, stream, chunk }),
+            },
+          }))
+          .catch(() => undefined);
+      };
       try {
-        return await deps.service.executeCode(identity, executeInput);
+        const output = await deps.service.executeCode(identity, executeInput, onChunk);
+        await notificationTail;
+        return output;
       } finally {
         ctx.mcpReq.signal.removeEventListener('abort', onAbort);
       }

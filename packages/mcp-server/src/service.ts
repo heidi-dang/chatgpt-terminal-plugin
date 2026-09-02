@@ -286,7 +286,11 @@ export class TerminalService {
     return this.gateway.renameFile(identity.userId, input.session_id, input.from_path, input.to_path);
   }
 
-  async executeCode(identity: RequestIdentity, rawInput: TerminalExecuteCodeBlockToolArgs): Promise<CodeExecuteOutput> {
+  async executeCode(
+    identity: RequestIdentity,
+    rawInput: TerminalExecuteCodeBlockToolArgs,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     const input = terminalExecuteCodeBlockToolSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_execute_code_block', {
       agent_id: input.agent_id,
@@ -295,7 +299,7 @@ export class TerminalService {
       timeout_ms: input.timeout_ms,
       code_bytes: Buffer.byteLength(input.code),
     });
-    const output = await this.gateway.executeCode(identity.userId, input, identity.executionProfile);
+    const output = await this.gateway.executeCode(identity.userId, input, identity.executionProfile, onChunk);
     await this.audit.record({
       action: 'terminal_execute_code_block', ...auditIdentity(identity), agent_id: input.agent_id,
       authorization: 'allow', input: { runtime: input.runtime, cwd: input.cwd, timeout_ms: input.timeout_ms, code_bytes: Buffer.byteLength(input.code) },
