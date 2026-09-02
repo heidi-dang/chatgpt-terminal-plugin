@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
@@ -68,6 +68,7 @@ const agent = new LocalTerminalAgent({
   maxLifetimeMs: intEnv('TERMINAL_MAX_LIFETIME_MS', 8 * 60 * 60_000),
   closedSessionRetentionMs: intEnv('TERMINAL_CLOSED_SESSION_RETENTION_MS', 15 * 60_000),
   sweepIntervalMs: intEnv('TERMINAL_SWEEP_INTERVAL_MS', 30_000),
+  workspaceRootsStatePath: process.env.AGENT_WORKSPACE_ROOTS_STATE_PATH ?? join(dirname(identityPath), 'workspace-roots.json'),
 });
 
 const client = new AgentGatewayClient(agent, {

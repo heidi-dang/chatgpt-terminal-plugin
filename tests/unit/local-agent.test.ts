@@ -180,6 +180,43 @@ describe('LocalTerminalAgent', () => {
     expect((await agent.readFile(started.session.session_id, 'inside.txt', 1024)).content).toBe('inside-target\n');
   });
 
+  it('persists dynamic workspace roots and refuses removal while an active terminal uses one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-dynamic-root-a-'));
+    const addedRoot = await mkdtemp(join(tmpdir(), 'terminal-dynamic-root-b-'));
+    const stateDir = await mkdtemp(join(tmpdir(), 'terminal-dynamic-state-'));
+    const statePath = join(stateDir, 'workspace-roots.json');
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(addedRoot, { recursive: true, force: true }));
+    cleanup.push(() => rm(stateDir, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-dynamic-roots', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      workspaceRootsStatePath: statePath,
+    });
+    cleanup.push(() => agent.shutdown());
+    expect(agent.getWorkspaceRoots()).toEqual([root]);
+    expect(agent.addWorkspaceRoot(addedRoot)).toEqual([root, addedRoot]);
+
+    const started = agent.start('user-test', {
+      agent_id: 'agent-dynamic-roots', cwd: addedRoot, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+    expect(() => agent.removeWorkspaceRoot(addedRoot)).toThrowError(/active within it/i);
+    agent.close(started.session.session_id);
+    await waitUntil(() => agent.status(started.session.session_id).session.status === 'closed');
+    expect(agent.removeWorkspaceRoot(addedRoot)).toEqual([root]);
+    agent.shutdown();
+
+    const reloaded = new LocalTerminalAgent({
+      agentId: 'agent-dynamic-roots-reloaded', allowedWorkspaceRoots: [root, addedRoot], executionProfile: 'developer', shells: ['bash'],
+      workspaceRootsStatePath: statePath,
+    });
+    cleanup.push(() => reloaded.shutdown());
+    expect(reloaded.getWorkspaceRoots()).toEqual([root]);
+    expect(() => reloaded.start('user-test', {
+      agent_id: 'agent-dynamic-roots-reloaded', cwd: addedRoot, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer')).toThrowError(expect.objectContaining({ code: 'PATH_NOT_ALLOWED' }));
+  });
+
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-env-root-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

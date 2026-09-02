@@ -256,6 +256,12 @@ export class AgentGatewayClient {
         return this.agent.deleteFile(command.input.session_id, command.input.path);
       case 'file.rename':
         return this.agent.renameFile(command.input.session_id, command.input.from_path, command.input.to_path);
+      case 'workspace.roots.get':
+        return { roots: this.agent.getWorkspaceRoots() };
+      case 'workspace.roots.add':
+        return { roots: this.agent.addWorkspaceRoot(command.input.root) };
+      case 'workspace.roots.remove':
+        return { roots: this.agent.removeWorkspaceRoot(command.input.root) };
       case 'code.execute':
         return this.agent.executeCode(command.user_id, command.input, command.execution_profile, (stream, chunk) => {
           this.send({

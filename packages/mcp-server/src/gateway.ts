@@ -22,6 +22,7 @@ import {
   terminalWriteFileOutputSchema,
   terminalDeleteFileOutputSchema,
   terminalRenameFileOutputSchema,
+  terminalWorkspaceRootsOutputSchema,
   type Agent,
   type CodeCancelOutput,
   type CodeExecuteOutput,
@@ -44,6 +45,7 @@ import {
   type TerminalWriteFileOutput,
   type TerminalDeleteFileOutput,
   type TerminalRenameFileOutput,
+  type TerminalWorkspaceRootsOutput,
   type TerminalSession,
   type TerminalStartInput,
 } from '@terminal/protocol';
@@ -333,6 +335,27 @@ export class AgentGateway {
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'file.search', input,
     }, (raw) => terminalSearchFilesOutputSchema.parse(raw));
+  }
+
+  async getWorkspaceRoots(userId: string, agentId: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.get', input: {},
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
+  }
+
+  async addWorkspaceRoot(userId: string, agentId: string, root: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.add', input: { root },
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
+  }
+
+  async removeWorkspaceRoot(userId: string, agentId: string, root: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.remove', input: { root },
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
   }
 
   async executeCode(
