@@ -1,4 +1,5 @@
-import { mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -124,6 +125,8 @@ describe('LocalTerminalAgent', () => {
     await writeTextFile(join(outside, 'secret.txt'), 'outside-secret\n', 'utf8');
     await symlink(outside, join(root, 'escape'), 'dir');
     await symlink(join(outside, 'secret.txt'), join(root, 'linked.txt'), 'file');
+    await writeTextFile(join(root, 'inside.txt'), 'inside-target\n', 'utf8');
+    await symlink(join(root, 'inside.txt'), join(root, 'inside-link.txt'), 'file');
 
     const agent = new LocalTerminalAgent({
       agentId: 'agent-files', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
@@ -145,6 +148,7 @@ describe('LocalTerminalAgent', () => {
       expect.objectContaining({ name: 'nested', type: 'directory' }),
       expect.objectContaining({ name: 'escape', type: 'symlink' }),
       expect.objectContaining({ name: 'linked.txt', type: 'symlink' }),
+      expect.objectContaining({ name: 'inside-link.txt', type: 'symlink' }),
     ]));
 
     const searched = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
@@ -157,6 +161,145 @@ describe('LocalTerminalAgent', () => {
     await expect(agent.writeFile(started.session.session_id, 'escape/new.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     await expect(agent.writeFile(started.session.session_id, join(outside, 'absolute.txt'), 'blocked', true)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     await expect(agent.writeFile(started.session.session_id, 'linked.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+
+    // Test renameFile
+    const renamed = await agent.renameFile(started.session.session_id, 'nested/new.txt', 'nested/moved.txt');
+    expect(renamed).toMatchObject({ from: 'nested/new.txt', to: 'nested/moved.txt' });
+    const movedRead = await agent.readFile(started.session.session_id, 'nested/moved.txt', 1024);
+    expect(movedRead.content).toContain('alpha');
+
+    // Test deleteFile
+    const deleted = await agent.deleteFile(started.session.session_id, 'nested/moved.txt');
+    expect(deleted.path).toBe('nested/moved.txt');
+    await expect(agent.readFile(started.session.session_id, 'nested/moved.txt', 1024)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+
+    // Reject deleting symlinks or paths outside workspace
+    await expect(agent.deleteFile(started.session.session_id, 'escape')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.renameFile(started.session.session_id, 'linked.txt', 'linked-dest.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.deleteFile(started.session.session_id, 'inside-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.renameFile(started.session.session_id, 'inside-link.txt', 'renamed-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    expect((await agent.readFile(started.session.session_id, 'inside.txt', 1024)).content).toBe('inside-target\n');
+  });
+
+  it('keeps ripgrep file discovery semantically identical to the bounded JavaScript fallback', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(join(tmpdir(), 'terminal-rg-parity-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await mkdir(join(root, 'visible'));
+    await mkdir(join(root, '.hidden'));
+    await mkdir(join(root, 'node_modules'));
+    await writeTextFile(join(root, 'visible', 'first.txt'), 'before\nNeedle\nafter\n', 'utf8');
+    await writeTextFile(join(root, '.hidden', 'secret.txt'), 'needle hidden\n', 'utf8');
+    await writeTextFile(join(root, 'node_modules', 'dependency.txt'), 'needle dependency\n', 'utf8');
+    await writeTextFile(join(root, 'big.txt'), `needle-too-large\n${'x'.repeat(512 * 1024)}`, 'utf8');
+    const fakeRipgrep = join(root, 'fake-rg');
+    await writeTextFile(fakeRipgrep, "#!/bin/sh\nprintf 'visible/first.txt\\0big.txt\\0'\n", { encoding: 'utf8', mode: 0o700 });
+
+    const previousRipgrep = process.env.TERMINAL_RIPGREP;
+    cleanup.push(() => {
+      if (previousRipgrep === undefined) delete process.env.TERMINAL_RIPGREP;
+      else process.env.TERMINAL_RIPGREP = previousRipgrep;
+    });
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-rg-parity', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-rg-parity', cwd: root, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+
+    process.env.TERMINAL_RIPGREP = fakeRipgrep;
+    const accelerated = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
+    process.env.TERMINAL_RIPGREP = join(root, 'missing-rg');
+    const fallback = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
+
+    expect(accelerated).toEqual(fallback);
+    expect(accelerated.files_searched).toBe(2);
+    expect(accelerated.truncated).toBe(false);
+    expect(accelerated.matches).toEqual([expect.objectContaining({
+      file: 'visible/first.txt',
+      line: 2,
+      text: 'Needle',
+      context_before: ['before'],
+      context_after: ['after'],
+    })]);
+  });
+
+  it('persists dynamic workspace roots and refuses removal while an active terminal uses one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-dynamic-root-a-'));
+    const addedRoot = await mkdtemp(join(tmpdir(), 'terminal-dynamic-root-b-'));
+    const stateDir = await mkdtemp(join(tmpdir(), 'terminal-dynamic-state-'));
+    const statePath = join(stateDir, 'workspace-roots.json');
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(addedRoot, { recursive: true, force: true }));
+    cleanup.push(() => rm(stateDir, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-dynamic-roots', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      workspaceRootsStatePath: statePath,
+    });
+    cleanup.push(() => agent.shutdown());
+    expect(agent.getWorkspaceRoots()).toEqual([root]);
+    expect(agent.addWorkspaceRoot(addedRoot)).toEqual([root, addedRoot]);
+
+    const started = agent.start('user-test', {
+      agent_id: 'agent-dynamic-roots', cwd: addedRoot, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+    expect(() => agent.removeWorkspaceRoot(addedRoot)).toThrowError(/active within it/i);
+    agent.close(started.session.session_id);
+    await waitUntil(() => agent.status(started.session.session_id).session.status === 'closed');
+    expect(agent.removeWorkspaceRoot(addedRoot)).toEqual([root]);
+    agent.shutdown();
+
+    const reloaded = new LocalTerminalAgent({
+      agentId: 'agent-dynamic-roots-reloaded', allowedWorkspaceRoots: [root, addedRoot], executionProfile: 'developer', shells: ['bash'],
+      workspaceRootsStatePath: statePath,
+    });
+    cleanup.push(() => reloaded.shutdown());
+    expect(reloaded.getWorkspaceRoots()).toEqual([root]);
+    expect(() => reloaded.start('user-test', {
+      agent_id: 'agent-dynamic-roots-reloaded', cwd: addedRoot, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer')).toThrowError(expect.objectContaining({ code: 'PATH_NOT_ALLOWED' }));
+  });
+
+  it('restores bounded session history after restart without treating the dead PTY as writable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-session-state-root-'));
+    const stateDir = await mkdtemp(join(tmpdir(), 'terminal-session-state-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(stateDir, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-session-state', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      stateDir,
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-session-state', cwd: root, shell: 'bash', cols: 80, rows: 24,
+      command: `printf '__PERSISTED_REPLAY__\\n'`,
+    }, 'developer');
+    await waitForText(agent, started.session.session_id, 0, '__PERSISTED_REPLAY__');
+    await waitUntil(() => readdirSync(stateDir).some((name) => {
+      if (!name.endsWith('.json')) return false;
+      return readFileSync(join(stateDir, name), 'utf8').includes('__PERSISTED_REPLAY__');
+    }));
+
+    const restored = new LocalTerminalAgent({
+      agentId: 'agent-session-state', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      stateDir,
+    });
+    cleanup.push(() => restored.shutdown());
+    const restoredSnapshot = restored.listSessionSnapshots().find((snapshot) => snapshot.session.session_id === started.session.session_id);
+    expect(restoredSnapshot?.session.status).toBe('closed');
+    const replay = restored.readEvents(started.session.session_id, 0, 256 * 1024);
+    expect(replay.events.some((event) => event.event_type === 'terminal.stdout' && typeof event.data.text === 'string' && event.data.text.includes('__PERSISTED_REPLAY__'))).toBe(true);
+    expect(replay.events.at(-1)).toMatchObject({
+      event_type: 'session.closed',
+      actor: 'system',
+      data: { reason: 'agent_restart', exit_code: null },
+    });
+    expect(() => restored.write(started.session.session_id, 'echo unsafe\r')).toThrowError(
+      expect.objectContaining({ code: 'SESSION_CLOSED' }),
+    );
   });
 
   it('submits a terminal_start command as a complete line on a fresh PTY', async () => {

@@ -1,0 +1,121 @@
+name: Deploy Terminal MCP production
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: terminal-mcp-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Enable repository pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Unit tests
+        run: pnpm test
+      - name: Build immutable inputs
+        run: pnpm build
+      - name: E2E
+        run: pnpm test:e2e
+      - name: Concurrency and reconnect soak
+        run: pnpm test:soak
+      - name: Diff hygiene
+        run: git diff --check
+      - name: Package self-contained release
+        run: ./scripts/package-mcp-release.sh "$GITHUB_SHA" "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminal-mcp-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-mcp-${{ github.sha }}
+          path: release
+      - name: Validate deployment configuration
+        env:
+          DEPLOY_HOST: ${{ vars.TERMINAL_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.TERMINAL_DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
+          DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
+          SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+          SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
+            [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
+          done
+          if [[ -n "$DEPLOY_PORT" && ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then echo "DEPLOY_PORT must be numeric" >&2; exit 64; fi
+      - name: Configure SSH trust
+        env:
+          SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Atomic deploy with automatic rollback
+        env:
+          DEPLOY_HOST: ${{ vars.TERMINAL_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.TERMINAL_DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.TERMINAL_DEPLOY_PORT }}
+          DEPLOY_ROOT: ${{ vars.TERMINAL_DEPLOY_ROOT }}
+          SERVICE_NAME: ${{ vars.TERMINAL_SERVICE_NAME }}
+          HEALTH_URL: ${{ vars.TERMINAL_HEALTH_URL }}
+        run: |
+          set -euo pipefail
+          port_args=()
+          scp_port_args=()
+          if [[ -n "$DEPLOY_PORT" ]]; then port_args=(-p "$DEPLOY_PORT"); scp_port_args=(-P "$DEPLOY_PORT"); fi
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          remote_dir=$(ssh "${port_args[@]}" "$target" 'mktemp -d')
+          trap 'ssh "${port_args[@]}" "$target" "rm -rf -- $(printf %q "$remote_dir")" || true' EXIT
+          archive=$(find release -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
+          checksum="$archive.sha256"
+          [[ -f "$archive" && -f "$checksum" ]] || { echo "release artifact incomplete" >&2; exit 66; }
+          scp "${scp_port_args[@]}" "$archive" "$checksum" deploy/immutable-deploy.sh "$target:$remote_dir/"
+          qroot=$(printf '%q' "$DEPLOY_ROOT")
+          qservice=$(printf '%q' "$SERVICE_NAME")
+          qhealth=$(printf '%q' "$HEALTH_URL")
+          qdir=$(printf '%q' "$remote_dir")
+          qrev=$(printf '%q' "$GITHUB_SHA")
+          base=$(basename "$archive")
+          qbase=$(printf '%q' "$base")
+          ssh "${port_args[@]}" "$target" \
+            "TERMINAL_DEPLOY_ROOT=$qroot TERMINAL_SERVICE_NAME=$qservice TERMINAL_HEALTH_URL=$qhealth bash $qdir/immutable-deploy.sh $qdir/$qbase $qdir/$qbase.sha256 $qrev"

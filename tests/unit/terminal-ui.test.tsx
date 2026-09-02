@@ -825,69 +825,17 @@ describe('terminal MCP App UI', () => {
     expect(document.getElementById('terminal-output')?.textContent).not.toContain('late-output');
   });
 
-  it('hot reloads CSS without replacing the document or terminal SSE source', async () => {
-    const css = '.terminal-shell { outline: 1px solid transparent; }';
-    const fetchMock = vi.fn(async () => new Response(css, { status: 200 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const documentOpen = vi.spyOn(document, 'open');
+  it('keeps production streaming independent from the optional stylesheet reload endpoint', () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
     viewer.bind();
     app.ontoolresult?.(initialResult());
-    const terminal = terminalSource();
-    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'))!;
 
-    reload.emit({ version: 'styles-v2', kind: 'styles' });
-    await vi.waitFor(() => expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toBe(css));
-    expect(fetchMock).toHaveBeenCalled();
-    expect(documentOpen).not.toHaveBeenCalled();
-    expect(terminal.close).not.toHaveBeenCalled();
-  });
-
-  it('does not let an older stylesheet fetch overwrite a newer hot reload', async () => {
-    let resolveV1: ((response: Response) => void) | undefined;
-    let resolveV2: ((response: Response) => void) | undefined;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
-      if (String(input).includes('styles-v1')) resolveV1 = resolve;
-      else resolveV2 = resolve;
-    })));
-    const app = createFakeApp();
-    const viewer = new TerminalViewer(app);
-    viewer.bind();
-    app.ontoolresult?.(initialResult());
-    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'))!;
-
-    reload.emit({ version: 'styles-v1', kind: 'styles' });
-    reload.emit({ version: 'styles-v2', kind: 'styles' });
-    await vi.waitFor(() => expect(resolveV1).toBeTypeOf('function'));
-    await vi.waitFor(() => expect(resolveV2).toBeTypeOf('function'));
-    resolveV2?.(new Response('.newer { display: block; }', { status: 200 }));
-    await vi.waitFor(() => expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toContain('.newer'));
-    resolveV1?.(new Response('.older { display: none; }', { status: 200 }));
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
-
-    expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).toContain('.newer');
-    expect(document.querySelector<HTMLStyleElement>('#terminal-live-styles')?.textContent).not.toContain('.older');
+    expect(FakeEventSource.instances.some((candidate) => candidate.url.endsWith('/terminal-ui/reload'))).toBe(false);
+    expect(terminalSource()).toBeDefined();
     viewer.destroy();
   });
 
-  it('does not apply a stylesheet fetch that completes after viewer destruction', async () => {
-    let resolveFetch: ((response: Response) => void) | undefined;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve; })));
-    const app = createFakeApp();
-    const viewer = new TerminalViewer(app);
-    viewer.bind();
-    app.ontoolresult?.(initialResult());
-    const reload = FakeEventSource.instances.find((candidate) => candidate.url.endsWith('/terminal-ui/reload'))!;
-
-    reload.emit({ version: 'styles-after-destroy', kind: 'styles' });
-    await vi.waitFor(() => expect(resolveFetch).toBeTypeOf('function'));
-    viewer.destroy();
-    resolveFetch?.(new Response('.late { display: block; }', { status: 200 }));
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
-
-    expect(document.querySelector('#terminal-live-styles')).toBeNull();
-  });
 
   it('adds rich terminal syntax tokens without changing the transcript text', () => {
     const text = 'shacker@host:/workspace$ pnpm test --filter "ui" ./src 42\nERROR build failed\nPASS 12 tests\n';

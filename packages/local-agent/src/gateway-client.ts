@@ -41,6 +41,8 @@ export class AgentGatewayClient {
   private readonly ackedSequence = new Map<string, number>();
   private readonly sentSequence = new Map<string, number>();
   private readonly pumping = new Set<string>();
+  private readonly backpressuredSessions = new Set<string>();
+  private drainTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly agent: TerminalAgentApi,
@@ -90,6 +92,9 @@ export class AgentGatewayClient {
     this.authenticated = false;
     this.clearHeartbeat();
     this.reconnectAbort?.abort();
+    this.clearBackpressureDrain();
+    this.backpressuredSessions.clear();
+    this.clearQueue();
     this.unsubscribeEvent?.();
     this.unsubscribeEvent = undefined;
     this.socket?.close(1000, 'agent stopping');
@@ -206,6 +211,9 @@ export class AgentGatewayClient {
       socket.once('close', () => {
         this.authenticated = false;
         this.clearHeartbeat();
+        this.clearBackpressureDrain();
+        this.backpressuredSessions.clear();
+        this.clearQueue();
         resolve();
       });
     });
@@ -271,8 +279,26 @@ export class AgentGatewayClient {
         return this.agent.writeFile(command.input.session_id, command.input.path, command.input.content, command.input.create_directories);
       case 'file.search':
         return this.agent.searchFiles(command.input.session_id, command.input.pattern, command.input.path, command.input.include, command.input.max_results, command.input.context_lines);
+      case 'file.delete':
+        return this.agent.deleteFile(command.input.session_id, command.input.path);
+      case 'file.rename':
+        return this.agent.renameFile(command.input.session_id, command.input.from_path, command.input.to_path);
+      case 'workspace.roots.get':
+        return { roots: this.agent.getWorkspaceRoots() };
+      case 'workspace.roots.add':
+        return { roots: this.agent.addWorkspaceRoot(command.input.root) };
+      case 'workspace.roots.remove':
+        return { roots: this.agent.removeWorkspaceRoot(command.input.root) };
       case 'code.execute':
-        return this.agent.executeCode(command.user_id, command.input, command.execution_profile);
+        return this.agent.executeCode(command.user_id, command.input, command.execution_profile, (stream, chunk) => {
+          this.send({
+            type: 'code.chunk',
+            request_id: command.request_id,
+            execution_id: command.input.execution_id,
+            stream,
+            chunk,
+          });
+        });
       case 'code.cancel':
         return this.agent.cancelCode(command.user_id, command.input.execution_id, command.execution_profile);
       case 'lsp.start':
@@ -288,6 +314,7 @@ export class AgentGatewayClient {
     const socket = this.socket;
     if (!this.authenticated || !socket || socket.readyState !== WebSocket.OPEN || this.pumping.has(sessionId)) return;
     this.pumping.add(sessionId);
+    this.backpressuredSessions.delete(sessionId);
     try {
       const maxInflight = this.options.maxInflightEvents ?? 128;
       let acked = this.ackedSequence.get(sessionId) ?? 0;
@@ -305,6 +332,11 @@ export class AgentGatewayClient {
         }
         if (read.events.length === 0) return;
         for (const event of read.events.slice(0, remaining)) {
+          if (this.isSocketBackpressured(socket)) {
+            this.backpressuredSessions.add(sessionId);
+            this.scheduleBackpressureDrain();
+            return;
+          }
           socket.send(JSON.stringify({ type: 'event', event } satisfies GatewayMessage));
           sent = event.sequence;
           this.sentSequence.set(sessionId, sent);
@@ -325,11 +357,17 @@ export class AgentGatewayClient {
     }
 
     const socket = this.socket;
-    if (this.authenticated && socket?.readyState === WebSocket.OPEN) {
+    if (
+      this.authenticated
+      && socket?.readyState === WebSocket.OPEN
+      && this.queue.length === 0
+      && !this.isSocketBackpressured(socket)
+    ) {
       socket.send(payload);
       return;
     }
     this.enqueue(payload, bytes);
+    if (this.authenticated) this.scheduleBackpressureDrain();
   }
 
   private enqueue(payload: string, bytes: number): void {
@@ -346,6 +384,7 @@ export class AgentGatewayClient {
     let sentCount = 0;
     try {
       for (; sentCount < this.queue.length; sentCount += 1) {
+        if (this.isSocketBackpressured(socket)) break;
         const item = this.queue[sentCount];
         if (!item) break;
         this.queuedBytes -= item.bytes;
@@ -354,12 +393,43 @@ export class AgentGatewayClient {
     } finally {
       if (sentCount > 0) this.queue.splice(0, sentCount);
     }
+    if (this.queue.length > 0) this.scheduleBackpressureDrain();
+  }
+
+  private isSocketBackpressured(socket: WebSocket): boolean {
+    return socket.bufferedAmount >= Math.max(1, Math.floor(this.options.outboundHighWaterBytes / 2));
+  }
+
+  private scheduleBackpressureDrain(): void {
+    if (this.stopped || this.drainTimer) return;
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = undefined;
+      if (this.stopped || !this.authenticated) return;
+      try {
+        this.flushQueue();
+        for (const sessionId of [...this.backpressuredSessions]) this.pumpSession(sessionId);
+      } catch (error) {
+        console.error(JSON.stringify({ level: 'error', event: 'agent.backpressure_drain_failed', error: errorMessage(error) }));
+      }
+      if (this.queue.length > 0 || this.backpressuredSessions.size > 0) this.scheduleBackpressureDrain();
+    }, 25);
+    this.drainTimer.unref();
+  }
+
+  private clearBackpressureDrain(): void {
+    if (this.drainTimer) clearTimeout(this.drainTimer);
+    this.drainTimer = undefined;
+  }
+
+  private clearQueue(): void {
+    this.queue.length = 0;
+    this.queuedBytes = 0;
   }
 
   private startHeartbeat(): void {
     this.clearHeartbeat();
     this.heartbeat = setInterval(() => {
-      this.send({ type: 'heartbeat', timestamp: new Date().toISOString() });
+      this.send({ type: 'heartbeat', timestamp: new Date().toISOString(), telemetry: this.agent.getTelemetry() });
     }, this.options.heartbeatMs);
     this.heartbeat.unref();
   }

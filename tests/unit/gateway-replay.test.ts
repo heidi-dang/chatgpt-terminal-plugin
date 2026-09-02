@@ -107,6 +107,30 @@ describe('gateway replay integrity', () => {
       },
     }));
     socket.send(JSON.stringify({
+      type: 'heartbeat',
+      timestamp: now,
+      telemetry: {
+        cpu_load: [0.25, 0.5, 0.75],
+        freemem_bytes: 1024,
+        totalmem_bytes: 4096,
+        uptime_seconds: 123,
+        active_sessions: 2,
+        active_lsp_processes: 1,
+        active_code_executions: 3,
+      },
+    }));
+    await waitUntil(() => gateway.listAgents('owner-a')[0]?.telemetry?.active_sessions === 2, 1000);
+    expect(gateway.listAgents('owner-a')[0]?.telemetry).toEqual({
+      cpu_load: [0.25, 0.5, 0.75],
+      freemem_bytes: 1024,
+      totalmem_bytes: 4096,
+      uptime_seconds: 123,
+      active_sessions: 2,
+      active_lsp_processes: 1,
+      active_code_executions: 3,
+    });
+
+    socket.send(JSON.stringify({
       type: 'agent.resume',
       agent_id: identity.agentId,
       sessions: [{

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { signalProcessTree } from './process-tree.js';
 import {
   TerminalProtocolError,
   type LspRequestInput,
@@ -197,6 +198,10 @@ export class LspManager {
     return { lsp_id: lspId, stopped: true };
   }
 
+  get activeCount(): number {
+    return this.processes.size;
+  }
+
   stopAll(): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -367,21 +372,6 @@ export class LspManager {
     managed.forceKillTimer = setTimeout(() => signalProcessTree(managed.child, 'SIGKILL'), this.killGraceMs);
     managed.forceKillTimer.unref();
   }
-}
-
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (!pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-pid, signal);
-  } catch (error) {
-    if (!isNoSuchProcess(error)) throw error;
-  }
-}
-
-function isNoSuchProcess(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

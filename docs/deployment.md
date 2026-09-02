@@ -61,9 +61,9 @@ git archive --format=tar.gz --output="artifacts/chatgpt-terminal-plugin-${RELEAS
 
 The `artifacts/` directory is ignored by Git. Record the full commit ID alongside the artifact and deploy only a commit that has passed the repository quality gate. `git archive` packages the tracked tree for that commit, including the current installer, CI workflow, protocol, server, agent, Terminal UI, deployment templates, and documentation, without accidentally snapshotting `node_modules`, local secrets, or uncommitted edits.
 
-### Live UI hot reload
+### Terminal UI release model
 
-The v12 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`; a separate `/terminal-ui/reload` SSE channel is used only for stylesheet updates. The mounted document is never replaced and there is no `/terminal-ui/runtime.html` route. CSS-only changes can refresh without disturbing the active session, stream capability, fallback transport, or last accepted terminal cursor. HTML/JavaScript changes require a new MCP App resource version and the normal connector rescan/refresh process.
+The v12 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`. Production widgets do not open a second stylesheet hot-reload stream; this keeps the single-file mobile bundle smaller and removes an always-on EventSource. CSS, HTML, and JavaScript changes are released through the versioned MCP App resource and the normal connector rescan/refresh process. The legacy `/terminal-ui/reload` endpoint may remain available for development tooling, but production UI correctness must never depend on it.
 
 ## Server environment
 
@@ -213,3 +213,28 @@ The repository's `pnpm test:e2e` performs the same core terminal sequence locall
 Keep release artifacts/versioned checkouts so the systemd service can be repointed to a previously verified build. The file-backed device registry format is versioned. This release writes version 2 with an explicit immutable `agent_id` binding and migrates version-1 records on load. Back it up before deploying a release that changes its schema.
 
 Do not roll back by replacing the current registry with an older copy unless you understand that doing so can resurrect revoked keys/devices.
+
+
+## Automated immutable production deployment
+
+`.github/workflows/deploy-production.yml` gates every production deployment on typechecking, linting, unit tests, a full build, E2E coverage, the concurrency/reconnect soak test, and `git diff --check`. It then creates a self-contained MCP release archive for the exact Git commit, records its SHA-256 digest, and uploads both as a short-lived GitHub Actions artifact. The deployment job runs only after the verification job succeeds and targets the protected GitHub `production` environment.
+
+Configure these **GitHub Environment variables** for `production`:
+
+- `TERMINAL_DEPLOY_HOST` — SSH host for the MCP server.
+- `TERMINAL_DEPLOY_USER` — restricted deployment account.
+- `TERMINAL_DEPLOY_PORT` — optional SSH port; leave unset for the SSH default.
+- `TERMINAL_DEPLOY_ROOT` — release root containing `releases/` and the atomic `current` symlink.
+- `TERMINAL_SERVICE_NAME` — the systemd unit for this MCP service only.
+- `TERMINAL_HEALTH_URL` — externally reachable health endpoint used as the post-cutover acceptance gate.
+
+Configure these **GitHub Environment secrets**:
+
+- `TERMINAL_DEPLOY_SSH_KEY` — private key for the restricted deployment account.
+- `TERMINAL_DEPLOY_KNOWN_HOSTS` — pinned SSH host-key entry. Do not replace this with disabled host-key verification or a runtime `ssh-keyscan` trust-on-first-use step.
+
+The remote deployment account must be able to write `TERMINAL_DEPLOY_ROOT`, run Node.js to validate the staged MCP module, and invoke passwordless `sudo systemctl restart/is-active` for the configured MCP service. Restrict sudo policy to that service where practical. The health URL must be reachable from the deployment runner.
+
+`scripts/package-mcp-release.sh` uses `pnpm deploy --prod --legacy` after the repository build to produce a self-contained MCP dependency tree, then adds the built single-file Terminal UI and a `REVISION` marker. `deploy/immutable-deploy.sh` verifies the archive digest, extracts into a same-filesystem staging directory, validates the revision and module import, marks the completed release read-only, and atomically switches `current` to `releases/<git-sha>`. If service activation or the health gate fails, the script restores the previous `current` target and restarts that previous release. On a first-ever deployment with no previous release, a failed cutover removes the new `current` link rather than leaving it pointed at an unhealthy release.
+
+The workflow deploys the **MCP server only**. Local-agent rollout remains a separate operation so a server deployment cannot unexpectedly restart user computers. Other systemd services are not touched because the target unit is supplied explicitly through `TERMINAL_SERVICE_NAME`.

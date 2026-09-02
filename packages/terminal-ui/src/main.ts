@@ -506,7 +506,6 @@ export class TerminalViewer {
   private viewState: TerminalViewState | null = null;
   private streamState: StreamState = 'connecting';
   private eventSource: TerminalEventSource | undefined;
-  private styleSource: EventSource | undefined;
   private lastSequence = 0;
   private refreshId = 0;
   private refreshing = false;
@@ -520,7 +519,6 @@ export class TerminalViewer {
   private outputFrame: number | undefined;
   private outputQueue = '';
   private hasLiveOutput = false;
-  private hotReloadVersion: string | undefined;
   private surfaceId: string | undefined;
   private surfacePollTimer: number | undefined;
   private surfacePollInFlight = false;
@@ -629,8 +627,6 @@ export class TerminalViewer {
   destroy(): void {
     this.stopSurfaceSync();
     this.finishStream();
-    this.styleSource?.close();
-    this.styleSource = undefined;
     this.surfaceId = undefined;
     this.flushOutput();
   }
@@ -669,7 +665,6 @@ export class TerminalViewer {
     const ttl = Date.parse(meta.expires_at) - Date.now();
     if (ttl <= STREAM_REFRESH_MARGIN_MS) return this.refreshStream(true);
     this.connectTerminalStream(meta);
-    this.connectStyleReload(meta);
     this.scheduleCapabilityRefresh(ttl);
   }
 
@@ -933,45 +928,6 @@ export class TerminalViewer {
     }, delay);
   }
 
-  private connectStyleReload(meta: TerminalStreamMeta): void {
-    let origin: string;
-    try {
-      origin = new URL(meta.url).origin;
-    } catch {
-      return;
-    }
-    const reloadUrl = `${origin}/terminal-ui/reload`;
-    if (this.styleSource?.url === reloadUrl) return;
-    this.styleSource?.close();
-    const source = new EventSource(reloadUrl);
-    this.styleSource = source;
-    source.onmessage = (message) => {
-      if (this.styleSource !== source) return;
-      try {
-        const payload = JSON.parse(String(message.data)) as { version?: unknown; kind?: unknown };
-        if (payload.kind !== 'styles' || typeof payload.version !== 'string' || payload.version === this.hotReloadVersion) return;
-        this.hotReloadVersion = payload.version;
-        const styleUrl = `${origin}/terminal-ui/styles.css?v=${encodeURIComponent(payload.version)}`;
-        void fetch(styleUrl, { cache: 'no-store' }).then(async (response) => {
-          if (!response.ok) throw new Error(`UI stylesheet reload failed with HTTP ${response.status}.`);
-          const css = await response.text();
-          if (this.styleSource !== source || this.hotReloadVersion !== payload.version) return;
-          let liveStyles = this.doc.querySelector<HTMLStyleElement>('#terminal-live-styles');
-          if (!liveStyles) {
-            liveStyles = this.doc.createElement('style');
-            liveStyles.id = 'terminal-live-styles';
-            this.doc.head.appendChild(liveStyles);
-          }
-          liveStyles.textContent = css;
-        }).catch((error) => {
-          if (this.hotReloadVersion === payload.version) this.hotReloadVersion = undefined;
-          console.error('[terminal-app] stylesheet reload failed', error);
-        });
-      } catch (error) {
-        console.error('[terminal-app] invalid stylesheet reload event', error);
-      }
-    };
-  }
 
   private queueOutput(text: string): void {
     if (!text) return;

@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { constants, readlinkSync, realpathSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { constants, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import { NodePtyTerminalRuntime, type TerminalProcess, type TerminalRuntime, type TerminalRuntimeMetrics } from './terminal-runtime.js';
 import { SessionEventJournal } from './event-journal.js';
@@ -12,9 +12,14 @@ export type { SessionEventJournalOptions, JournalReadResult } from './event-jour
 export type { TerminalProcess, TerminalRuntime, TerminalRuntimeMetrics, TerminalSpawnOptions } from './terminal-runtime.js';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
+import { discoverFilesWithRipgrep } from './ripgrep-discovery.js';
+export { discoverLspServers, resolveLspServers } from './lsp-discovery.js';
 import {
   TerminalProtocolError,
+  terminalEventSchema,
+  terminalSessionSchema,
   type Agent,
+  type AgentHealthTelemetry,
   type CodeCancelOutput,
   type CodeExecuteInput,
   type CodeExecuteOutput,
@@ -52,6 +57,8 @@ export interface LocalTerminalAgentOptions {
   eventJournalMaxBytes?: number;
   eventJournalRetentionMs?: number;
   eventJournalIncludeInput?: boolean;
+  workspaceRootsStatePath?: string;
+  stateDir?: string;
 }
 
 export interface AgentSessionSnapshot {
@@ -61,7 +68,7 @@ export interface AgentSessionSnapshot {
 }
 
 interface ManagedSession {
-  process: TerminalProcess;
+  process?: TerminalProcess;
   metadata: TerminalSession;
   events: TerminalEvent[];
   eventSizes: number[];
@@ -74,11 +81,24 @@ interface ManagedSession {
   outputFlushTimer: NodeJS.Timeout | undefined;
   outputBuffer: string;
   outputBufferBytes: number;
+  persistenceTimer?: NodeJS.Timeout;
+}
+
+interface PersistedSessionState {
+  version: 1;
+  session: TerminalSession;
+  events: TerminalEvent[];
+  sequence: number;
+  earliest_sequence: number;
 }
 
 export interface TerminalAgentApi {
   describe(): Agent;
   runtimeMetrics(): TerminalRuntimeMetrics;
+  getTelemetry(): AgentHealthTelemetry;
+  getWorkspaceRoots(): string[];
+  addWorkspaceRoot(root: string): string[];
+  removeWorkspaceRoot(root: string): string[];
   listSessions(): TerminalSession[];
   listSessionSnapshots(): AgentSessionSnapshot[];
   start(userId: string, input: TerminalStartInput, requestedProfile: ExecutionProfile): AgentSessionSnapshot;
@@ -91,8 +111,10 @@ export interface TerminalAgentApi {
   readFile(sessionId: string, path: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }>;
   listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
   writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
+  deleteFile(sessionId: string, filePath: string): Promise<{ path: string }>;
+  renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }>;
   searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
-  executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput>;
+  executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile, onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void): Promise<CodeExecuteOutput>;
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput;
   startLsp(userId: string, input: LspStartInput, requestedProfile: ExecutionProfile): Promise<LspStartOutput>;
   requestLsp(userId: string, input: LspRequestInput, requestedProfile: ExecutionProfile): Promise<LspRequestOutput>;
@@ -167,6 +189,43 @@ async function readFileContent(filePath: string, maxBytes: number): Promise<stri
   }
 }
 
+type SearchMatch = {
+  file: string;
+  line: number;
+  text: string;
+  context_before?: string[];
+  context_after?: string[];
+};
+
+async function searchSingleTextFile(
+  filePath: string,
+  displayPath: string,
+  regex: RegExp,
+  contextLines: number,
+  maxResults: number,
+  matches: SearchMatch[],
+): Promise<boolean> {
+  const content = await readFileContent(filePath, 512 * 1024);
+  if (content === null) return false;
+  const lines = content.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineText = lines[index] ?? '';
+    if (!regex.test(lineText)) continue;
+    const match: SearchMatch = {
+      file: displayPath,
+      line: index + 1,
+      text: lineText.slice(0, 500),
+    };
+    if (contextLines > 0) {
+      match.context_before = lines.slice(Math.max(0, index - contextLines), index).map((line) => line.slice(0, 500));
+      match.context_after = lines.slice(index + 1, index + 1 + contextLines).map((line) => line.slice(0, 500));
+    }
+    matches.push(match);
+    if (matches.length >= maxResults) return true;
+  }
+  return false;
+}
+
 export function restrictiveExecutionProfile(localProfile: ExecutionProfile, requestedProfile: ExecutionProfile): ExecutionProfile {
   const rank: Record<ExecutionProfile, number> = { 'read-only': 0, developer: 1, 'owner-full': 2 };
   return rank[localProfile] <= rank[requestedProfile] ? localProfile : requestedProfile;
@@ -182,12 +241,30 @@ function defaultShells(): string[] {
 }
 
 export class WorkspacePolicy {
-  private readonly roots: string[];
+  private roots: string[];
 
   constructor(
     roots: string[],
     private readonly profile: ExecutionProfile,
   ) {
+    this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
+  }
+
+  getRoots(): string[] {
+    return [...this.roots];
+  }
+
+  addRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = unique([...this.roots, canonical]);
+  }
+
+  removeRoot(root: string): void {
+    const canonical = canonicalWorkspacePath(root);
+    this.roots = this.roots.filter((r) => r !== canonical);
+  }
+
+  setRoots(roots: string[]): void {
     this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
   }
 
@@ -264,6 +341,41 @@ function canonicalWorkspacePath(path: string): string {
   }
 }
 
+function isPathWithin(root: string, candidate: string): boolean {
+  const delta = relative(root, candidate);
+  return delta === '' || (!delta.startsWith('..') && !isAbsolute(delta));
+}
+
+function loadWorkspaceRoots(statePath: string | undefined, fallback: string[]): string[] {
+  if (!statePath) return fallback;
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || !('roots' in parsed) || !Array.isArray((parsed as { roots?: unknown }).roots)) {
+      throw new Error('workspace root state must contain a roots array');
+    }
+    const roots = (parsed as { roots: unknown[] }).roots;
+    if (!roots.every((root) => typeof root === 'string' && root.length > 0 && root.length <= 4096) || roots.length > 256) {
+      throw new Error('workspace root state contains invalid roots');
+    }
+    return roots as string[];
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return fallback;
+    throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot load workspace root state: ${errorMsg(error)}`);
+  }
+}
+
+function persistWorkspaceRoots(statePath: string | undefined, roots: string[]): void {
+  if (!statePath) return;
+  mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+  const tempPath = `${statePath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify({ version: 1, roots })}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tempPath, statePath);
+  } catch (error) {
+    throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot persist workspace root state: ${errorMsg(error)}`);
+  }
+}
+
 function isTerminalFinal(status: TerminalSession['status']): boolean {
   return status === 'closed' || status === 'exited' || status === 'failed';
 }
@@ -306,6 +418,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly executionWorkspacePolicy: WorkspacePolicy;
   private readonly codeExecutor: CodeBlockExecutor;
   private readonly lspManager: LspManager;
+  private readonly stateDir: string | undefined;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -326,6 +439,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000;
     this.maxLifetimeMs = options.maxLifetimeMs ?? 8 * 60 * 60_000;
     this.closedSessionRetentionMs = options.closedSessionRetentionMs ?? 15 * 60_000;
+    this.stateDir = options.stateDir;
+    if (this.stateDir) mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     const now = new Date().toISOString();
     this.agent = {
       agent_id: options.agentId ?? randomUUID(),
@@ -347,16 +462,75 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     };
     this.sweepTimer = setInterval(() => this.sweepExpiredSessions(), options.sweepIntervalMs ?? 30_000);
     this.sweepTimer.unref();
-    this.workspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, options.executionProfile);
+    const workspaceRoots = loadWorkspaceRoots(options.workspaceRootsStatePath, options.allowedWorkspaceRoots);
+    this.workspacePolicy = new WorkspacePolicy(workspaceRoots, options.executionProfile);
     // Code and LSP execution are intentionally workspace-contained even for owner-full.
-    this.executionWorkspacePolicy = new WorkspacePolicy(options.allowedWorkspaceRoots, 'developer');
+    this.executionWorkspacePolicy = new WorkspacePolicy(workspaceRoots, 'developer');
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
+    this.restorePersistedSessions();
+  }
+
+  getTelemetry(): AgentHealthTelemetry {
+    const runningSessions = [...this.sessions.values()].filter((s) => s.metadata.status === 'running').length;
+    const [oneMinute = 0, fiveMinutes = 0, fifteenMinutes = 0] = os.loadavg();
+    return {
+      cpu_load: [oneMinute, fiveMinutes, fifteenMinutes],
+      freemem_bytes: os.freemem(),
+      totalmem_bytes: os.totalmem(),
+      uptime_seconds: os.uptime(),
+      active_sessions: runningSessions,
+      active_lsp_processes: this.lspManager.activeCount,
+      active_code_executions: this.codeExecutor.activeCount,
+    };
+  }
+
+  getWorkspaceRoots(): string[] {
+    return this.workspacePolicy.getRoots();
+  }
+
+  addWorkspaceRoot(root: string): string[] {
+    const previous = this.getWorkspaceRoots();
+    try {
+      this.workspacePolicy.addRoot(root);
+      this.executionWorkspacePolicy.addRoot(root);
+      const roots = this.getWorkspaceRoots();
+      persistWorkspaceRoots(this.options.workspaceRootsStatePath, roots);
+      return roots;
+    } catch (error) {
+      this.workspacePolicy.setRoots(previous);
+      this.executionWorkspacePolicy.setRoots(previous);
+      throw error;
+    }
+  }
+
+  removeWorkspaceRoot(root: string): string[] {
+    const canonical = canonicalWorkspacePath(root);
+    const active = [...this.sessions.values()].find((managed) => !isTerminalFinal(managed.metadata.status) && isPathWithin(canonical, managed.metadata.cwd));
+    if (active) {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot remove workspace root while terminal session ${active.metadata.session_id} is active within it.`);
+    }
+    const previous = this.getWorkspaceRoots();
+    try {
+      this.workspacePolicy.removeRoot(canonical);
+      this.executionWorkspacePolicy.removeRoot(canonical);
+      const roots = this.getWorkspaceRoots();
+      persistWorkspaceRoots(this.options.workspaceRootsStatePath, roots);
+      return roots;
+    } catch (error) {
+      this.workspacePolicy.setRoots(previous);
+      this.executionWorkspacePolicy.setRoots(previous);
+      throw error;
+    }
   }
 
   describe(): Agent {
-    return { ...this.agent, capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] } };
+    return {
+      ...this.agent,
+      telemetry: this.getTelemetry(),
+      capabilities: { ...this.agent.capabilities, shells: [...this.agent.capabilities.shells] },
+    };
   }
 
   runtimeMetrics(): TerminalRuntimeMetrics {
@@ -377,7 +551,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'The effective execution profile does not allow terminal creation.');
     }
 
-    const cwd = new WorkspacePolicy(this.options.allowedWorkspaceRoots, effectiveProfile).resolveCwd(input.cwd);
+    const cwd = new WorkspacePolicy(this.workspacePolicy.getRoots(), effectiveProfile).resolveCwd(input.cwd);
     const shell = input.shell ?? this.shells[0];
     if (!shell || !this.shells.includes(shell)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Requested shell is not enabled for this agent.');
@@ -653,6 +827,77 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     }
   }
 
+  async deleteFile(sessionId: string, filePath: string): Promise<{ path: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File deletes are not permitted under the read-only execution profile.');
+    }
+
+    const requested = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
+    // Resolve only the parent/allowed ancestor so lstat observes the requested
+    // directory entry itself instead of following a final-component symlink.
+    const resolved = this.workspacePolicy.resolveWritablePath(requested);
+    try {
+      const info = await lstat(resolved);
+      if (info.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to delete a symbolic link.');
+      }
+      if (!info.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Delete target is not a regular file.');
+      }
+      await unlink(resolved);
+      return { path: relative(managed.metadata.cwd, resolved) || resolved };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `File not found: ${filePath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot delete file: ${errorMsg(error)}`);
+    }
+  }
+
+  async renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File renames are not permitted under the read-only execution profile.');
+    }
+
+    const requestedFrom = isAbsolute(fromPath) ? fromPath : resolve(managed.metadata.cwd, fromPath);
+    const requestedTo = isAbsolute(toPath) ? toPath : resolve(managed.metadata.cwd, toPath);
+    // Do not canonicalize the source entry itself: doing so follows a symlink
+    // before lstat and can rename its target. Canonicalize only its parent.
+    const resolvedFrom = this.workspacePolicy.resolveWritablePath(requestedFrom);
+    const resolvedTo = this.workspacePolicy.resolveWritablePath(requestedTo);
+    try {
+      const sourceInfo = await lstat(resolvedFrom);
+      if (sourceInfo.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to rename a symbolic link.');
+      }
+      if (!sourceInfo.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Rename source is not a regular file.');
+      }
+
+      const destinationInfo = await lstat(resolvedTo).catch((error: unknown) => {
+        if (isFileNotFound(error)) return null;
+        throw error;
+      });
+      if (destinationInfo?.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to replace a symbolic link.');
+      }
+      if (destinationInfo && !destinationInfo.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Rename destination is not a regular file.');
+      }
+
+      await rename(resolvedFrom, resolvedTo);
+      return {
+        from: relative(managed.metadata.cwd, resolvedFrom) || resolvedFrom,
+        to: relative(managed.metadata.cwd, resolvedTo) || resolvedTo,
+      };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Source file not found: ${fromPath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot rename file: ${errorMsg(error)}`);
+    }
+  }
+
   async searchFiles(
     sessionId: string,
     pattern: string,
@@ -660,7 +905,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     include: string | undefined,
     maxResults: number,
     contextLines: number,
-  ): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }> {
+  ): Promise<{ pattern: string; matches: SearchMatch[]; truncated: boolean; files_searched: number }> {
     const managed = this.requireSession(sessionId);
     const resolved = this.resolveFilePath(managed, searchPath);
     const info = await stat(resolved).catch(() => null);
@@ -673,10 +918,22 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('INVALID_ARGUMENT', `Invalid regex pattern: ${pattern}`);
     }
 
-    const matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }> = [];
+    const matches: SearchMatch[] = [];
     let filesSearched = 0;
     let truncated = false;
     const maxFilesSearched = 10_000;
+
+    const searchFile = async (entryPath: string): Promise<void> => {
+      filesSearched += 1;
+      if (await searchSingleTextFile(
+        entryPath,
+        relative(managed.metadata.cwd, entryPath) || entryPath,
+        regex,
+        contextLines,
+        maxResults,
+        matches,
+      )) truncated = true;
+    };
 
     const walk = async (dir: string): Promise<void> => {
       if (truncated) return;
@@ -684,96 +941,82 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       try {
         dirents = await readdir(dir, { withFileTypes: true });
       } catch {
-        return; // skip unreadable directories
+        return;
       }
       for (const dirent of dirents) {
         if (truncated) return;
         const entryPath = resolve(dir, dirent.name);
-        // Skip hidden dirs, node_modules, .git
         if (dirent.name.startsWith('.') || dirent.name === 'node_modules') continue;
         if (dirent.isDirectory()) {
           await walk(entryPath);
-        } else if (dirent.isFile()) {
-          if (filesSearched >= maxFilesSearched) {
-            truncated = true;
-            return;
-          }
-          // Apply include filter (simple glob: *.ts, *.js etc)
-          if (include && !matchGlob(dirent.name, include)) continue;
-          filesSearched += 1;
-          try {
-            const content = await readFileContent(entryPath, 512 * 1024); // max 512KB per file
-            if (content === null) continue; // binary or too large
-            const lines = content.split('\n');
-            for (let i = 0; i < lines.length; i += 1) {
-              const lineText = lines[i] ?? '';
-              if (regex.test(lineText)) {
-                const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                  file: relative(managed.metadata.cwd, entryPath) || entryPath,
-                  line: i + 1,
-                  text: lineText.slice(0, 500),
-                };
-                if (contextLines > 0) {
-                  match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                  match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-                }
-                matches.push(match);
-                if (matches.length >= maxResults) {
-                  truncated = true;
-                  return;
-                }
-              }
-            }
-          } catch {
-            // skip unreadable files
-          }
+          continue;
         }
+        if (!dirent.isFile() || (include && !matchGlob(dirent.name, include))) continue;
+        if (filesSearched >= maxFilesSearched) {
+          truncated = true;
+          return;
+        }
+        await searchFile(entryPath);
       }
     };
 
     if (info.isFile()) {
-      // Search single file
       filesSearched = 1;
-      try {
-        const content = await readFileContent(resolved, 512 * 1024);
-        if (content !== null) {
-          const lines = content.split('\n');
-          for (let i = 0; i < lines.length; i += 1) {
-            const lineText = lines[i] ?? '';
-            if (regex.test(lineText)) {
-              const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                file: relative(managed.metadata.cwd, resolved) || resolved,
-                line: i + 1,
-                text: lineText.slice(0, 500),
-              };
-              if (contextLines > 0) {
-                match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-              }
-              matches.push(match);
-              if (matches.length >= maxResults) { truncated = true; break; }
-            }
-          }
-        }
-      } catch {
-        throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${searchPath}`);
-      }
+      truncated = await searchSingleTextFile(
+        resolved,
+        relative(managed.metadata.cwd, resolved) || resolved,
+        regex,
+        contextLines,
+        maxResults,
+        matches,
+      );
     } else {
-      await walk(resolved);
+      const accelerated = await discoverFilesWithRipgrep(
+        resolved,
+        (entryPath) => !include || matchGlob(basename(entryPath), include),
+        maxFilesSearched,
+      );
+      if (!accelerated) {
+        await walk(resolved);
+      } else {
+        for (const discoveredPath of accelerated.files) {
+          if (truncated) break;
+          if (filesSearched >= maxFilesSearched) {
+            truncated = true;
+            break;
+          }
+          const fileInfo = await lstat(discoveredPath).catch(() => null);
+          if (!fileInfo?.isFile()) continue;
+          let entryPath: string;
+          try {
+            entryPath = this.workspacePolicy.resolveExistingPath(discoveredPath);
+          } catch {
+            continue;
+          }
+          if (!isPathWithin(resolved, entryPath)) continue;
+          await searchFile(entryPath);
+        }
+        if (accelerated.truncated) truncated = true;
+      }
     }
 
     return { pattern, matches, truncated, files_searched: filesSearched };
   }
 
-  async executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+  async executeCode(
+    userId: string,
+    input: CodeExecuteInput,
+    requestedProfile: ExecutionProfile,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     this.assertProcessExecutionAllowed(requestedProfile);
-    const fallbackRoot = this.options.allowedWorkspaceRoots[0];
+    const fallbackRoot = this.executionWorkspacePolicy.getRoots()[0];
     const requestedCwd = input.cwd ?? fallbackRoot;
     if (!requestedCwd) {
       throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'No allowed workspace root is configured for code execution.');
     }
     const cwd = this.executionWorkspacePolicy.resolveCwd(requestedCwd);
-    return this.codeExecutor.execute(userId, input, cwd);
+    return this.codeExecutor.execute(userId, input, cwd, onChunk);
   }
 
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput {
@@ -823,8 +1066,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     clearInterval(this.sweepTimer);
     this.stopProcessFeatures();
     for (const managed of this.sessions.values()) {
-      if (managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'closing') continue;
-      this.closeManaged(managed, 'system', 'agent_shutdown');
+      if (managed.metadata.status !== 'closed' && managed.metadata.status !== 'exited' && managed.metadata.status !== 'closing') {
+        this.closeManaged(managed, 'system', 'agent_shutdown');
+      }
+      this.persistSessionSafely(managed);
     }
     this.eventJournal?.close();
     this.eventEmitter.removeAllListeners();
@@ -839,6 +1084,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
         if (Number.isFinite(activityMs) && now - activityMs >= this.closedSessionRetentionMs) {
           if (managed.outputFlushTimer) clearTimeout(managed.outputFlushTimer);
           this.sessions.delete(sessionId);
+          this.deletePersistedSession(managed);
         }
         continue;
       }
@@ -859,13 +1105,20 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       return;
     }
 
+    const terminal = managed.process;
+    if (!terminal) {
+      managed.metadata.status = 'closed';
+      this.recordEvent(managed, actor, 'session.closed', { reason, exit_code: managed.metadata.exit_code });
+      return;
+    }
+
     const closeRequest = { actor, reason, finalized: false };
     managed.closeRequest = closeRequest;
     managed.metadata.status = 'closing';
     managed.metadata.last_activity_at = new Date().toISOString();
     this.flushOutput(managed);
     try {
-      managed.process.terminate();
+      terminal.terminate();
     } catch (error) {
       closeRequest.finalized = true;
       managed.metadata.status = 'closed';
@@ -882,12 +1135,12 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return managed;
   }
 
-  private requireWritableSession(sessionId: string): ManagedSession {
+  private requireWritableSession(sessionId: string): ManagedSession & { process: TerminalProcess } {
     const managed = this.requireSession(sessionId);
-    if (managed.closeRequest || managed.metadata.status === 'closing' || managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'failed') {
+    if (!managed.process || managed.closeRequest || managed.metadata.status === 'closing' || managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'failed') {
       throw new TerminalProtocolError('SESSION_CLOSED', 'Terminal session is not writable.');
     }
-    return managed;
+    return managed as ManagedSession & { process: TerminalProcess };
   }
 
   private readJournalEvents(
@@ -956,12 +1209,13 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   }
 
   private scheduleCwdRefresh(managed: ManagedSession): void {
-    if (process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
+    const terminal = managed.process;
+    if (!terminal || process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
     managed.cwdRefreshTimer = setTimeout(() => {
       delete managed.cwdRefreshTimer;
       if (isTerminalFinal(managed.metadata.status) || managed.closeRequest?.finalized) return;
       try {
-        const cwd = readlinkSync(`/proc/${managed.process.pid}/cwd`);
+        const cwd = readlinkSync(`/proc/${terminal.pid}/cwd`);
         if (cwd && cwd !== managed.metadata.cwd) {
           managed.metadata.cwd = cwd;
           this.recordEvent(managed, 'agent', 'cwd.changed', { cwd });
@@ -971,6 +1225,180 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       }
     }, 25);
     managed.cwdRefreshTimer.unref();
+  }
+
+  private sessionStatePath(sessionId: string): string | undefined {
+    if (!this.stateDir) return undefined;
+    const digest = createHash('sha256').update(sessionId).digest('hex');
+    return join(this.stateDir, `${digest}.json`);
+  }
+
+  private scheduleSessionPersistence(managed: ManagedSession): void {
+    if (!this.stateDir || managed.persistenceTimer) return;
+    managed.persistenceTimer = setTimeout(() => {
+      delete managed.persistenceTimer;
+      this.persistSessionSafely(managed);
+    }, 25);
+    managed.persistenceTimer.unref();
+  }
+
+  private persistSessionSafely(managed: ManagedSession): void {
+    if (managed.persistenceTimer) {
+      clearTimeout(managed.persistenceTimer);
+      delete managed.persistenceTimer;
+    }
+    try {
+      this.persistSession(managed);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'agent.session_state_write_failed',
+        session_id: managed.metadata.session_id,
+        error: errorMsg(error),
+      }));
+    }
+  }
+
+  private persistSession(managed: ManagedSession): void {
+    const statePath = this.sessionStatePath(managed.metadata.session_id);
+    if (!statePath || !this.stateDir) return;
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    const state: PersistedSessionState = {
+      version: 1,
+      session: { ...managed.metadata },
+      events: managed.events.slice(managed.eventHead),
+      sequence: managed.sequence,
+      earliest_sequence: managed.earliestSequence,
+    };
+    const tempPath = `${statePath}.${process.pid}.tmp`;
+    writeFileSync(tempPath, `${JSON.stringify(state)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tempPath, statePath);
+  }
+
+  private deletePersistedSession(managed: ManagedSession): void {
+    if (managed.persistenceTimer) {
+      clearTimeout(managed.persistenceTimer);
+      delete managed.persistenceTimer;
+    }
+    const statePath = this.sessionStatePath(managed.metadata.session_id);
+    if (!statePath) return;
+    try {
+      unlinkSync(statePath);
+    } catch (error) {
+      if (!isFileNotFound(error)) {
+        console.error(JSON.stringify({
+          level: 'warn',
+          event: 'agent.session_state_delete_failed',
+          session_id: managed.metadata.session_id,
+          error: errorMsg(error),
+        }));
+      }
+    }
+  }
+
+  private restorePersistedSessions(): void {
+    if (!this.stateDir) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(this.stateDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map((entry) => entry.name)
+        .sort();
+    } catch (error) {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read terminal session state directory: ${errorMsg(error)}`);
+    }
+    if (entries.length > 256) {
+      console.error(JSON.stringify({
+        level: 'warn',
+        event: 'agent.session_state_limit_reached',
+        files: entries.length,
+        loaded: 256,
+      }));
+      entries = entries.slice(0, 256);
+    }
+
+    const maxStateBytes = Math.max(1024 * 1024, this.bufferHighWaterBytes * 4 + 256 * 1024);
+    for (const name of entries) {
+      const statePath = join(this.stateDir, name);
+      try {
+        const info = statSync(statePath);
+        if (!info.isFile() || info.size > maxStateBytes) throw new Error('persisted session state exceeds the configured size bound');
+        const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
+        if (!parsed || typeof parsed !== 'object') throw new Error('persisted session state must be an object');
+        const candidate = parsed as Partial<PersistedSessionState>;
+        if (candidate.version !== 1 || !Array.isArray(candidate.events)) throw new Error('unsupported persisted session state version');
+        if (!Number.isInteger(candidate.sequence) || (candidate.sequence ?? -1) < 0) throw new Error('persisted session sequence is invalid');
+        if (!Number.isInteger(candidate.earliest_sequence) || (candidate.earliest_sequence ?? 0) < 1) throw new Error('persisted session retained boundary is invalid');
+        if (candidate.events.length > 20_000) throw new Error('persisted session contains too many retained events');
+
+        const metadata = terminalSessionSchema.parse(candidate.session);
+        if (metadata.agent_id !== this.agent.agent_id) continue;
+        const events = candidate.events.map((event) => terminalEventSchema.parse(event));
+        const sequence = candidate.sequence as number;
+        const persistedEarliest = candidate.earliest_sequence as number;
+        if (persistedEarliest > sequence + 1) throw new Error('persisted session retained boundary is ahead of its cursor');
+        if (events.length > 0 && events[0]?.sequence !== persistedEarliest) throw new Error('persisted session event boundary does not match its cursor');
+        let previousSequence = persistedEarliest - 1;
+        for (const event of events) {
+          if (event.session_id !== metadata.session_id || event.sequence !== previousSequence + 1 || event.sequence > sequence) {
+            throw new Error('persisted session event sequence is invalid');
+          }
+          previousSequence = event.sequence;
+        }
+        if (events.length > 0 && previousSequence !== sequence) throw new Error('persisted session history does not reach its advertised cursor');
+        if (events.length === 0 && sequence !== 0) throw new Error('persisted session cursor has no retained history');
+        if (this.sessions.has(metadata.session_id)) throw new Error('duplicate persisted session identifier');
+
+        const eventSizes = events.map((event) => Buffer.byteLength(JSON.stringify(event)));
+        let eventHead = 0;
+        let retainedBytes = eventSizes.reduce((total, bytes) => total + bytes, 0);
+        let earliestSequence = persistedEarliest;
+        while (retainedBytes > this.bufferHighWaterBytes && events.length - eventHead > 1) {
+          const removed = events[eventHead];
+          const removedBytes = eventSizes[eventHead];
+          if (!removed || removedBytes === undefined) break;
+          eventHead += 1;
+          retainedBytes -= removedBytes;
+          earliestSequence = removed.sequence + 1;
+        }
+
+        const activityMs = Date.parse(metadata.last_activity_at);
+        if (isTerminalFinal(metadata.status) && Number.isFinite(activityMs) && Date.now() - activityMs >= this.closedSessionRetentionMs) {
+          unlinkSync(statePath);
+          continue;
+        }
+
+        const managed: ManagedSession = {
+          metadata: { ...metadata },
+          events,
+          eventSizes,
+          eventHead,
+          sequence,
+          retainedBytes,
+          earliestSequence,
+          outputFlushTimer: undefined,
+          outputBuffer: '',
+          outputBufferBytes: 0,
+        };
+        this.sessions.set(metadata.session_id, managed);
+        if (!isTerminalFinal(metadata.status)) {
+          managed.metadata.status = 'closed';
+          managed.metadata.exit_code = null;
+          this.recordEvent(managed, 'system', 'session.closed', {
+            reason: 'agent_restart',
+            exit_code: null,
+          });
+          this.persistSessionSafely(managed);
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: 'warn',
+          event: 'agent.session_state_invalid',
+          file: name,
+          error: errorMsg(error),
+        }));
+      }
+    }
   }
 
   private snapshot(managed: ManagedSession): AgentSessionSnapshot {
@@ -1025,6 +1453,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       managed.eventHead = 0;
     }
 
+    this.scheduleSessionPersistence(managed);
     this.eventEmitter.emit('terminal-event', event);
     return event;
   }

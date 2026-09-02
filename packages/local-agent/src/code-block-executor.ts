@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { signalProcessTree } from './process-tree.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +64,12 @@ export class CodeBlockExecutor {
     this.killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   }
 
-  async execute(userId: string, input: CodeExecuteInput, cwd: string): Promise<CodeExecuteOutput> {
+  async execute(
+    userId: string,
+    input: CodeExecuteInput,
+    cwd: string,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     if (this.stopped) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Code executor has been shut down.');
     }
@@ -84,7 +90,7 @@ export class CodeBlockExecutor {
       const scriptPath = join(tempDir, `script${invocation.extension}`);
       await writeFile(scriptPath, input.code, { encoding: 'utf8', mode: 0o700, flag: 'wx' });
       this.throwIfTerminated(execution);
-      return await this.runChild(execution, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt);
+      return await this.runChild(execution, input, cwd, invocation.command, invocation.args(scriptPath), timeoutMs, startedAt, onChunk);
     } finally {
       try {
         if (tempDir) await rm(tempDir, { recursive: true, force: true });
@@ -109,6 +115,10 @@ export class CodeBlockExecutor {
     return { execution_id: executionId, cancelled: true };
   }
 
+  get activeCount(): number {
+    return this.executions.size;
+  }
+
   shutdown(): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -127,16 +137,19 @@ export class CodeBlockExecutor {
     args: string[],
     timeoutMs: number,
     startedAt: number,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<CodeExecuteOutput> {
     return new Promise((resolve, reject) => {
+      const hasStdin = typeof input.stdin === 'string';
       const child = spawn(command, args, {
         cwd,
         env: this.environment,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [hasStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
       });
       execution.child = child;
+      if (hasStdin && child.stdin) child.stdin.end(input.stdin, 'utf8');
 
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
@@ -187,6 +200,13 @@ export class CodeBlockExecutor {
             stderrBytes += slice.length;
           }
           combinedBytes += slice.length;
+          if (onChunk) {
+            try {
+              onChunk(stream, slice.toString('utf8'));
+            } catch {
+              // Ignore consumer chunk handler errors
+            }
+          }
         }
         if (allowed < chunk.length) {
           limitError = new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Code execution exceeded the configured output limit.');
@@ -255,19 +275,4 @@ function runtimeInvocation(runtime: CodeRuntime, environment: Readonly<Record<st
       return { extension: '.ts', command: configuredNode || process.execPath, args: (scriptPath) => ['--experimental-strip-types', scriptPath] };
     }
   }
-}
-
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (!pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-pid, signal);
-  } catch (error) {
-    if (!isNoSuchProcess(error)) throw error;
-  }
-}
-
-function isNoSuchProcess(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH');
 }

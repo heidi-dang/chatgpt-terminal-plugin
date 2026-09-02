@@ -1,11 +1,12 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
 import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
 import { parseGatewayUrl } from './transport-security.js';
 import { resolveEnrollmentConfig } from './enrollment-config.js';
+import { resolveLspServers } from './lsp-discovery.js';
 
 function csv(value: string | undefined): string[] {
   return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
@@ -35,9 +36,12 @@ const parsedGatewayUrl = parseGatewayUrl(gatewayUrl);
 const roots = csv(process.env.ALLOWED_WORKSPACE_ROOTS);
 const shells = csv(process.env.AGENT_SHELLS);
 const profile = executionProfileSchema.parse(process.env.EXECUTION_PROFILE ?? 'developer');
-const lspServers = lspServerDefinitionsSchema.parse(
+const configuredLspServers = lspServerDefinitionsSchema.parse(
   process.env.TERMINAL_LSP_SERVERS_JSON ? JSON.parse(process.env.TERMINAL_LSP_SERVERS_JSON) : {},
 );
+const lspServers = await resolveLspServers(configuredLspServers, {
+  disabled: process.env.AGENT_DISABLE_LSP_DISCOVERY === '1',
+});
 if (profile === 'developer' && roots.length === 0) {
   throw new Error('ALLOWED_WORKSPACE_ROOTS is required when EXECUTION_PROFILE=developer.');
 }
@@ -81,6 +85,8 @@ const agent = new LocalTerminalAgent({
         eventJournalIncludeInput: boolEnv('TERMINAL_EVENT_JOURNAL_INCLUDE_INPUT', false),
       }
     : {}),
+  workspaceRootsStatePath: process.env.AGENT_WORKSPACE_ROOTS_STATE_PATH ?? join(dirname(identityPath), 'workspace-roots.json'),
+  stateDir: process.env.AGENT_SESSION_STATE_DIR ?? join(dirname(identityPath), 'sessions'),
 });
 
 const client = new AgentGatewayClient(agent, {

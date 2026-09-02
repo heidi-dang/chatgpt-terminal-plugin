@@ -22,7 +22,9 @@ describe('terminal MCP end-to-end', () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-e2e-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, 'workspace');
+    const secondaryWorkspace = join(root, 'workspace-secondary');
     await mkdir(workspace);
+    await mkdir(secondaryWorkspace);
 
     const lspScript = join(root, 'echo-lsp.cjs');
     await writeFile(lspScript, String.raw`
@@ -149,6 +151,9 @@ describe('terminal MCP end-to-end', () => {
       'terminal_list_files',
       'terminal_write_file',
       'terminal_search_files',
+      'terminal_workspace_roots',
+      'terminal_workspace_root_add',
+      'terminal_workspace_root_remove',
       'terminal_execute_code_block',
       'terminal_cancel_code',
       'terminal_lsp_start',
@@ -226,20 +231,70 @@ describe('terminal MCP end-to-end', () => {
     const agentList = structured(await client.callTool({ name: 'terminal_list_agents', arguments: {} }));
     expect((agentList.agents as Array<{ agent_id: string }>).some((candidate) => candidate.agent_id === identity.agentId)).toBe(true);
 
+    const initialRoots = structured(await client.callTool({
+      name: 'terminal_workspace_roots', arguments: { agent_id: identity.agentId },
+    }));
+    expect(initialRoots.roots).toEqual([workspace]);
+    const addedRoots = structured(await client.callTool({
+      name: 'terminal_workspace_root_add', arguments: { agent_id: identity.agentId, root: secondaryWorkspace },
+    }));
+    expect(addedRoots.roots).toEqual([workspace, secondaryWorkspace]);
+    const dynamicExecution = structured(await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, runtime: 'node', cwd: secondaryWorkspace,
+        code: 'process.stdout.write(process.cwd())', timeout_ms: 5_000,
+      },
+    }));
+    expect(dynamicExecution.stdout).toBe(secondaryWorkspace);
+    const removedRoots = structured(await client.callTool({
+      name: 'terminal_workspace_root_remove', arguments: { agent_id: identity.agentId, root: secondaryWorkspace },
+    }));
+    expect(removedRoots.roots).toEqual([workspace]);
+    const blockedDynamicExecution = await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, runtime: 'node', cwd: secondaryWorkspace, code: 'process.stdout.write("blocked")', timeout_ms: 5_000,
+      },
+    });
+    expect(blockedDynamicExecution.isError).toBe(true);
+    expect((blockedDynamicExecution._meta?.terminal_error as { code?: string } | undefined)?.code).toBe('PATH_NOT_ALLOWED');
+
     const surface = structured(await client.callTool({ name: 'terminal_surface', arguments: {} }));
     const surfaceId = stringField(surface, 'surface_id');
     expect(surface.surface_active).toBe(false);
     const codeExecutionId = randomUUID();
+    const codeProgress: string[] = [];
     const codeResult = structured(await client.callTool({
       name: 'terminal_execute_code_block',
       arguments: {
         agent_id: identity.agentId, execution_id: codeExecutionId, runtime: 'node', cwd: workspace,
         code: `process.stdout.write('__CODE_E2E__|' + process.cwd())`, timeout_ms: 5_000,
       },
+    }, {
+      onprogress: (notification) => {
+        if (notification.message) codeProgress.push(notification.message);
+      },
     }));
     expect(codeResult.execution_id).toBe(codeExecutionId);
     expect(codeResult.stdout).toContain(`__CODE_E2E__|${workspace}`);
     expect(codeResult.exit_code).toBe(0);
+    expect(codeProgress.some((message) => {
+      const chunk = JSON.parse(message) as { execution_id: string; stream: string; chunk: string };
+      return chunk.execution_id === codeExecutionId && chunk.stream === 'stdout' && chunk.chunk.includes('__CODE_E2E__');
+    })).toBe(true);
+
+    const stdinExecutionId = randomUUID();
+    const stdinResult = structured(await client.callTool({
+      name: 'terminal_execute_code_block',
+      arguments: {
+        agent_id: identity.agentId, execution_id: stdinExecutionId, runtime: 'node', cwd: workspace,
+        code: 'import { readFileSync } from "node:fs"; process.stdout.write("__STDIN_E2E__" + readFileSync(0, "utf8"))',
+        stdin: 'piped-through-mcp', timeout_ms: 5_000,
+      },
+    }));
+    expect(stdinResult).toMatchObject({ execution_id: stdinExecutionId, exit_code: 0 });
+    expect(stdinResult.stdout).toContain('__STDIN_E2E__piped-through-mcp');
 
     const explicitCancelId = randomUUID();
     const explicitRunning = client.callTool({

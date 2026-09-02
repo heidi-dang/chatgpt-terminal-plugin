@@ -21,9 +21,13 @@ import {
   terminalReadOutputSchema,
   terminalSearchFilesOutputSchema,
   terminalWriteFileOutputSchema,
+  terminalDeleteFileOutputSchema,
+  terminalRenameFileOutputSchema,
+  terminalWorkspaceRootsOutputSchema,
   type Agent,
   type CodeCancelOutput,
   type CodeExecuteOutput,
+  type CodeExecutionChunk,
   type AgentCommand,
   type ExecutionProfile,
   type LspRequestOutput,
@@ -40,6 +44,9 @@ import {
   type TerminalReadOutput,
   type TerminalSearchFilesOutput,
   type TerminalWriteFileOutput,
+  type TerminalDeleteFileOutput,
+  type TerminalRenameFileOutput,
+  type TerminalWorkspaceRootsOutput,
   type TerminalSession,
   type TerminalStartInput,
 } from '@terminal/protocol';
@@ -60,6 +67,8 @@ interface PendingRequest {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
   parseResult?: ((raw: unknown) => unknown) | undefined;
+  executionId?: string | undefined;
+  onChunk?: ((stream: 'stdout' | 'stderr', chunk: string) => void) | undefined;
 }
 
 export interface SessionRecord {
@@ -293,6 +302,26 @@ export class AgentGateway {
     }, (raw) => terminalWriteFileOutputSchema.parse(raw));
   }
 
+  async deleteFile(userId: string, sessionId: string, path: string): Promise<TerminalDeleteFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.delete',
+      input: { session_id: sessionId, path },
+    }, (raw) => terminalDeleteFileOutputSchema.parse(raw));
+  }
+
+  async renameFile(userId: string, sessionId: string, fromPath: string, toPath: string): Promise<TerminalRenameFileOutput> {
+    const record = this.requireSession(userId, sessionId);
+    if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
+    const connection = this.requireAgent(userId, record.agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'file.rename',
+      input: { session_id: sessionId, from_path: fromPath, to_path: toPath },
+    }, (raw) => terminalRenameFileOutputSchema.parse(raw));
+  }
+
   async searchFiles(userId: string, sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<TerminalSearchFilesOutput> {
     const record = this.requireSession(userId, sessionId);
     if (!record.agentId) throw new TerminalProtocolError('AGENT_OFFLINE', 'Session is not associated with an agent.', true);
@@ -310,21 +339,49 @@ export class AgentGateway {
     }, (raw) => terminalSearchFilesOutputSchema.parse(raw));
   }
 
-  async executeCode(userId: string, input: TerminalExecuteCodeBlockToolArgs, executionProfile: ExecutionProfile): Promise<CodeExecuteOutput> {
+  async getWorkspaceRoots(userId: string, agentId: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.get', input: {},
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
+  }
+
+  async addWorkspaceRoot(userId: string, agentId: string, root: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.add', input: { root },
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
+  }
+
+  async removeWorkspaceRoot(userId: string, agentId: string, root: string): Promise<TerminalWorkspaceRootsOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'workspace.roots.remove', input: { root },
+    }, (raw) => terminalWorkspaceRootsOutputSchema.parse(raw));
+  }
+
+  async executeCode(
+    userId: string,
+    input: TerminalExecuteCodeBlockToolArgs,
+    executionProfile: ExecutionProfile,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     const connection = this.requireAgent(userId, input.agent_id);
     const executionId = input.execution_id ?? randomUUID();
     const agentInput = {
       execution_id: executionId,
       runtime: input.runtime,
       code: input.code,
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input.timeout_ms === undefined ? {} : { timeout_ms: input.timeout_ms }),
     };
     const timeoutMs = Math.max(this.options.requestTimeoutMs, Math.min(input.timeout_ms ?? 10_000, 120_000) + 2_000);
+    const requestId = randomUUID();
     return this.request(connection, {
-      type: 'request', request_id: randomUUID(), action: 'code.execute', user_id: userId,
+      type: 'request', request_id: requestId, action: 'code.execute', user_id: userId,
       execution_profile: executionProfile, input: agentInput,
-    }, (raw) => codeExecuteOutputSchema.parse(raw), timeoutMs);
+    }, (raw) => codeExecuteOutputSchema.parse(raw), timeoutMs, executionId, onChunk);
   }
 
   async cancelCode(userId: string, agentId: string, executionId: string, executionProfile: ExecutionProfile): Promise<CodeCancelOutput> {
@@ -519,7 +576,15 @@ export class AgentGateway {
         connection.lastSeenMs = Date.now();
         connection.agent.last_seen = new Date(connection.lastSeenMs).toISOString();
 
-        if (message.type === 'heartbeat' || message.type === 'ack') return;
+        if (message.type === 'heartbeat') {
+          if (message.telemetry) connection.agent.telemetry = { ...message.telemetry, cpu_load: [...message.telemetry.cpu_load] };
+          return;
+        }
+        if (message.type === 'ack') return;
+        if (message.type === 'code.chunk') {
+          this.handleCodeChunk(registeredAgentId, message);
+          return;
+        }
         if (message.type === 'event') {
           const existing = this.sessions.get(message.event.session_id);
           if (existing?.ownerId && existing.ownerId !== ownerId) {
@@ -629,6 +694,8 @@ export class AgentGateway {
     command: AgentCommand,
     parseResult?: (raw: unknown) => T,
     timeoutMs = this.options.requestTimeoutMs,
+    executionId?: string,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<T> {
     if (connection.socket.readyState !== WebSocket.OPEN) {
       throw new TerminalProtocolError('AGENT_OFFLINE', 'Agent is offline.', true);
@@ -640,7 +707,16 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_TIMEOUT', 'Timed out waiting for the local terminal agent.', true));
       }, timeoutMs);
       timer.unref();
-      this.pending.set(command.request_id, { agentId: connection.agent.agent_id, socket: connection.socket, resolve: resolve as (result: unknown) => void, reject, timer, parseResult });
+      this.pending.set(command.request_id, {
+        agentId: connection.agent.agent_id,
+        socket: connection.socket,
+        resolve: resolve as (result: unknown) => void,
+        reject,
+        timer,
+        parseResult,
+        executionId,
+        onChunk,
+      });
       connection.socket.send(JSON.stringify(command), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -648,6 +724,12 @@ export class AgentGateway {
         reject(new TerminalProtocolError('AGENT_OFFLINE', `Failed to send command to agent: ${error.message}`, true));
       });
     });
+  }
+
+  private handleCodeChunk(agentId: string, message: CodeExecutionChunk): void {
+    const pending = this.pending.get(message.request_id);
+    if (!pending || pending.agentId !== agentId || pending.executionId !== message.execution_id) return;
+    pending.onChunk?.(message.stream, message.chunk);
   }
 
   private resolveResponse(agentId: string, raw: unknown): void {

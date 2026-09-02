@@ -25,6 +25,9 @@ import {
   terminalStatusOutputSchema,
   terminalStreamRefreshInputSchema,
   terminalStreamRefreshOutputSchema,
+  terminalWorkspaceRootsInputSchema,
+  terminalWorkspaceRootMutationInputSchema,
+  terminalWorkspaceRootsOutputSchema,
   terminalWriteInputSchema,
   terminalReadFileInputSchema,
   terminalReadFileOutputSchema,
@@ -32,6 +35,10 @@ import {
   terminalListFilesOutputSchema,
   terminalWriteFileInputSchema,
   terminalWriteFileOutputSchema,
+  terminalDeleteFileInputSchema,
+  terminalDeleteFileOutputSchema,
+  terminalRenameFileInputSchema,
+  terminalRenameFileOutputSchema,
   terminalSearchFilesInputSchema,
   terminalSearchFilesOutputSchema,
   terminalTranscriptInputSchema,
@@ -390,6 +397,36 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
   );
 
   server.registerTool(
+    'terminal_delete_file',
+    {
+      title: 'Delete a file',
+      description: 'Delete a file within the workspace of an active terminal session. Paths outside configured workspace roots or pointing to symbolic links/directories are rejected.',
+      inputSchema: terminalDeleteFileInputSchema,
+      outputSchema: terminalDeleteFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.deleteFile(identityFromContext(ctx), input);
+      return terminalDeleteFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
+    'terminal_rename_file',
+    {
+      title: 'Rename or move a file',
+      description: 'Rename or move a file within the workspace of an active terminal session. Both source and destination paths must be within configured workspace roots.',
+      inputSchema: terminalRenameFileInputSchema,
+      outputSchema: terminalRenameFileOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(async () => {
+      const result = await deps.service.renameFile(identityFromContext(ctx), input);
+      return terminalRenameFileOutputSchema.parse(result);
+    }),
+  );
+
+  server.registerTool(
     'terminal_search_files',
     {
       title: 'Search files',
@@ -402,6 +439,42 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       const result = await deps.service.searchFiles(identityFromContext(ctx), { ...input, ...(input.include === undefined ? {} : { include: input.include }) });
       return terminalSearchFilesOutputSchema.parse(result);
     }),
+  );
+
+  server.registerTool(
+    'terminal_workspace_roots',
+    {
+      title: 'List agent workspace roots',
+      description: 'List the persisted workspace roots currently authorized on a selected local agent.',
+      inputSchema: terminalWorkspaceRootsInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.getWorkspaceRoots(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_workspace_root_add',
+    {
+      title: 'Add agent workspace root',
+      description: 'Authorize and persist an additional local workspace root for future terminal, code, and LSP operations.',
+      inputSchema: terminalWorkspaceRootMutationInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.addWorkspaceRoot(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_workspace_root_remove',
+    {
+      title: 'Remove agent workspace root',
+      description: 'Remove and persist a local workspace authorization. Removal is rejected while an active terminal session is using that root.',
+      inputSchema: terminalWorkspaceRootMutationInputSchema,
+      outputSchema: terminalWorkspaceRootsOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.removeWorkspaceRoot(identityFromContext(ctx), input)),
   );
 
   server.registerTool(
@@ -422,8 +495,26 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         void deps.service.cancelCode(identity, { agent_id: input.agent_id, execution_id: executionId }).catch(() => undefined);
       };
       ctx.mcpReq.signal.addEventListener('abort', onAbort, { once: true });
+      let progress = 0;
+      let notificationTail: Promise<void> = Promise.resolve();
+      const progressToken = ctx.mcpReq._meta?.progressToken;
+      const onChunk = progressToken === undefined ? undefined : (stream: 'stdout' | 'stderr', chunk: string): void => {
+        progress += 1;
+        notificationTail = notificationTail
+          .then(() => ctx.mcpReq.notify({
+            method: 'notifications/progress',
+            params: {
+              progressToken,
+              progress,
+              message: JSON.stringify({ execution_id: executionId, stream, chunk }),
+            },
+          }))
+          .catch(() => undefined);
+      };
       try {
-        return await deps.service.executeCode(identity, executeInput);
+        const output = await deps.service.executeCode(identity, executeInput, onChunk);
+        await notificationTail;
+        return output;
       } finally {
         ctx.mcpReq.signal.removeEventListener('abort', onAbort);
       }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { codeCancelInputSchema, codeExecuteInputSchema } from './code-block.js';
+import { codeCancelInputSchema, codeExecuteInputSchema, codeExecutionChunkSchema } from './code-block.js';
 import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
 
 export const GATEWAY_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
@@ -28,6 +28,18 @@ export const agentCapabilitiesSchema = z.object({
 });
 export type AgentCapabilities = z.infer<typeof agentCapabilitiesSchema>;
 
+
+export const agentHealthTelemetrySchema = z.object({
+  cpu_load: z.tuple([z.number().finite().nonnegative(), z.number().finite().nonnegative(), z.number().finite().nonnegative()]),
+  freemem_bytes: z.number().int().nonnegative(),
+  totalmem_bytes: z.number().int().positive(),
+  uptime_seconds: z.number().finite().nonnegative(),
+  active_sessions: z.number().int().nonnegative(),
+  active_lsp_processes: z.number().int().nonnegative(),
+  active_code_executions: z.number().int().nonnegative(),
+});
+export type AgentHealthTelemetry = z.infer<typeof agentHealthTelemetrySchema>;
+
 export const agentSchema = z.object({
   agent_id: z.string().min(1),
   execution_profile: executionProfileSchema,
@@ -35,6 +47,7 @@ export const agentSchema = z.object({
   display_name: z.string().min(1),
   platform: z.string().min(1),
   architecture: z.string().min(1),
+  telemetry: agentHealthTelemetrySchema.optional(),
   online: z.boolean(),
   capabilities: agentCapabilitiesSchema,
   connected_at: z.string().datetime(),
@@ -274,6 +287,30 @@ export const terminalWriteFileOutputSchema = z.object({
 });
 export type TerminalWriteFileOutput = z.infer<typeof terminalWriteFileOutputSchema>;
 
+export const terminalDeleteFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  path: z.string().min(1).max(4096),
+});
+export type TerminalDeleteFileInput = z.infer<typeof terminalDeleteFileInputSchema>;
+
+export const terminalDeleteFileOutputSchema = z.object({
+  path: z.string(),
+});
+export type TerminalDeleteFileOutput = z.infer<typeof terminalDeleteFileOutputSchema>;
+
+export const terminalRenameFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  from_path: z.string().min(1).max(4096),
+  to_path: z.string().min(1).max(4096),
+});
+export type TerminalRenameFileInput = z.infer<typeof terminalRenameFileInputSchema>;
+
+export const terminalRenameFileOutputSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+});
+export type TerminalRenameFileOutput = z.infer<typeof terminalRenameFileOutputSchema>;
+
 export const terminalSearchFilesInputSchema = z.object({
   session_id: z.string().min(1),
   pattern: z.string().min(1).max(1024),
@@ -300,6 +337,24 @@ export const terminalSearchFilesOutputSchema = z.object({
   files_searched: z.number().int().nonnegative(),
 });
 export type TerminalSearchFilesOutput = z.infer<typeof terminalSearchFilesOutputSchema>;
+
+export const terminalWorkspaceRootsInputSchema = z.object({
+  agent_id: z.string().min(1).max(256),
+});
+export type TerminalWorkspaceRootsInput = z.infer<typeof terminalWorkspaceRootsInputSchema>;
+
+export const terminalWorkspaceRootMutationInputSchema = z.object({
+  agent_id: z.string().min(1).max(256),
+  root: z.string().min(1).max(4096),
+});
+export type TerminalWorkspaceRootMutationInput = z.infer<typeof terminalWorkspaceRootMutationInputSchema>;
+
+export const terminalWorkspaceRootsOutputSchema = z.object({
+  roots: z.array(z.string().min(1).max(4096)).max(256),
+});
+export type TerminalWorkspaceRootsOutput = z.infer<typeof terminalWorkspaceRootsOutputSchema>;
+
+const agentWorkspaceRootInputSchema = z.object({ root: z.string().min(1).max(4096) });
 
 export const terminalTranscriptEntrySchema = z.object({
   type: z.enum(['command', 'output', 'error', 'status']),
@@ -390,6 +445,36 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
     type: z.literal('request'),
     request_id: z.string().min(1),
+    action: z.literal('file.delete'),
+    input: terminalDeleteFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.rename'),
+    input: terminalRenameFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.get'),
+    input: z.object({}),
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.add'),
+    input: agentWorkspaceRootInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('workspace.roots.remove'),
+    input: agentWorkspaceRootInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
     action: z.literal('code.execute'),
     user_id: z.string().min(1),
     execution_profile: executionProfileSchema,
@@ -470,11 +555,12 @@ export const gatewayMessageSchema = z.union([
   gatewayAuthChallengeSchema,
   gatewayAuthProofSchema,
   z.object({ type: z.literal('auth.accepted'), server_time: z.string().datetime() }),
-  z.object({ type: z.literal('heartbeat'), timestamp: z.string().datetime() }),
+  z.object({ type: z.literal('heartbeat'), timestamp: z.string().datetime(), telemetry: agentHealthTelemetrySchema.optional() }),
   z.object({ type: z.literal('event'), event: terminalEventSchema }),
   z.object({ type: z.literal('ack'), session_id: z.string(), sequence: z.number().int().nonnegative() }),
   z.object({ type: z.literal('agent.register'), agent: agentSchema, device_id: z.string().min(1) }),
   z.object({ type: z.literal('agent.resume'), agent_id: z.string(), sessions: z.array(agentSessionSnapshotSchema) }),
+  codeExecutionChunkSchema,
   gatewayResumeAckSchema,
   agentCommandSchema,
   agentResponseSchema,

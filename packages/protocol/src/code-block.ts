@@ -8,6 +8,7 @@ export const terminalExecuteCodeBlockToolSchema = z.object({
   execution_id: z.string().uuid().optional(),
   runtime: codeRuntimeSchema,
   code: z.string().min(1).max(262_144),
+  stdin: z.string().max(262_144).optional(),
   cwd: z.string().min(1).max(4096).optional(),
   timeout_ms: z.number().int().positive().max(120_000).optional(),
 });
@@ -44,3 +45,12 @@ export const codeCancelOutputSchema = z.object({
   cancelled: z.boolean(),
 });
 export type CodeCancelOutput = z.infer<typeof codeCancelOutputSchema>;
+
+export const codeExecutionChunkSchema = z.object({
+  type: z.literal('code.chunk'),
+  request_id: z.string().min(1),
+  execution_id: z.string().uuid(),
+  stream: z.enum(['stdout', 'stderr']),
+  chunk: z.string().max(131_072),
+});
+export type CodeExecutionChunk = z.infer<typeof codeExecutionChunkSchema>;

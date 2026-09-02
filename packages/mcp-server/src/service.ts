@@ -14,6 +14,8 @@ import {
   terminalStatusOutputSchema,
   terminalWriteInputSchema,
   terminalResizeInputSchema,
+  terminalWorkspaceRootsInputSchema,
+  terminalWorkspaceRootMutationInputSchema,
   type CodeCancelOutput,
   type CodeExecuteOutput,
   type ExecutionProfile,
@@ -32,6 +34,7 @@ import {
   type TerminalStartInput,
   type TerminalStartOutput,
   type TerminalStatusOutput,
+  type TerminalWorkspaceRootsOutput,
 } from '@terminal/protocol';
 import type { AuditLogger } from './audit.js';
 import type { ServerConfig } from './config.js';
@@ -278,7 +281,67 @@ export class TerminalService {
     return this.gateway.writeFile(identity.userId, input.session_id, input.path, input.content, input.create_directories);
   }
 
-  async executeCode(identity: RequestIdentity, rawInput: TerminalExecuteCodeBlockToolArgs): Promise<CodeExecuteOutput> {
+  async deleteFile(identity: RequestIdentity, input: { session_id: string; path: string }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_delete', { path: input.path });
+    await this.audit.record({
+      action: 'file_delete',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { path: input.path },
+    });
+    return this.gateway.deleteFile(identity.userId, input.session_id, input.path);
+  }
+
+  async renameFile(identity: RequestIdentity, input: { session_id: string; from_path: string; to_path: string }): Promise<unknown> {
+    await this.assertMutationAllowed(identity, 'file_rename', { from_path: input.from_path, to_path: input.to_path });
+    await this.audit.record({
+      action: 'file_rename',
+      ...auditIdentity(identity),
+      terminal_session_id: input.session_id,
+      authorization: 'allow',
+      input: { from_path: input.from_path, to_path: input.to_path },
+    });
+    return this.gateway.renameFile(identity.userId, input.session_id, input.from_path, input.to_path);
+  }
+
+  async getWorkspaceRoots(identity: RequestIdentity, rawInput: { agent_id: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootsInputSchema.parse(rawInput);
+    const output = await this.gateway.getWorkspaceRoots(identity.userId, input.agent_id);
+    await this.audit.record({
+      action: 'workspace_roots_list', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', output_metadata: { root_count: output.roots.length },
+    });
+    return output;
+  }
+
+  async addWorkspaceRoot(identity: RequestIdentity, rawInput: { agent_id: string; root: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootMutationInputSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'workspace_root_add', { agent_id: input.agent_id, root: input.root });
+    const output = await this.gateway.addWorkspaceRoot(identity.userId, input.agent_id, input.root);
+    await this.audit.record({
+      action: 'workspace_root_add', ...auditIdentity(identity), agent_id: input.agent_id, authorization: 'allow',
+      input: { root: input.root }, output_metadata: { root_count: output.roots.length },
+    });
+    return output;
+  }
+
+  async removeWorkspaceRoot(identity: RequestIdentity, rawInput: { agent_id: string; root: string }): Promise<TerminalWorkspaceRootsOutput> {
+    const input = terminalWorkspaceRootMutationInputSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'workspace_root_remove', { agent_id: input.agent_id, root: input.root });
+    const output = await this.gateway.removeWorkspaceRoot(identity.userId, input.agent_id, input.root);
+    await this.audit.record({
+      action: 'workspace_root_remove', ...auditIdentity(identity), agent_id: input.agent_id, authorization: 'allow',
+      input: { root: input.root }, output_metadata: { root_count: output.roots.length },
+    });
+    return output;
+  }
+
+  async executeCode(
+    identity: RequestIdentity,
+    rawInput: TerminalExecuteCodeBlockToolArgs,
+    onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  ): Promise<CodeExecuteOutput> {
     const input = terminalExecuteCodeBlockToolSchema.parse(rawInput);
     await this.assertMutationAllowed(identity, 'terminal_execute_code_block', {
       agent_id: input.agent_id,
@@ -287,7 +350,7 @@ export class TerminalService {
       timeout_ms: input.timeout_ms,
       code_bytes: Buffer.byteLength(input.code),
     });
-    const output = await this.gateway.executeCode(identity.userId, input, identity.executionProfile);
+    const output = await this.gateway.executeCode(identity.userId, input, identity.executionProfile, onChunk);
     await this.audit.record({
       action: 'terminal_execute_code_block', ...auditIdentity(identity), agent_id: input.agent_id,
       authorization: 'allow', input: { runtime: input.runtime, cwd: input.cwd, timeout_ms: input.timeout_ms, code_bytes: Buffer.byteLength(input.code) },
