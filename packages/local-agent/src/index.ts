@@ -30,10 +30,19 @@ import {
   type LspStartInput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticApplyEditInput,
+  type SemanticApplyEditOutput,
   type SemanticCloseInput,
   type SemanticCloseOutput,
+  type SemanticMemoryOutput,
+  type SemanticMemoryReadInput,
+  type SemanticMemoryWriteInput,
   type SemanticOpenInput,
   type SemanticOpenOutput,
+  type SemanticPreviewEditInput,
+  type SemanticPreviewEditOutput,
+  type SemanticProjectOverviewInput,
+  type SemanticProjectOverviewOutput,
   type SemanticQueryInput,
   type SemanticQueryOutput,
   type TerminalEvent,
@@ -128,6 +137,11 @@ export interface TerminalAgentApi {
   stopLsp(userId: string, lspId: string, requestedProfile: ExecutionProfile): LspStopOutput;
   openSemantic(userId: string, input: SemanticOpenInput, requestedProfile: ExecutionProfile): Promise<SemanticOpenOutput>;
   querySemantic(userId: string, input: SemanticQueryInput, requestedProfile: ExecutionProfile): Promise<SemanticQueryOutput>;
+  previewSemanticEdit(userId: string, input: SemanticPreviewEditInput, requestedProfile: ExecutionProfile): Promise<SemanticPreviewEditOutput>;
+  applySemanticEdit(userId: string, input: SemanticApplyEditInput, requestedProfile: ExecutionProfile): Promise<SemanticApplyEditOutput>;
+  projectSemanticOverview(userId: string, input: SemanticProjectOverviewInput, requestedProfile: ExecutionProfile): Promise<SemanticProjectOverviewOutput>;
+  readSemanticMemory(userId: string, input: SemanticMemoryReadInput, requestedProfile: ExecutionProfile): Promise<SemanticMemoryOutput>;
+  writeSemanticMemory(userId: string, input: SemanticMemoryWriteInput, requestedProfile: ExecutionProfile): Promise<SemanticMemoryOutput>;
   closeSemantic(userId: string, input: SemanticCloseInput, requestedProfile: ExecutionProfile): SemanticCloseOutput;
   stopProcessFeatures(): void;
   onEvent(listener: (event: TerminalEvent) => void): () => void;
@@ -480,7 +494,9 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
-    this.semanticManager = new SemanticLspManager(this.lspManager);
+    this.semanticManager = new SemanticLspManager(this.lspManager, {
+      ...(this.stateDir ? { memoryDir: join(this.stateDir, 'semantic-memory') } : {}),
+    });
     this.restorePersistedSessions();
   }
 
@@ -1074,6 +1090,31 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       case 'diagnostics':
         return this.semanticManager.diagnostics(userId, input.semantic_id, input.path);
     }
+  }
+
+  previewSemanticEdit(userId: string, input: SemanticPreviewEditInput, _requestedProfile: ExecutionProfile): Promise<SemanticPreviewEditOutput> {
+    void _requestedProfile;
+    return this.semanticManager.previewEdit(userId, input.semantic_id, input.edit);
+  }
+
+  applySemanticEdit(userId: string, input: SemanticApplyEditInput, requestedProfile: ExecutionProfile): Promise<SemanticApplyEditOutput> {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    return this.semanticManager.applyEdit(userId, input.semantic_id, input.preview_id);
+  }
+
+  projectSemanticOverview(userId: string, input: SemanticProjectOverviewInput, _requestedProfile: ExecutionProfile): Promise<SemanticProjectOverviewOutput> {
+    void _requestedProfile;
+    return this.semanticManager.projectOverview(userId, input.semantic_id);
+  }
+
+  readSemanticMemory(userId: string, input: SemanticMemoryReadInput, _requestedProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
+    void _requestedProfile;
+    return this.semanticManager.readMemory(userId, input.semantic_id, input.name);
+  }
+
+  writeSemanticMemory(userId: string, input: SemanticMemoryWriteInput, requestedProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
+    this.assertProcessExecutionAllowed(requestedProfile);
+    return this.semanticManager.writeMemory(userId, input.semantic_id, input.name, input.content);
   }
 
   closeSemantic(userId: string, input: SemanticCloseInput, _requestedProfile: ExecutionProfile): SemanticCloseOutput {

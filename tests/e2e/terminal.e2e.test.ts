@@ -122,6 +122,7 @@ describe('terminal MCP end-to-end', () => {
     const agent = new LocalTerminalAgent({
       agentId: identity.agentId,
       displayName: 'E2E computer',
+      stateDir: join(root, 'agent-state'),
       allowedWorkspaceRoots: [workspace],
       executionProfile: 'owner-full',
       shells: ['bash'],
@@ -186,6 +187,11 @@ describe('terminal MCP end-to-end', () => {
       'terminal_semantic_definition',
       'terminal_semantic_implementations',
       'terminal_semantic_diagnostics',
+      'terminal_semantic_preview_edit',
+      'terminal_semantic_apply_edit',
+      'terminal_semantic_project_overview',
+      'terminal_semantic_memory_read',
+      'terminal_semantic_memory_write',
       'terminal_semantic_close',
       'terminal_lsp_start',
       'terminal_lsp_request',
@@ -459,6 +465,42 @@ describe('terminal MCP end-to-end', () => {
       arguments: { agent_id: identity.agentId, semantic_id: semanticId, path: 'sample.ts' },
     }));
     expect(semanticDiagnostics.diagnostics).toEqual([expect.objectContaining({ severity: 2, message: 'e2e semantic warning' })]);
+
+    const semanticPreview = structured(await client.callTool({
+      name: 'terminal_semantic_preview_edit',
+      arguments: {
+        agent_id: identity.agentId, semantic_id: semanticId,
+        edit: { operation: 'replace_symbol', path: 'sample.ts', line: 0, character: 16, content: 'export function alpha() { return 2; }' },
+      },
+    }));
+    const previewId = stringField(semanticPreview, 'preview_id');
+    expect(semanticPreview).toMatchObject({ operation: 'replace_symbol', truncated: false });
+    expect(String(semanticPreview.diff)).toContain('+export function alpha() { return 2; }');
+    expect((semanticPreview.files as Array<{ expected_digest: string }>)[0]?.expected_digest).toMatch(/^[a-f0-9]{64}$/);
+
+    const semanticApplied = structured(await client.callTool({
+      name: 'terminal_semantic_apply_edit',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, preview_id: previewId },
+    }));
+    expect(semanticApplied).toMatchObject({ preview_id: previewId, applied_files: ['sample.ts'] });
+    expect(await readFile(join(workspace, 'sample.ts'), 'utf8')).toBe('export function alpha() { return 2; }\nalpha();\n');
+
+    const semanticMemoryWritten = structured(await client.callTool({
+      name: 'terminal_semantic_memory_write',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, name: 'architecture', content: 'E2E semantic memory' },
+    }));
+    expect(semanticMemoryWritten).toMatchObject({ name: 'architecture', content: 'E2E semantic memory' });
+    expect(structured(await client.callTool({
+      name: 'terminal_semantic_memory_read',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId, name: 'architecture' },
+    }))).toMatchObject({ name: 'architecture', content: 'E2E semantic memory' });
+
+    const semanticOverview = structured(await client.callTool({
+      name: 'terminal_semantic_project_overview',
+      arguments: { agent_id: identity.agentId, semantic_id: semanticId },
+    }));
+    expect(semanticOverview.memories).toContain('architecture');
+    expect(semanticOverview.languages).toEqual(expect.arrayContaining([expect.objectContaining({ language: 'TypeScript' })]));
 
     expect(structured(await client.callTool({
       name: 'terminal_semantic_close', arguments: { agent_id: identity.agentId, semantic_id: semanticId },

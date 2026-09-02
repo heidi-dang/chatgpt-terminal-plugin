@@ -40,6 +40,11 @@ function fakeGateway() {
     querySemantic: vi.fn(async (_userId, _agentId, input) => input.operation === 'workspace_symbols'
       ? ({ semantic_id: input.semantic_id, query: input.query, symbols: [], truncated: false })
       : ({ semantic_id: input.semantic_id, path: input.path, diagnostics: [], truncated: false })),
+    previewSemanticEdit: vi.fn(async (_userId, _agentId, input) => ({ semantic_id: input.semantic_id, preview_id: '00000000-0000-4000-8000-000000000012', operation: input.edit.operation, workspace_digest: 'a'.repeat(64), files: [{ path: input.edit.path, expected_digest: 'b'.repeat(64), next_digest: 'c'.repeat(64), edit_count: 1 }], diff: 'preview', truncated: false })),
+    applySemanticEdit: vi.fn(async (_userId, _agentId, input) => ({ semantic_id: input.semantic_id, preview_id: input.preview_id, applied_files: ['src/service.ts'], revision_digest: 'd'.repeat(64) })),
+    projectSemanticOverview: vi.fn(async (_userId, _agentId, input) => ({ semantic_id: input.semantic_id, root: '/workspace', server_id: 'typescript', languages: [], package_managers: [], manifests: [], commands: {}, memories: ['architecture'], truncated: false })),
+    readSemanticMemory: vi.fn(async (_userId, _agentId, input) => ({ semantic_id: input.semantic_id, name: input.name, content: 'notes', updated_at: new Date().toISOString() })),
+    writeSemanticMemory: vi.fn(async (_userId, _agentId, input) => ({ semantic_id: input.semantic_id, name: input.name, content: input.content, updated_at: new Date().toISOString() })),
     closeSemantic: vi.fn(async () => ({ semantic_id: '00000000-0000-4000-8000-000000000010', stopped: true })),
   };
 }
@@ -134,6 +139,23 @@ describe('server execution-profile authorization', () => {
     await expect(service.semanticDiagnostics(readOnlyIdentity, {
       agent_id: 'agent-a', semantic_id: semanticId, path: 'src/service.ts',
     })).resolves.toMatchObject({ semantic_id: semanticId, diagnostics: [] });
+    await expect(service.previewSemanticEdit(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId,
+      edit: { operation: 'replace_symbol', path: 'src/service.ts', line: 0, character: 0, content: 'replacement' },
+    })).resolves.toMatchObject({ semantic_id: semanticId, operation: 'replace_symbol' });
+    await expect(service.projectSemanticOverview(readOnlyIdentity, { agent_id: 'agent-a', semantic_id: semanticId }))
+      .resolves.toMatchObject({ semantic_id: semanticId, root: '/workspace' });
+    await expect(service.readSemanticMemory(readOnlyIdentity, { agent_id: 'agent-a', semantic_id: semanticId, name: 'architecture' }))
+      .resolves.toMatchObject({ name: 'architecture', content: 'notes' });
+    await expect(service.applySemanticEdit(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId, preview_id: '00000000-0000-4000-8000-000000000012',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(service.writeSemanticMemory(readOnlyIdentity, {
+      agent_id: 'agent-a', semantic_id: semanticId, name: 'architecture', content: 'blocked',
+    })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(gateway.applySemanticEdit).not.toHaveBeenCalled();
+    expect(gateway.writeSemanticMemory).not.toHaveBeenCalled();
+
     await expect(service.closeSemantic(readOnlyIdentity, {
       agent_id: 'agent-a', semantic_id: semanticId,
     })).resolves.toEqual({ semantic_id: semanticId, stopped: true });

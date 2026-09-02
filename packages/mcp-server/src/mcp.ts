@@ -10,10 +10,14 @@ import {
   lspRequestOutputSchema,
   lspStartOutputSchema,
   lspStopOutputSchema,
+  semanticApplyEditOutputSchema,
   semanticCloseOutputSchema,
   semanticDiagnosticsOutputSchema,
+  semanticMemoryOutputSchema,
   semanticLocationsOutputSchema,
   semanticOpenOutputSchema,
+  semanticPreviewEditOutputSchema,
+  semanticProjectOverviewOutputSchema,
   semanticSymbolsOutputSchema,
   semanticWorkspaceSymbolsOutputSchema,
   terminalCancelCodeToolSchema,
@@ -27,6 +31,11 @@ import {
   terminalSemanticFindSymbolsSchema,
   terminalSemanticImplementationsSchema,
   terminalSemanticOpenSchema,
+  terminalSemanticPreviewEditSchema,
+  terminalSemanticApplyEditSchema,
+  terminalSemanticProjectOverviewSchema,
+  terminalSemanticMemoryReadSchema,
+  terminalSemanticMemoryWriteSchema,
   terminalSemanticReferencesSchema,
   terminalSemanticSymbolsSchema,
   terminalMutationOutputSchema,
@@ -709,6 +718,66 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async (input, ctx) => resultFrom(() => deps.service.semanticDiagnostics(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_preview_edit',
+    {
+      title: 'Preview semantic refactor',
+      description: 'Preview a Serena-style semantic mutation without writing files. Supports LSP rename, replace symbol body, insert before/after a symbol, and safe-delete. Returns bounded diffs plus SHA-256 revision guards for every affected file.',
+      inputSchema: terminalSemanticPreviewEditSchema,
+      outputSchema: semanticPreviewEditOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.previewSemanticEdit(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_apply_edit',
+    {
+      title: 'Apply semantic refactor',
+      description: 'Apply one previously previewed semantic refactor. The operation fails with STALE_EDIT if any affected file changed after preview.',
+      inputSchema: terminalSemanticApplyEditSchema,
+      outputSchema: semanticApplyEditOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.applySemanticEdit(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_project_overview',
+    {
+      title: 'Inspect semantic project',
+      description: 'Return a bounded Serena-style project onboarding overview: languages, manifests, package managers, runnable package scripts, and stored project-memory names.',
+      inputSchema: terminalSemanticProjectOverviewSchema,
+      outputSchema: semanticProjectOverviewOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.projectSemanticOverview(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_memory_read',
+    {
+      title: 'Read semantic project memory',
+      description: 'Read one bounded named Serena-style project memory associated with the semantic workspace. Memory is stored in the local-agent state area rather than injected into the source tree.',
+      inputSchema: terminalSemanticMemoryReadSchema,
+      outputSchema: semanticMemoryOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.readSemanticMemory(identityFromContext(ctx), input)),
+  );
+
+  server.registerTool(
+    'terminal_semantic_memory_write',
+    {
+      title: 'Write semantic project memory',
+      description: 'Create or replace one bounded named Serena-style project memory in local-agent state. Requires a non-read-only execution profile.',
+      inputSchema: terminalSemanticMemoryWriteSchema,
+      outputSchema: semanticMemoryOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input, ctx) => resultFrom(() => deps.service.writeSemanticMemory(identityFromContext(ctx), input)),
   );
 
   server.registerTool(

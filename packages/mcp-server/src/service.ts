@@ -12,6 +12,11 @@ import {
   terminalSemanticFindSymbolsSchema,
   terminalSemanticImplementationsSchema,
   terminalSemanticOpenSchema,
+  terminalSemanticPreviewEditSchema,
+  terminalSemanticApplyEditSchema,
+  terminalSemanticProjectOverviewSchema,
+  terminalSemanticMemoryReadSchema,
+  terminalSemanticMemoryWriteSchema,
   terminalSemanticReferencesSchema,
   terminalSemanticSymbolsSchema,
   terminalMutationOutputSchema,
@@ -30,10 +35,14 @@ import {
   type LspRequestOutput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticApplyEditOutput,
   type SemanticCloseOutput,
   type SemanticDiagnosticsOutput,
+  type SemanticMemoryOutput,
   type SemanticLocationsOutput,
   type SemanticOpenOutput,
+  type SemanticPreviewEditOutput,
+  type SemanticProjectOverviewOutput,
   type SemanticSymbolsOutput,
   type SemanticWorkspaceSymbolsOutput,
   type TerminalCancelCodeToolArgs,
@@ -47,6 +56,11 @@ import {
   type TerminalSemanticFindSymbolsArgs,
   type TerminalSemanticImplementationsArgs,
   type TerminalSemanticOpenArgs,
+  type TerminalSemanticPreviewEditArgs,
+  type TerminalSemanticApplyEditArgs,
+  type TerminalSemanticProjectOverviewArgs,
+  type TerminalSemanticMemoryReadArgs,
+  type TerminalSemanticMemoryWriteArgs,
   type TerminalSemanticReferencesArgs,
   type TerminalSemanticSymbolsArgs,
   type TerminalListAgentsOutput,
@@ -467,6 +481,77 @@ export class TerminalService {
     }, identity.executionProfile) as SemanticDiagnosticsOutput;
     await this.auditSemanticQuery(identity, input.agent_id, 'terminal_semantic_diagnostics',
       { semantic_id: input.semantic_id, path: input.path }, output.diagnostics.length, output.truncated);
+    return output;
+  }
+
+  async previewSemanticEdit(identity: RequestIdentity, rawInput: TerminalSemanticPreviewEditArgs): Promise<SemanticPreviewEditOutput> {
+    const input = terminalSemanticPreviewEditSchema.parse(rawInput);
+    const output = await this.gateway.previewSemanticEdit(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, edit: input.edit,
+    }, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_preview_edit', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id, operation: input.edit.operation, path: input.edit.path },
+      output_metadata: { preview_id: output.preview_id, file_count: output.files.length, truncated: output.truncated },
+    });
+    return output;
+  }
+
+  async applySemanticEdit(identity: RequestIdentity, rawInput: TerminalSemanticApplyEditArgs): Promise<SemanticApplyEditOutput> {
+    const input = terminalSemanticApplyEditSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_semantic_apply_edit', {
+      agent_id: input.agent_id, semantic_id: input.semantic_id, preview_id: input.preview_id,
+    });
+    const output = await this.gateway.applySemanticEdit(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, preview_id: input.preview_id,
+    }, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_apply_edit', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id, preview_id: input.preview_id },
+      output_metadata: { applied_file_count: output.applied_files.length, revision_digest: output.revision_digest },
+    });
+    return output;
+  }
+
+  async projectSemanticOverview(identity: RequestIdentity, rawInput: TerminalSemanticProjectOverviewArgs): Promise<SemanticProjectOverviewOutput> {
+    const input = terminalSemanticProjectOverviewSchema.parse(rawInput);
+    const output = await this.gateway.projectSemanticOverview(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id,
+    }, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_project_overview', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id },
+      output_metadata: { language_count: output.languages.length, manifest_count: output.manifests.length, memory_count: output.memories.length, truncated: output.truncated },
+    });
+    return output;
+  }
+
+  async readSemanticMemory(identity: RequestIdentity, rawInput: TerminalSemanticMemoryReadArgs): Promise<SemanticMemoryOutput> {
+    const input = terminalSemanticMemoryReadSchema.parse(rawInput);
+    const output = await this.gateway.readSemanticMemory(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, name: input.name,
+    }, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_memory_read', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id, name: input.name },
+      output_metadata: { content_bytes: Buffer.byteLength(output.content) },
+    });
+    return output;
+  }
+
+  async writeSemanticMemory(identity: RequestIdentity, rawInput: TerminalSemanticMemoryWriteArgs): Promise<SemanticMemoryOutput> {
+    const input = terminalSemanticMemoryWriteSchema.parse(rawInput);
+    await this.assertMutationAllowed(identity, 'terminal_semantic_memory_write', {
+      agent_id: input.agent_id, semantic_id: input.semantic_id, name: input.name,
+    });
+    const output = await this.gateway.writeSemanticMemory(identity.userId, input.agent_id, {
+      semantic_id: input.semantic_id, name: input.name, content: input.content,
+    }, identity.executionProfile);
+    await this.audit.record({
+      action: 'terminal_semantic_memory_write', ...auditIdentity(identity), agent_id: input.agent_id,
+      authorization: 'allow', input: { semantic_id: input.semantic_id, name: input.name, content_bytes: Buffer.byteLength(input.content) },
+      output_metadata: { updated_at: output.updated_at },
+    });
     return output;
   }
 

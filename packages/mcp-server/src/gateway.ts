@@ -16,8 +16,12 @@ import {
   lspRequestOutputSchema,
   lspStartOutputSchema,
   lspStopOutputSchema,
+  semanticApplyEditOutputSchema,
   semanticCloseOutputSchema,
+  semanticMemoryOutputSchema,
   semanticOpenOutputSchema,
+  semanticPreviewEditOutputSchema,
+  semanticProjectOverviewOutputSchema,
   semanticQueryOutputSchema,
   terminalListFilesOutputSchema,
   terminalReadFileOutputSchema,
@@ -36,8 +40,17 @@ import {
   type LspRequestOutput,
   type LspStartOutput,
   type LspStopOutput,
+  type SemanticApplyEditInput,
+  type SemanticApplyEditOutput,
   type SemanticCloseOutput,
+  type SemanticMemoryOutput,
+  type SemanticMemoryReadInput,
+  type SemanticMemoryWriteInput,
   type SemanticOpenOutput,
+  type SemanticPreviewEditInput,
+  type SemanticPreviewEditOutput,
+  type SemanticProjectOverviewInput,
+  type SemanticProjectOverviewOutput,
   type SemanticQueryInput,
   type SemanticQueryOutput,
   type TerminalExecuteCodeBlockToolArgs,
@@ -420,6 +433,46 @@ export class AgentGateway {
       type: 'request', request_id: randomUUID(), action: 'semantic.query', user_id: userId,
       execution_profile: executionProfile, input,
     }, (raw) => semanticQueryOutputSchema.parse(raw));
+  }
+
+  async previewSemanticEdit(userId: string, agentId: string, input: SemanticPreviewEditInput, executionProfile: ExecutionProfile): Promise<SemanticPreviewEditOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.preview_edit', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticPreviewEditOutputSchema.parse(raw));
+  }
+
+  async applySemanticEdit(userId: string, agentId: string, input: SemanticApplyEditInput, executionProfile: ExecutionProfile): Promise<SemanticApplyEditOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.apply_edit', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticApplyEditOutputSchema.parse(raw));
+  }
+
+  async projectSemanticOverview(userId: string, agentId: string, input: SemanticProjectOverviewInput, executionProfile: ExecutionProfile): Promise<SemanticProjectOverviewOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.project_overview', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticProjectOverviewOutputSchema.parse(raw));
+  }
+
+  async readSemanticMemory(userId: string, agentId: string, input: SemanticMemoryReadInput, executionProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.memory.read', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticMemoryOutputSchema.parse(raw));
+  }
+
+  async writeSemanticMemory(userId: string, agentId: string, input: SemanticMemoryWriteInput, executionProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
+    const connection = this.requireAgent(userId, agentId);
+    return this.request(connection, {
+      type: 'request', request_id: randomUUID(), action: 'semantic.memory.write', user_id: userId,
+      execution_profile: executionProfile, input,
+    }, (raw) => semanticMemoryOutputSchema.parse(raw));
   }
 
   async closeSemantic(userId: string, input: TerminalSemanticCloseArgs, executionProfile: ExecutionProfile): Promise<SemanticCloseOutput> {

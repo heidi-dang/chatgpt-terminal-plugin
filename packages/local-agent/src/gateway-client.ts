@@ -305,6 +305,16 @@ export class AgentGatewayClient {
         return this.agent.openSemantic(command.user_id, command.input, command.execution_profile);
       case 'semantic.query':
         return this.agent.querySemantic(command.user_id, command.input, command.execution_profile);
+      case 'semantic.preview_edit':
+        return this.agent.previewSemanticEdit(command.user_id, command.input, command.execution_profile);
+      case 'semantic.apply_edit':
+        return this.agent.applySemanticEdit(command.user_id, command.input, command.execution_profile);
+      case 'semantic.project_overview':
+        return this.agent.projectSemanticOverview(command.user_id, command.input, command.execution_profile);
+      case 'semantic.memory.read':
+        return this.agent.readSemanticMemory(command.user_id, command.input, command.execution_profile);
+      case 'semantic.memory.write':
+        return this.agent.writeSemanticMemory(command.user_id, command.input, command.execution_profile);
       case 'semantic.close':
         return this.agent.closeSemantic(command.user_id, command.input, command.execution_profile);
       case 'lsp.start':

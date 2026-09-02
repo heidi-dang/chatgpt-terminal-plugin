@@ -1,7 +1,16 @@
 import { z } from 'zod';
 import { codeCancelInputSchema, codeExecuteInputSchema, codeExecutionChunkSchema } from './code-block.js';
 import { lspRequestInputSchema, lspStartInputSchema, lspStopInputSchema } from './lsp.js';
-import { semanticCloseInputSchema, semanticOpenInputSchema, semanticQueryInputSchema } from './semantic.js';
+import {
+  semanticApplyEditInputSchema,
+  semanticCloseInputSchema,
+  semanticMemoryReadInputSchema,
+  semanticMemoryWriteInputSchema,
+  semanticOpenInputSchema,
+  semanticPreviewEditInputSchema,
+  semanticProjectOverviewInputSchema,
+  semanticQueryInputSchema,
+} from './semantic.js';
 
 export const GATEWAY_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
@@ -118,6 +127,7 @@ export const terminalErrorCodeSchema = z.enum([
   'INVALID_ARGUMENT',
   'FILE_NOT_FOUND',
   'FILE_TOO_LARGE',
+  'STALE_EDIT',
 ]);
 export type TerminalErrorCode = z.infer<typeof terminalErrorCodeSchema>;
 
@@ -505,6 +515,46 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     user_id: z.string().min(1),
     execution_profile: executionProfileSchema,
     input: semanticQueryInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.preview_edit'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticPreviewEditInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.apply_edit'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticApplyEditInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.project_overview'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticProjectOverviewInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.memory.read'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticMemoryReadInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('semantic.memory.write'),
+    user_id: z.string().min(1),
+    execution_profile: executionProfileSchema,
+    input: semanticMemoryWriteInputSchema,
   }),
   z.object({
     type: z.literal('request'),

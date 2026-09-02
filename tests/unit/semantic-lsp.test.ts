@@ -114,6 +114,98 @@ describe('Serena-style semantic LSP layer', () => {
     ]);
   });
 
+  it('previews and applies a language-server rename across workspace files', async () => {
+    const fixture = await createFixture();
+    const first = join(fixture.root, 'sample.ts');
+    const second = join(fixture.root, 'consumer.ts');
+    await writeFile(first, 'export function alpha() { return 1; }\nalpha();\n', 'utf8');
+    await writeFile(second, "import { alpha } from './sample.js';\nalpha();\n", 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+
+    const preview = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'rename', path: 'sample.ts', line: 0, character: 16, new_name: 'beta',
+    });
+
+    expect(preview.files.map((file) => file.path)).toEqual(['consumer.ts', 'sample.ts']);
+    expect(preview.files.every((file) => /^[a-f0-9]{64}$/.test(file.expected_digest))).toBe(true);
+    expect(preview.diff).toContain('alpha');
+    expect(preview.diff).toContain('beta');
+
+    const applied = await fixture.semantic.applyEdit('user-a', opened.semantic_id, preview.preview_id);
+    expect(applied.applied_files).toEqual(['consumer.ts', 'sample.ts']);
+    expect(await readFile(first, 'utf8')).toContain('function beta');
+    expect(await readFile(second, 'utf8')).toContain('{ beta }');
+  });
+
+  it('rejects a preview when any target file changed before apply', async () => {
+    const fixture = await createFixture();
+    const filePath = join(fixture.root, 'sample.ts');
+    await writeFile(filePath, 'export function alpha() { return 1; }\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    const preview = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'replace_symbol', path: 'sample.ts', line: 0, character: 18, content: 'export function alpha() { return 2; }',
+    });
+
+    await writeFile(filePath, 'export function alpha() { return 99; }\n', 'utf8');
+
+    await expect(fixture.semantic.applyEdit('user-a', opened.semantic_id, preview.preview_id))
+      .rejects.toMatchObject({ code: 'STALE_EDIT' });
+    expect(await readFile(filePath, 'utf8')).toContain('return 99');
+  });
+
+  it('previews replace, insert-before and insert-after against the enclosing semantic symbol', async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, 'sample.ts'), 'export function alpha() { return 1; }\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+
+    const replace = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'replace_symbol', path: 'sample.ts', line: 0, character: 18, content: 'export function alpha() { return 2; }',
+    });
+    const before = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'insert_before', path: 'sample.ts', line: 0, character: 18, content: '// before\n',
+    });
+    const after = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'insert_after', path: 'sample.ts', line: 0, character: 18, content: '\n// after',
+    });
+
+    expect(replace.diff).toContain('+export function alpha() { return 2; }');
+    expect(before.diff).toContain('+// before');
+    expect(after.diff).toContain('+// after');
+  });
+
+  it('safe-delete refuses referenced symbols and previews deletion when references are absent', async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, 'sample.ts'), 'export function alpha() { return 1; }\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+
+    await expect(fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'safe_delete', path: 'sample.ts', line: 0, character: 18,
+    })).rejects.toThrow(/references/i);
+
+    await writeFile(join(fixture.root, '.no-references'), '1', 'utf8');
+    const preview = await fixture.semantic.previewEdit('user-a', opened.semantic_id, {
+      operation: 'safe_delete', path: 'sample.ts', line: 0, character: 18,
+    });
+    expect(preview.diff).toContain('-export function alpha() { return 1; }');
+  });
+
+  it('builds a bounded project overview and persists named project memory outside the workspace', async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run', build: 'tsc -b' } }), 'utf8');
+    await writeFile(join(fixture.root, 'sample.ts'), 'export const value = 1;\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+
+    const written = await fixture.semantic.writeMemory('user-a', opened.semantic_id, 'architecture', 'Uses a local agent plus MCP gateway.');
+    expect(written.name).toBe('architecture');
+    expect((await fixture.semantic.readMemory('user-a', opened.semantic_id, 'architecture')).content).toContain('MCP gateway');
+
+    const overview = await fixture.semantic.projectOverview('user-a', opened.semantic_id);
+    expect(overview.languages).toContainEqual(expect.objectContaining({ language: 'TypeScript' }));
+    expect(overview.package_managers).toContain('npm');
+    expect(overview.commands).toEqual(expect.objectContaining({ test: 'vitest run', build: 'tsc -b' }));
+    expect(overview.memories).toContain('architecture');
+  });
+
   it('isolates semantic sessions by user and stops the underlying LSP process', async () => {
     const fixture = await createFixture();
     const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
@@ -145,7 +237,7 @@ async function createFixture(): Promise<{
     requestTimeoutMs: 2_000,
   });
   cleanup.push(() => lsp.stopAll());
-  const semantic = new SemanticLspManager(lsp);
+  const semantic = new SemanticLspManager(lsp, { memoryDir: join(root, '.semantic-memory') });
   cleanup.push(() => semantic.stopAll());
   return { root, logPath, lsp, semantic };
 }
@@ -203,7 +295,22 @@ function handle(message) {
     return send({ jsonrpc: '2.0', id: message.id, result: [{ name: 'alpha', kind: 12, location: location(0, 16) }] });
   }
   if (message.method === 'textDocument/references') {
-    return send({ jsonrpc: '2.0', id: message.id, result: [location(1, 0)] });
+    const noRefs = fs.existsSync(require('node:url').fileURLToPath(rootUri) + '/.no-references');
+    return send({ jsonrpc: '2.0', id: message.id, result: noRefs ? [] : [location(1, 0)] });
+  }
+  if (message.method === 'textDocument/rename') {
+    const sampleUri = rootUri + '/sample.ts';
+    const consumerUri = rootUri + '/consumer.ts';
+    return send({ jsonrpc: '2.0', id: message.id, result: { changes: {
+      [sampleUri]: [
+        { range: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } }, newText: message.params.newName },
+        { range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: message.params.newName }
+      ],
+      [consumerUri]: [
+        { range: { start: { line: 0, character: 9 }, end: { line: 0, character: 14 } }, newText: message.params.newName },
+        { range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }, newText: message.params.newName }
+      ]
+    } } });
   }
   if (message.method === 'textDocument/definition') {
     return send({ jsonrpc: '2.0', id: message.id, result: location(0, 16) });

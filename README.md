@@ -245,6 +245,11 @@ For the complete authentication, reverse-proxy, enrollment, smoke-test, upgrade,
 | `terminal_semantic_definition` | Resolve a symbol definition/declaration. |
 | `terminal_semantic_implementations` | Resolve semantic implementations. |
 | `terminal_semantic_diagnostics` | Return the latest synchronized language-server diagnostics for a file. |
+| `terminal_semantic_preview_edit` | Preview digest-guarded rename/replace/insert/safe-delete refactors without writing. |
+| `terminal_semantic_apply_edit` | Apply one preview; rejects stale workspace revisions. |
+| `terminal_semantic_project_overview` | Inspect bounded Serena-style project onboarding metadata. |
+| `terminal_semantic_memory_read` | Read a named bounded project memory. |
+| `terminal_semantic_memory_write` | Persist a named project memory in local-agent state. |
 | `terminal_semantic_close` | Close an owned semantic workspace and its language-server process. |
 | `terminal_lsp_start` | Start an administrator-configured language server for advanced raw JSON-RPC use. |
 | `terminal_lsp_request` | Send a bounded ownership-checked raw LSP JSON-RPC request. |
@@ -255,6 +260,8 @@ The MCP App also uses restricted application-facing lifecycle/stream operations 
 ### Serena-style semantic code intelligence
 
 The semantic tools are a native TypeScript integration inspired by Serena's high-level code-navigation model; they do **not** embed Serena's Python runtime or replace the terminal transport. `terminal_semantic_open` performs the LSP `initialize`/`initialized` handshake and creates a per-user semantic workspace. File-based semantic operations synchronize the current filesystem contents with `didOpen`/full-text `didChange`, so edits made through the shell, Git, formatters, or other tools are reflected before the next query.
+
+Semantic mutations use preview/apply semantics: previews return bounded diffs plus SHA-256 file revisions, and apply fails with `STALE_EDIT` if any affected file changed. Rename uses LSP `textDocument/rename`; replace/insert/safe-delete operate on enclosing semantic symbol ranges, with safe-delete refusing live references. Project overview and named project memory complete the Serena-style onboarding workflow.
 
 Semantic output is bounded to 200 top-level results and 64 KiB of serialized result data, with `truncated=true` when the result is shortened. `textDocument/publishDiagnostics` notifications are cached only for files inside the authorized workspace root. Safe server-to-client requests required by common language servers (`workspace/configuration`, `workspace/workspaceFolders`, and work-done progress creation) are handled explicitly; server-driven edits and all other unapproved requests remain fail-closed.
 
