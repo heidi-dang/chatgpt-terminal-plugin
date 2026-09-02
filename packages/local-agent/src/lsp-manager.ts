@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   TerminalProtocolError,
   type LspRequestInput,
@@ -355,8 +355,15 @@ function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS
   const pid = child.pid;
   if (!pid) return;
   try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-pid, signal);
+    if (process.platform === 'win32') {
+      try {
+        execFile('taskkill', ['/F', '/T', '/PID', String(pid)], () => {});
+      } catch {
+        child.kill(signal);
+      }
+    } else {
+      process.kill(-pid, signal);
+    }
   } catch (error) {
     if (!isNoSuchProcess(error)) throw error;
   }

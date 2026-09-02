@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -236,8 +236,15 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid;
   if (!pid) return;
   try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-pid, signal);
+    if (process.platform === 'win32') {
+      try {
+        execFile('taskkill', ['/F', '/T', '/PID', String(pid)], () => {});
+      } catch {
+        child.kill(signal);
+      }
+    } else {
+      process.kill(-pid, signal);
+    }
   } catch (error) {
     if (!isNoSuchProcess(error)) throw error;
   }
