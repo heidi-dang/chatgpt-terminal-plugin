@@ -172,7 +172,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_surface',
     {
       title: 'Open terminal surface',
-      description: 'Call exactly once before any other terminal tool in each assistant turn. Opens the single Terminal UI for this turn and closes any stale PTY from the previous turn. Do not call it again within the same turn.',
+      description: 'Render the one Live Terminal UI for this ChatGPT conversation. Call this only when the conversation does not already have a Live Terminal widget. Once rendered, do not call terminal_surface again in later assistant turns; call terminal_start directly and the existing widget will follow the new PTY.',
       inputSchema: terminalSurfaceInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -206,7 +206,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_turn_close',
     {
       title: 'Close terminal turn',
-      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface. Pass surface_id from terminal_surface when available so cleanup can recover safely after an MCP restart.',
+      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills only the active PTY while keeping the conversation Live Terminal surface open for reuse. Pass surface_id when available so the same surface can recover safely after an MCP restart.',
       inputSchema: terminalSurfaceCloseInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -223,7 +223,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_start',
     {
       title: 'Start terminal session',
-      description: 'Start a fresh PTY inside the already-open terminal_surface for this assistant turn. Pass surface_id from terminal_surface when available so the same surface can be recovered after an MCP restart. If another PTY is active in this turn, it is killed first and the same Terminal UI switches to this new stream. Never renders another Terminal UI.',
+      description: "Start a fresh PTY and attach it to the conversation's existing Live Terminal surface. If another PTY is active, it is killed first. After terminal_surface has rendered the widget once, later assistant turns must call terminal_start directly so the existing widget switches to the new stream instead of rendering another UI. Pass surface_id when available for restart recovery.",
       inputSchema: terminalStartViewInputSchema,
       outputSchema: terminalStartViewOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -233,8 +233,12 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         const identity = identityFromContext(ctx);
         const { surface_id: surfaceId, ...startInput } = input;
         if (!deps.turnRegistry.current(identity).surface_open) await deps.turnRegistry.recover(identity, surfaceId);
-        if (!deps.turnRegistry.current(identity).surface_open) {
-          throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
+        const currentSurface = deps.turnRegistry.current(identity);
+        if (!currentSurface.surface_open) {
+          throw new TerminalProtocolError('INVALID_ARGUMENT', 'This conversation has no Live Terminal surface yet. Call terminal_surface once, then use terminal_start directly in later turns.');
+        }
+        if (surfaceId && currentSurface.surface_id !== surfaceId) {
+          throw new TerminalProtocolError('INVALID_ARGUMENT', 'terminal_start surface_id does not match the active Live Terminal surface.');
         }
         await deps.turnRegistry.clearActive(identity);
         const started = await deps.service.start(identity, startInput);

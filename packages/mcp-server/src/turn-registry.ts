@@ -52,8 +52,13 @@ export class TerminalTurnRegistry {
 
   async begin(identity: RequestIdentity): Promise<TerminalTurnState> {
     const key = turnKey(identity);
-    const previous = this.records.get(key);
-    if (previous) await this.closeRecord(key, previous);
+    const existing = this.records.get(key);
+    if (existing) {
+      existing.identity = { ...existing.identity, ...identity };
+      this.armLease(key, existing);
+      await this.persist();
+      return stateFromRecord(existing);
+    }
 
     const record: TerminalTurnRecord = {
       identity: { ...identity },
@@ -166,13 +171,7 @@ export class TerminalTurnRegistry {
   }
 
   async end(identity: RequestIdentity): Promise<TerminalTurnState> {
-    const key = turnKey(identity);
-    const record = this.records.get(key);
-    if (!record) return closedState(null);
-    const surfaceId = record.surfaceId;
-    await this.closeRecord(key, record);
-    await this.persist();
-    return closedState(surfaceId);
+    return this.clearActive(identity);
   }
 
   dispose(): void {

@@ -130,7 +130,7 @@ describe('MCP deployment restart recovery', () => {
         name: 'terminal_turn_close',
         arguments: { surface_id: surfaceId },
       }));
-      expect(closed).toEqual(expect.objectContaining({ surface_id: surfaceId, surface_open: false, surface_active: false }));
+      expect(closed).toEqual(expect.objectContaining({ surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null }));
     } finally {
       await firstClient?.close().catch(() => undefined);
       await secondClient?.close().catch(() => undefined);

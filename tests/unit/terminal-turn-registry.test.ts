@@ -55,7 +55,7 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
-  it('closes a newly-created PTY when its surface is replaced during activation', async () => {
+  it('keeps one surface stable while overlapping PTY replacements serialize', async () => {
     const closed: string[] = [];
     let releaseOldClose!: () => void;
     let markOldCloseStarted!: () => void;
@@ -69,35 +69,32 @@ describe('TerminalTurnRegistry', () => {
       }
     }, 60_000);
 
-    const oldSurface = await registry.begin(identity);
+    const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-old');
     const activation = registry.activate(identity, 'session-new');
     await oldCloseStarted;
     const queuedActivation = registry.activate(identity, 'session-queued');
-    const nextTurn = registry.begin(identity);
+    const repeatedSurface = registry.begin(identity);
     releaseOldClose();
 
-    await expect(activation).rejects.toThrow('Terminal surface closed while replacing its active PTY.');
-    await expect(queuedActivation).rejects.toThrow('Terminal surface changed before PTY activation.');
-    const nextSurface = await nextTurn;
-    expect(closed).toContain('session-new');
-    expect(closed).toContain('session-queued');
-    expect(nextSurface.surface_id).not.toBe(oldSurface.surface_id);
-    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: nextSurface.surface_id, session_id: null }));
+    await Promise.all([activation, queuedActivation]);
+    expect((await repeatedSurface).surface_id).toBe(surface.surface_id);
+    expect(closed).toEqual(['session-old', 'session-new']);
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, session_id: 'session-queued' }));
     registry.dispose();
   });
 
-  it('closes a stale PTY when a fresh assistant turn opens its one terminal surface', async () => {
+  it('treats repeated surface opens as idempotent and does not kill the active PTY', async () => {
     const closed: string[] = [];
     const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
 
-    await registry.begin(identity);
+    const first = await registry.begin(identity);
     await registry.activate(identity, 'session-old');
-    const next = await registry.begin(identity);
+    const repeated = await registry.begin(identity);
 
-    expect(closed).toEqual(['session-old']);
-    expect(next.session_id).toBeNull();
-    expect(registry.current(identity).session_id).toBeNull();
+    expect(repeated.surface_id).toBe(first.surface_id);
+    expect(repeated.session_id).toBe('session-old');
+    expect(closed).toEqual([]);
     registry.dispose();
   });
 
@@ -114,15 +111,15 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
-  it('invalidates an older widget surface so it cannot follow a later prompt', async () => {
+  it('keeps the original widget surface reusable across later assistant turns', async () => {
     const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
 
     const first = await registry.begin(identity);
+    await registry.end(identity);
     const second = await registry.begin(identity);
 
-    expect(second.surface_id).not.toBe(first.surface_id);
-    expect(registry.status(identity, first.surface_id)).toEqual(expect.objectContaining({ surface_open: false, session_id: null }));
-    expect(registry.status(identity, second.surface_id)).toEqual(expect.objectContaining({ surface_open: true, session_id: null }));
+    expect(second.surface_id).toBe(first.surface_id);
+    expect(registry.status(identity, first.surface_id!)).toEqual(expect.objectContaining({ surface_open: true, session_id: null }));
     registry.dispose();
   });
 
@@ -144,6 +141,7 @@ describe('TerminalTurnRegistry', () => {
 
     await registry.end(conversationA);
     expect(closed).toEqual(['session-a']);
+    expect(registry.current(conversationA)).toEqual(expect.objectContaining({ surface_id: surfaceA.surface_id, surface_open: true, surface_active: false, session_id: null }));
     expect(registry.current(conversationB)).toEqual(expect.objectContaining({ surface_open: true, session_id: 'session-b' }));
     registry.dispose();
   });
@@ -207,16 +205,16 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
-  it('closes the active PTY when the assistant turn ends', async () => {
+  it('closes the active PTY when the assistant turn ends but keeps the surface open', async () => {
     const closed: string[] = [];
     const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
 
-    await registry.begin(identity);
+    const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-1');
     await registry.end(identity);
 
     expect(closed).toEqual(['session-1']);
-    expect(registry.current(identity).session_id).toBeNull();
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, surface_active: false, session_id: null }));
     registry.dispose();
   });
 
@@ -271,7 +269,7 @@ describe('TerminalTurnRegistry', () => {
 
     await registry.begin(identity);
     await registry.activate(identity, 'session-gone');
-    await expect(registry.end(identity)).resolves.toEqual(expect.objectContaining({ surface_open: false }));
+    await expect(registry.end(identity)).resolves.toEqual(expect.objectContaining({ surface_open: true, surface_active: false, session_id: null }));
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
     registry.dispose();
