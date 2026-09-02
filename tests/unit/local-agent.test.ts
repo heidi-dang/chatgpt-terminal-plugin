@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -179,6 +179,50 @@ describe('LocalTerminalAgent', () => {
     await expect(agent.deleteFile(started.session.session_id, 'inside-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     await expect(agent.renameFile(started.session.session_id, 'inside-link.txt', 'renamed-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     expect((await agent.readFile(started.session.session_id, 'inside.txt', 1024)).content).toBe('inside-target\n');
+  });
+
+  it('keeps ripgrep file discovery semantically identical to the bounded JavaScript fallback', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(join(tmpdir(), 'terminal-rg-parity-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await mkdir(join(root, 'visible'));
+    await mkdir(join(root, '.hidden'));
+    await mkdir(join(root, 'node_modules'));
+    await writeTextFile(join(root, 'visible', 'first.txt'), 'before\nNeedle\nafter\n', 'utf8');
+    await writeTextFile(join(root, '.hidden', 'secret.txt'), 'needle hidden\n', 'utf8');
+    await writeTextFile(join(root, 'node_modules', 'dependency.txt'), 'needle dependency\n', 'utf8');
+    await writeTextFile(join(root, 'big.txt'), `needle-too-large\n${'x'.repeat(512 * 1024)}`, 'utf8');
+    const fakeRipgrep = join(root, 'fake-rg');
+    await writeTextFile(fakeRipgrep, "#!/bin/sh\nprintf 'visible/first.txt\\0big.txt\\0'\n", { encoding: 'utf8', mode: 0o700 });
+
+    const previousRipgrep = process.env.TERMINAL_RIPGREP;
+    cleanup.push(() => {
+      if (previousRipgrep === undefined) delete process.env.TERMINAL_RIPGREP;
+      else process.env.TERMINAL_RIPGREP = previousRipgrep;
+    });
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-rg-parity', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-rg-parity', cwd: root, shell: 'bash', cols: 80, rows: 24,
+    }, 'developer');
+
+    process.env.TERMINAL_RIPGREP = fakeRipgrep;
+    const accelerated = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
+    process.env.TERMINAL_RIPGREP = join(root, 'missing-rg');
+    const fallback = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
+
+    expect(accelerated).toEqual(fallback);
+    expect(accelerated.files_searched).toBe(2);
+    expect(accelerated.truncated).toBe(false);
+    expect(accelerated.matches).toEqual([expect.objectContaining({
+      file: 'visible/first.txt',
+      line: 2,
+      text: 'Needle',
+      context_before: ['before'],
+      context_after: ['after'],
+    })]);
   });
 
   it('persists dynamic workspace roots and refuses removal while an active terminal uses one', async () => {
