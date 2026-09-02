@@ -481,6 +481,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
         signals: ['SIGINT'],
         shells: this.shells,
         resume: true,
+        semantic: true,
       },
       connected_at: now,
       last_seen: now,

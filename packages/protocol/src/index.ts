@@ -35,6 +35,8 @@ export const agentCapabilitiesSchema = z.object({
   signals: z.array(z.string()).default(['SIGINT']),
   shells: z.array(z.string()).default([]),
   resume: z.boolean().default(false),
+  // New feature flags must default false so newer servers can safely classify legacy agents.
+  semantic: z.boolean().default(false),
 });
 export type AgentCapabilities = z.infer<typeof agentCapabilitiesSchema>;
 
