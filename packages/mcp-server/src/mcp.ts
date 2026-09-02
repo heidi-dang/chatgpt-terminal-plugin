@@ -142,7 +142,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_surface',
     {
       title: 'Open terminal surface',
-      description: 'Call exactly once before any other terminal tool in each assistant turn. Opens the single Terminal UI for this turn and closes any stale PTY from the previous turn. Do not call it again within the same turn.',
+      description: 'Render the one Live Terminal UI for this ChatGPT conversation. Call this only when the conversation does not already have a Live Terminal widget. Once rendered, do not call terminal_surface again in later assistant turns; call terminal_start directly and the existing widget will follow the new PTY.',
       inputSchema: terminalSurfaceInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -151,7 +151,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         'openai/outputTemplate': TERMINAL_UI_URI,
       },
     },
-    async (_input, ctx) => resultFrom(async () => terminalSurfaceOutputSchema.parse(await deps.turnRegistry.begin(identityFromContext(ctx, deps.mcpSessionId())))),
+    async (_input, ctx) => resultFrom(() => terminalSurfaceOutputSchema.parse(deps.turnRegistry.begin(identityFromContext(ctx, deps.mcpSessionId())))),
   );
 
   server.registerTool(
@@ -176,7 +176,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_turn_close',
     {
       title: 'Close terminal turn',
-      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills the active PTY and closes this turn surface.',
+      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills only the active PTY while keeping the conversation Live Terminal surface open so later turns reuse the same widget.',
       inputSchema: terminalSurfaceInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -189,7 +189,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_start',
     {
       title: 'Start terminal session',
-      description: 'Start a fresh PTY inside the already-open terminal_surface for this assistant turn. If another PTY is active in this turn, it is killed first and the same Terminal UI switches to this new stream. Never renders another Terminal UI.',
+      description: "Start a fresh PTY and attach it to the conversation's existing Live Terminal surface. If another PTY is active, it is killed first. After terminal_surface has rendered the widget once, later assistant turns must call terminal_start directly so the existing widget switches to the new stream instead of rendering another UI.",
       inputSchema: terminalStartInputSchema,
       outputSchema: terminalStartViewOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -200,7 +200,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         const currentTurn = deps.turnRegistry.current(identity);
         if (!currentTurn.surface_open) {
           if (!input.surface_id) {
-            throw new TerminalProtocolError('INVALID_ARGUMENT', 'Call terminal_surface exactly once before terminal_start in each assistant turn.');
+            throw new TerminalProtocolError('INVALID_ARGUMENT', 'This conversation has no Live Terminal surface yet. Call terminal_surface once, then use terminal_start directly in later turns.');
           }
           deps.turnRegistry.recover(identity, input.surface_id);
         } else if (input.surface_id && currentTurn.surface_id !== input.surface_id) {
@@ -656,7 +656,7 @@ function identityFromContext(ctx: ServerContext, mcpSessionId: string): RequestI
   };
 }
 
-async function resultFrom<T extends Record<string, unknown>>(operation: () => Promise<T>): Promise<CallToolResult> {
+async function resultFrom<T extends Record<string, unknown>>(operation: () => Promise<T> | T): Promise<CallToolResult> {
   try {
     return successResult(await operation());
   } catch (error) {

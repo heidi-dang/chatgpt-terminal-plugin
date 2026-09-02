@@ -474,18 +474,39 @@ describe('terminal MCP end-to-end', () => {
     await readUntil(client, replacementSessionId, replacementCursor, '__REPLACEMENT__');
 
     const turnClosed = structured(await client.callTool({ name: 'terminal_turn_close', arguments: {} }));
-    expect(turnClosed.surface_open).toBe(false);
+    expect(turnClosed.surface_open).toBe(true);
     expect(turnClosed.surface_active).toBe(false);
     expect(turnClosed.session_id).toBeNull();
+    expect(turnClosed.surface_id).toBe(surfaceId);
     await waitUntil(async () => {
       const replacementStatus = structured(await client.callTool({ name: 'terminal_status', arguments: { session_id: replacementSessionId } }));
       return replacementStatus.status === 'closed';
     });
-    const staleSurface = structured(await client.callTool({
+    const idleSurface = structured(await client.callTool({
       name: 'terminal_surface_status', arguments: { surface_id: surfaceId },
     }));
-    expect(staleSurface.surface_open).toBe(false);
-    expect(staleSurface.session_id).toBeNull();
+    expect(idleSurface.surface_open).toBe(true);
+    expect(idleSurface.surface_active).toBe(false);
+    expect(idleSurface.session_id).toBeNull();
+
+    // A later assistant turn starts directly: no second terminal_surface call, no second widget.
+    const laterTurn = structured(await client.callTool({
+      name: 'terminal_start',
+      arguments: { agent_id: identity.agentId, cwd: workspace, shell: 'bash', cols: 80, rows: 24 },
+    }));
+    const laterSessionId = stringField(laterTurn, 'session_id');
+    expect(laterTurn.surface_id).toBe(surfaceId);
+    expect(laterSessionId).not.toBe(replacementSessionId);
+    const reusedSurface = structured(await client.callTool({
+      name: 'terminal_surface_status', arguments: { surface_id: surfaceId, session_id: replacementSessionId },
+    }));
+    expect(reusedSurface.surface_open).toBe(true);
+    expect(reusedSurface.surface_active).toBe(true);
+    expect(reusedSurface.session_id).toBe(laterSessionId);
+    await client.callTool({ name: 'terminal_write', arguments: { session_id: laterSessionId, text: "printf '__LATER_TURN__\n'\r" } });
+    await readUntil(client, laterSessionId, numberField(laterTurn, 'cursor'), '__LATER_TURN__');
+    const finalTurnClose = structured(await client.callTool({ name: 'terminal_turn_close', arguments: {} }));
+    expect(finalTurnClose).toMatchObject({ surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null });
 
     await waitUntil(async () => {
       try {

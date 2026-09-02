@@ -20,17 +20,19 @@ type CloseTerminal = (identity: RequestIdentity, sessionId: string) => Promise<v
 export class TerminalTurnRegistry {
   private readonly records = new Map<string, TerminalTurnRecord>();
   private readonly activationTails = new Map<string, Promise<void>>();
-  private readonly closedSurfaces = new Set<string>();
 
   constructor(
     private readonly closeTerminal: CloseTerminal,
     private readonly leaseMs: number,
   ) {}
 
-  async begin(identity: RequestIdentity): Promise<TerminalTurnState> {
+  begin(identity: RequestIdentity): TerminalTurnState {
     const key = turnKey(identity);
-    const previous = this.records.get(key);
-    if (previous) await this.closeRecord(key, previous);
+    const existing = this.records.get(key);
+    if (existing) {
+      this.armLease(key, existing);
+      return stateFromRecord(existing);
+    }
 
     const record: TerminalTurnRecord = {
       identity: { ...identity },
@@ -45,7 +47,6 @@ export class TerminalTurnRegistry {
 
 
   recover(identity: RequestIdentity, surfaceId: string): TerminalTurnState {
-    if (this.closedSurfaces.has(surfaceId)) return closedState(surfaceId);
     const key = turnKey(identity);
     const current = this.records.get(key);
     if (current) {
@@ -117,7 +118,6 @@ export class TerminalTurnRegistry {
 
   status(identity: RequestIdentity, surfaceId: string): TerminalTurnState {
     const key = turnKey(identity);
-    if (this.closedSurfaces.has(surfaceId)) return closedState(surfaceId);
     const record = this.records.get(key);
     if (!record || record.surfaceId !== surfaceId) return closedState(surfaceId);
     this.armLease(key, record);
@@ -125,19 +125,13 @@ export class TerminalTurnRegistry {
   }
 
   async end(identity: RequestIdentity): Promise<TerminalTurnState> {
-    const key = turnKey(identity);
-    const record = this.records.get(key);
-    if (!record) return closedState(null);
-    const surfaceId = record.surfaceId;
-    await this.closeRecord(key, record);
-    return closedState(surfaceId);
+    return this.clearActive(identity);
   }
 
   dispose(): void {
     for (const record of this.records.values()) this.clearLease(record);
     this.records.clear();
     this.activationTails.clear();
-    this.closedSurfaces.clear();
   }
 
   private async withActivationLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
@@ -173,13 +167,6 @@ export class TerminalTurnRegistry {
     if (!record.leaseTimer) return;
     clearTimeout(record.leaseTimer);
     record.leaseTimer = undefined;
-  }
-
-  private async closeRecord(key: string, record: TerminalTurnRecord): Promise<void> {
-    if (this.records.get(key) === record) this.records.delete(key);
-    this.closedSurfaces.add(record.surfaceId);
-    this.clearLease(record);
-    if (record.sessionId) await this.safeClose(record.identity, record.sessionId);
   }
 
   private async safeClose(identity: RequestIdentity, sessionId: string): Promise<void> {
