@@ -306,11 +306,16 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
 
       let lastSequence = cursor;
       let replaying = true;
+      let backpressured = false;
       const pendingLive: typeof record.events = [];
       const sendEvent = (event: (typeof record.events)[number]) => {
-        if (event.sequence <= lastSequence || res.writableEnded || res.destroyed) return;
-        writeSse(res, event.sequence, event);
-        lastSequence = event.sequence;
+        if (event.sequence <= lastSequence || res.writableEnded || res.destroyed || backpressured) return;
+        const sent = writeTerminalSseEvents([event], lastSequence, (frame) => res.write(frame));
+        lastSequence = sent.lastSequence;
+        if (sent.backpressured) {
+          backpressured = true;
+          res.end();
+        }
       };
       const unsubscribe = gateway.subscribe(sessionId, (event) => {
         if (event.sequence <= lastSequence) return;
@@ -321,21 +326,24 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         sendEvent(event);
       });
 
-      // Batch replay events into a single write to reduce system calls during catch-up
-      const replayChunks: string[] = [];
+      const replayEvents: typeof record.events = [];
       for (let index = record.eventHead; index < record.events.length; index += 1) {
         const event = record.events[index];
-        if (event && event.sequence > cursor && event.sequence > lastSequence) {
-          replayChunks.push(formatSse(event.sequence, event));
-          lastSequence = event.sequence;
+        if (event && event.sequence > cursor) replayEvents.push(event);
+      }
+      if (replayEvents.length > 0 && !res.writableEnded && !res.destroyed) {
+        const replayResult = writeTerminalSseEvents(replayEvents, lastSequence, (frame) => res.write(frame));
+        lastSequence = replayResult.lastSequence;
+        if (replayResult.backpressured) {
+          backpressured = true;
+          res.end();
         }
       }
-      if (replayChunks.length > 0 && !res.writableEnded && !res.destroyed) {
-        res.write(replayChunks.join(''));
-      }
       replaying = false;
-      pendingLive.sort((left, right) => left.sequence - right.sequence);
-      for (const event of pendingLive) sendEvent(event);
+      if (!backpressured) {
+        pendingLive.sort((left, right) => left.sequence - right.sequence);
+        for (const event of pendingLive) sendEvent(event);
+      }
 
       const keepAlive = setInterval(() => {
         if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
@@ -463,8 +471,19 @@ function formatSse(sequence: number, event: TerminalEvent): string {
   return `id: ${sequence}\ndata: {"sequence":${sequence},"event_type":${JSON.stringify(event.event_type)},"data":${JSON.stringify(event.data)}}\n\n`;
 }
 
-function writeSse(res: Response, sequence: number, event: TerminalEvent): void {
-  res.write(formatSse(sequence, event));
+export function writeTerminalSseEvents(
+  events: readonly TerminalEvent[],
+  afterSequence: number,
+  write: (frame: string) => boolean,
+): { lastSequence: number; backpressured: boolean } {
+  let lastSequence = afterSequence;
+  for (const event of events) {
+    if (event.sequence <= lastSequence) continue;
+    const writable = write(formatSse(event.sequence, event));
+    lastSequence = event.sequence;
+    if (!writable) return { lastSequence, backpressured: true };
+  }
+  return { lastSequence, backpressured: false };
 }
 
 export interface RateLimitBucket {
