@@ -11,13 +11,13 @@
     "build": "pnpm -r --filter '!@terminal/terminal-ui' --workspace-concurrency=4 build",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings=0",
-    "test": "vitest run tests/unit",
+    "test": "vitest run ./tests/unit --exclude '.worktrees/**'",
     "pretest:e2e": "pnpm --filter @terminal/terminal-ui build",
-    "test:e2e": "vitest run tests/e2e",
+    "test:e2e": "vitest run ./tests/e2e --exclude '.worktrees/**'",
     "start:server": "pnpm --filter @terminal/mcp-server start",
     "start:agent": "pnpm --filter @terminal/local-agent start",
     "dev": "concurrently -k -n mcp,agent,ui 'pnpm --filter @terminal/mcp-server dev' 'pnpm --filter @terminal/local-agent dev' 'pnpm --filter @terminal/terminal-ui dev'",
-    "test:soak": "vitest run tests/soak --maxWorkers=1 --testTimeout=120000"
+    "test:soak": "vitest run ./tests/soak --exclude '.worktrees/**' --maxWorkers=1 --testTimeout=120000"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

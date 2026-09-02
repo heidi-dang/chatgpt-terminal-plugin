@@ -12,7 +12,7 @@ export default tseslint.config(
     files: ['tests/**/*.ts', 'tests/**/*.tsx'],
   })),
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'],
+    ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**', '.worktrees/**'],
   },
   {
     files: ['packages/**/*.ts', 'packages/**/*.tsx'],
