@@ -72,6 +72,8 @@ type StreamState = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'failed'
 const MCP_APPS_PROTOCOL_VERSION = '2026-01-26';
 const MAX_OUTPUT_CHARS = 600_000;
 const OUTPUT_TRIM_TARGET = 450_000;
+const MOBILE_MAX_OUTPUT_CHARS = 220_000;
+const MOBILE_OUTPUT_TRIM_TARGET = 160_000;
 const STREAM_REFRESH_MARGIN_MS = 15_000;
 const SSE_CONNECT_TIMEOUT_MS = 2_000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 15_000;
@@ -101,13 +103,14 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
       const initial = normalizeCompatCallToolResult(openAi.toolOutput);
       if (initial) this.ontoolresult?.(initial);
       if (typeof openAi.theme === 'string') this.onhostcontextchanged?.({ theme: openAi.theme });
+      this.startAutoResize();
       return;
     }
 
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
-        appInfo: { name: 'ChatGPT Terminal', version: '0.12.0' },
+        appInfo: { name: 'ChatGPT Terminal', version: '0.13.0' },
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
@@ -401,7 +404,7 @@ export function highlightTerminalText(doc: Document, input: string): DocumentFra
   return out;
 }
 
-export function appendRichTerminalText(container: HTMLElement, input: string, overflow = false): void {
+export function appendRichTerminalText(container: HTMLElement, input: string, overflow = false): number {
   const doc = container.ownerDocument, out = doc.createDocumentFragment(), colors = 'black red green yellow blue magenta cyan white'.split(' ');
   let at = 0, color = '', bold = false;
   const add = (text: string) => {
@@ -425,15 +428,16 @@ export function appendRichTerminalText(container: HTMLElement, input: string, ov
   add(input.slice(at));
   const text = out.textContent ?? '';
   const reduced = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  if (overflow && !reduced && text.length < 4096 && text.indexOf('\n') !== text.lastIndexOf('\n')) {
+  if (overflow && !reduced && !container.querySelector('.term-overflow') && text.length < 4096 && text.indexOf('\n') !== text.lastIndexOf('\n')) {
     const slot = doc.createElement('span');
     slot.className = 'term-overflow';
     slot.appendChild(out);
     container.appendChild(slot);
     setTimeout(() => slot.replaceWith(...slot.childNodes), 180);
-    return;
+    return text.length;
   }
   container.appendChild(out);
+  return text.length;
 }
 
 function parseTerminalEventValue(parsed: unknown): TerminalEvent {
@@ -518,6 +522,7 @@ export class TerminalViewer {
   private transportMode: 'sse' | 'mcp' = 'sse';
   private outputFrame: number | undefined;
   private outputQueue = '';
+  private renderedChars = 0;
   private hasLiveOutput = false;
   private surfaceId: string | undefined;
   private surfacePollTimer: number | undefined;
@@ -614,6 +619,7 @@ export class TerminalViewer {
         this.reconnectAttempt = 0;
         this.hasLiveOutput = false;
         this.output.textContent = '';
+        this.renderedChars = 0;
         if (next.initial_output) this.queueOutput(next.initial_output);
       }
       this.renderState();
@@ -948,23 +954,27 @@ export class TerminalViewer {
     const output = this.output;
     if (!this.hasLiveOutput) {
       output.textContent = '';
+      this.renderedChars = 0;
       this.hasLiveOutput = true;
     }
     const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 24;
-    appendRichTerminalText(output, this.outputQueue, true);
+    this.renderedChars += appendRichTerminalText(output, this.outputQueue, true);
     this.outputQueue = '';
     this.trimOutput();
     if (follow) output.scrollTop = output.scrollHeight;
   }
 
   private trimOutput(): void {
+    const narrowViewport = this.doc.defaultView?.matchMedia?.('(max-width: 560px)').matches ?? false;
+    const maxOutputChars = narrowViewport ? MOBILE_MAX_OUTPUT_CHARS : MAX_OUTPUT_CHARS;
+    if (this.renderedChars <= maxOutputChars) return;
     const text = this.output.textContent ?? '';
-    if (text.length <= MAX_OUTPUT_CHARS) return;
-    let tail = text.slice(-OUTPUT_TRIM_TARGET);
+    const trimTarget = narrowViewport ? MOBILE_OUTPUT_TRIM_TARGET : OUTPUT_TRIM_TARGET;
+    let tail = text.slice(-trimTarget);
     const newline = tail.indexOf('\n');
     if (newline >= 0) tail = tail.slice(newline + 1);
     this.output.textContent = '';
-    appendRichTerminalText(this.output, `[Older terminal output trimmed for mobile performance]\n${tail}`);
+    this.renderedChars = appendRichTerminalText(this.output, `[Older terminal output trimmed for mobile performance]\n${tail}`);
   }
 
   private renderState(): void {

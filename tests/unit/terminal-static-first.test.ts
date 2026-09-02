@@ -34,13 +34,20 @@ describe('terminal UI static-first contract', () => {
     }
   });
 
-  it('allows the narrow-screen terminal to shrink with a short mobile viewport', async () => {
+  it('keeps the footer inside the card and gives mobile output a bounded scroll viewport', async () => {
     const css = await readFile(join(root, 'packages/terminal-ui/src/styles.css'), 'utf8');
-    expect(css).toContain('grid-template-rows: auto minmax(0, 68vh) auto;');
-    expect(css).toContain('min-height: min(560px, 82vh);');
-    expect(css).toContain('.terminal-frame { min-height: 0; padding: 9px 8px 7px; }');
-    expect(css).toContain('.terminal-output { min-height: 0; font-size: 11.5px; line-height: 1.32; }');
-    expect(css).not.toContain('grid-template-rows: auto minmax(430px, 68vh) auto;');
+    expect(css).toContain('grid-template-rows: auto minmax(0, 1fr) auto;');
+    expect(css).toContain('height:clamp(340px,62dvh,520px);');
+    expect(css).toContain('.terminal-frame { min-height:0;padding:8px 7px 7px 9px; }');
+    expect(css).toContain('.terminal-output { min-height:0;padding-bottom:10px;font-size:11.25px;line-height:1.35; }');
+    expect(css).toContain('overscroll-behavior:contain;');
+    expect(css).not.toContain('minmax(0, 68vh)');
+    expect(css).not.toContain('safe-area-inset-bottom');
+  });
+
+  it('reports widget size changes in the ChatGPT openai compatibility path', async () => {
+    const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
+    expect(runtime).toMatch(/if \(openAi\) \{[\s\S]*?this\.startAutoResize\(\);[\s\S]*?return;/);
   });
 
   it('boots the app runtime whenever the static terminal shell exists', async () => {
@@ -64,9 +71,9 @@ describe('terminal UI static-first contract', () => {
     expect(manifest.scripts?.build).toContain("--filter '!@terminal/terminal-ui'");
   });
 
-  it('uses a fresh v12 MCP App resource identity after the iOS bootstrap contract changes', async () => {
+  it('uses a fresh v13 MCP App resource identity after the terminal layout contract changes', async () => {
     const mcp = await readFile(join(root, 'packages/mcp-server/src/mcp.ts'), 'utf8');
-    expect(mcp).toContain("ui://terminal/v12.html");
-    expect(mcp).toContain("version: '0.12.0'");
+    expect(mcp).toContain("ui://terminal/v13.html");
+    expect(mcp).toContain("version: '0.13.0'");
   });
 });

@@ -164,8 +164,8 @@ describe('terminal MCP end-to-end', () => {
     const surfaceTool = listed.tools.find((tool) => tool.name === 'terminal_surface');
     const surfaceMeta = surfaceTool?._meta as Record<string, unknown> | undefined;
     const surfaceUi = surfaceMeta?.ui as Record<string, unknown> | undefined;
-    expect(surfaceUi?.resourceUri).toBe('ui://terminal/v12.html');
-    expect(surfaceMeta?.['openai/outputTemplate']).toBe('ui://terminal/v12.html');
+    expect(surfaceUi?.resourceUri).toBe('ui://terminal/v13.html');
+    expect(surfaceMeta?.['openai/outputTemplate']).toBe('ui://terminal/v13.html');
 
     const startTool = listed.tools.find((tool) => tool.name === 'terminal_start');
     const startMeta = startTool?._meta as Record<string, unknown> | undefined;
@@ -195,7 +195,7 @@ describe('terminal MCP end-to-end', () => {
       expect(toolMeta?.['openai/widgetAccessible']).toBe(true);
     }
 
-    const resourceResult = await client.readResource({ uri: 'ui://terminal/v12.html' });
+    const resourceResult = await client.readResource({ uri: 'ui://terminal/v13.html' });
     const uiResource = resourceResult.contents[0] as {
       mimeType?: string;
       text?: string;
