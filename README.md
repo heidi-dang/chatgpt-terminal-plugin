@@ -226,6 +226,7 @@ For the complete authentication, reverse-proxy, enrollment, smoke-test, upgrade,
 | `terminal_session_transcript` | Read a bounded structured chronological transcript. |
 | `terminal_close` | Terminate and dispose the PTY. |
 | `terminal_turn_close` | Tear down the active PTY and Terminal UI at end of turn. |
+| `terminal_continue_task` | Yield back to the system to maintain execution in a long-running task loop. |
 
 ### Files, code, and language intelligence
 
