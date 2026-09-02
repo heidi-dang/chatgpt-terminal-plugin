@@ -1,5 +1,6 @@
 # Install as a user service for the OS account whose workspaces/tools ChatGPT may access.
-# Suggested repository install path: ~/.local/share/chatgpt-terminal-plugin
+# Stable release pointer managed by scripts/install-local-agent-service.sh:
+# ~/.local/share/chatgpt-terminal-plugin/current
 # Suggested environment path: ~/.config/chatgpt-terminal-plugin/agent.env
 [Unit]
 Description=ChatGPT Terminal local agent
@@ -8,7 +9,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin
+WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin/current
 EnvironmentFile=%h/.config/chatgpt-terminal-plugin/agent.env
 # The enrollment token must remain in the EnvironmentFile (mode 0600), never in Environment= lines.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin

@@ -136,6 +136,8 @@ Use `deploy/systemd/chatgpt-terminal-mcp.service.example` and `deploy/server-env
 
 The local computer requires the same built repository or a packaged agent distribution. `deploy/local-agent-environment.example` and `deploy/systemd/chatgpt-terminal-agent.service.example` provide a user-service baseline. The user service runs the built Node entrypoint directly; `pnpm` is needed to install/build the release but is not a runtime service dependency. Ensure Node.js 22+ is on the systemd user service `PATH`. Run the agent as the OS user whose tools/workspaces it is intentionally allowed to access; do not run it as root.
 
+Do not pin the user service directly to a disposable/version-stamped checkout. After the desired checkout has passed `./install.sh --verify`, install or update the user service with `./scripts/install-local-agent-service.sh`. The updater atomically repoints `~/.local/share/chatgpt-terminal-plugin/current`, installs the stable user-service unit, reloads systemd, and restarts only `chatgpt-terminal-agent.service`. Use `--no-restart` to stage the pointer/unit and restart later between Terminal turns. Re-running the updater from a previously verified checkout provides the matching agent-code rollback path without editing the systemd unit.
+
 Configure:
 
 ```text
