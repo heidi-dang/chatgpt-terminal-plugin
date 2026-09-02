@@ -115,7 +115,9 @@ const MAX_SEMANTIC_OUTPUT_BYTES = 64 * 1024;
 const MAX_PREVIEWS_PER_WORKSPACE = 64;
 const DEFAULT_PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_PROJECT_FILES = 5_000;
+const MAX_PROJECT_PRIME_ENTRIES = 2_000;
 const SKIPPED_PROJECT_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.venv', 'venv', 'target', 'vendor']);
+const SOURCE_LANGUAGE_IDS = new Set(['typescript', 'typescriptreact', 'javascript', 'javascriptreact', 'python', 'go', 'rust', 'c', 'cpp', 'java', 'kotlin', 'shellscript']);
 
 const CLIENT_CAPABILITIES = {
   workspace: {
@@ -215,6 +217,7 @@ export class SemanticLspManager {
 
   async findSymbols(userId: string, semanticId: string, query: string): Promise<SemanticWorkspaceSymbolsOutput> {
     const workspace = this.requireOwned(userId, semanticId);
+    await this.primeWorkspaceForSymbols(workspace);
     const response = await this.lsp.request(userId, {
       lsp_id: workspace.lspId,
       method: 'workspace/symbol',
@@ -529,6 +532,46 @@ export class SemanticLspManager {
     return matches[0].symbol;
   }
 
+  private async primeWorkspaceForSymbols(workspace: SemanticWorkspace): Promise<void> {
+    if (workspace.documents.size > 0) return;
+
+    const preferred = preferredLanguageIdsForServer(workspace.serverId);
+    const queue = [workspace.root];
+    let entriesSeen = 0;
+    while (queue.length > 0 && entriesSeen < MAX_PROJECT_PRIME_ENTRIES) {
+      const current = queue.shift()!;
+      let entries;
+      try {
+        entries = (await readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        continue;
+      }
+
+      const fallbackFiles: string[] = [];
+      for (const entry of entries) {
+        if (entriesSeen >= MAX_PROJECT_PRIME_ENTRIES) break;
+        entriesSeen += 1;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_PROJECT_DIRS.has(entry.name)) queue.push(join(current, entry.name));
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const absolutePath = join(current, entry.name);
+        const languageId = languageIdForPath(absolutePath);
+        if (preferred.has(languageId)) {
+          await this.syncDocument(workspace, absolutePath);
+          return;
+        }
+        if (SOURCE_LANGUAGE_IDS.has(languageId)) fallbackFiles.push(absolutePath);
+      }
+
+      if (preferred.size === 0 && fallbackFiles[0]) {
+        await this.syncDocument(workspace, fallbackFiles[0]);
+        return;
+      }
+    }
+  }
+
   private async syncDocument(workspace: SemanticWorkspace, filePath: string): Promise<OpenDocument> {
     const absolutePath = await this.resolveWorkspaceFile(workspace, filePath);
     const content = await readFile(absolutePath, 'utf8');
@@ -797,6 +840,21 @@ function revisionDigest(entries: Array<[string, string]>): string {
 
 function digestText(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function preferredLanguageIdsForServer(serverId: string): ReadonlySet<string> {
+  const normalized = serverId.toLowerCase();
+  if (normalized.includes('typescript') || normalized.includes('tsserver')) {
+    return new Set(['typescript', 'typescriptreact', 'javascript', 'javascriptreact']);
+  }
+  if (normalized.includes('python') || normalized.includes('pyright') || normalized.includes('pylsp')) return new Set(['python']);
+  if (normalized.includes('gopls') || normalized === 'go') return new Set(['go']);
+  if (normalized.includes('rust')) return new Set(['rust']);
+  if (normalized.includes('clang') || normalized.includes('ccls')) return new Set(['c', 'cpp']);
+  if (normalized.includes('java')) return new Set(['java']);
+  if (normalized.includes('kotlin')) return new Set(['kotlin']);
+  if (normalized.includes('bash') || normalized.includes('shell')) return new Set(['shellscript']);
+  return new Set();
 }
 
 function languageIdForPath(filePath: string): string {

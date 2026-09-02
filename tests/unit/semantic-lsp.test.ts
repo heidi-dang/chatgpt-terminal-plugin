@@ -89,6 +89,11 @@ describe('Serena-style semantic LSP layer', () => {
     await expect(fixture.semantic.findSymbols('user-a', opened.semantic_id, 'alpha')).resolves.toMatchObject({
       symbols: [expect.objectContaining({ name: 'alpha' })],
     });
+    const symbolLog = await readLog(fixture.logPath);
+    const didOpenIndex = symbolLog.findIndex((entry) => entry.method === 'textDocument/didOpen');
+    const workspaceSymbolIndex = symbolLog.findIndex((entry) => entry.method === 'workspace/symbol');
+    expect(didOpenIndex).toBeGreaterThanOrEqual(0);
+    expect(didOpenIndex).toBeLessThan(workspaceSymbolIndex);
     await expect(fixture.semantic.references('user-a', opened.semantic_id, 'sample.ts', 0, 16, true)).resolves.toMatchObject({
       locations: [expect.objectContaining({ uri: expect.stringContaining('/sample.ts') })],
     });
