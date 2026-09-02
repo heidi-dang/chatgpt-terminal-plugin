@@ -153,9 +153,13 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   app.post(config.agentEnrollmentPath, enrollmentRateLimiter, async (req, res) => {
+    const parsed = deviceEnrollmentRequestSchema.safeParse(req.body as unknown);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_device_enrollment' });
+      return;
+    }
     try {
-      const enrollment = deviceEnrollmentRequestSchema.parse(req.body as unknown);
-      const enrolled = await deviceRegistry.enroll(enrollment, req.get('x-terminal-enrollment-token') ?? undefined);
+      const enrolled = await deviceRegistry.enroll(parsed.data, req.get('x-terminal-enrollment-token') ?? undefined);
       const output = deviceEnrollmentOutputSchema.parse({
         device_id: enrolled.record.device_id,
         agent_id: enrolled.record.agent_id,
@@ -169,7 +173,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         res.status(error.code === 'PERMISSION_DENIED' ? 403 : 400).json(error.toPayload());
         return;
       }
-      res.status(400).json({ error: 'invalid_device_enrollment' });
+      console.error(JSON.stringify({ level: 'error', event: 'device.enrollment_persist_failed', error: errorMessage(error) }));
+      res.status(503).json({ error: 'device_registry_unavailable' });
     }
   });
 
@@ -190,7 +195,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         res.status(error.code === 'PERMISSION_DENIED' ? 403 : 400).json(error.toPayload());
         return;
       }
-      res.status(400).json({ error: 'invalid_device_revocation' });
+      console.error(JSON.stringify({ level: 'error', event: 'device.revocation_persist_failed', error: errorMessage(error) }));
+      res.status(503).json({ error: 'device_registry_unavailable' });
     }
   });
 

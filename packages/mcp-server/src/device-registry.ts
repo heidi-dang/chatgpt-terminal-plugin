@@ -80,7 +80,11 @@ export class DeviceRegistry {
 
   private async upsertValidated(raw: DeviceEnrollmentRequest): Promise<{ record: DeviceRecord; status: 'enrolled' | 'rotated' }> {
     const input = deviceEnrollmentRequestSchema.parse(raw);
-    createPublicKey(input.public_key);
+    try {
+      createPublicKey(input.public_key);
+    } catch {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', 'Device public key is invalid.');
+    }
     const existing = this.devices.get(input.device_id);
     if (existing && existing.owner_id !== input.owner_id) {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Device ownership cannot be changed by enrollment.');
