@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createTerminalHttpRuntime, pruneRateLimitBuckets, type RateLimitBucket } from '../../packages/mcp-server/src/http.js';
+import { createTerminalHttpRuntime, pruneRateLimitBuckets, writeTerminalSseEvents, type RateLimitBucket } from '../../packages/mcp-server/src/http.js';
 import { loadConfig } from '../../packages/mcp-server/src/config.js';
 
 
@@ -61,5 +61,37 @@ describe('HTTP bounded-memory helpers', () => {
     pruneRateLimitBuckets(buckets, 102);
 
     expect([...buckets.keys()]).toEqual(['current-a', 'future-defensive']);
+  });
+
+  it('stops SSE writes at Node backpressure and resumes from the exact next sequence', () => {
+    const now = new Date().toISOString();
+    const events = [5, 6, 7].map((sequence) => ({
+      event_id: `event-${sequence}`,
+      session_id: 'session-stream',
+      sequence,
+      timestamp: now,
+      actor: 'agent' as const,
+      event_type: 'terminal.stdout' as const,
+      data: { text: `line-${sequence}\n` },
+    }));
+    const firstFrames: string[] = [];
+    const first = writeTerminalSseEvents(events, 4, (frame) => {
+      firstFrames.push(frame);
+      return firstFrames.length < 2;
+    });
+
+    expect(first).toEqual({ lastSequence: 6, backpressured: true });
+    expect(firstFrames).toHaveLength(2);
+    expect(firstFrames[0]).toContain('id: 5');
+    expect(firstFrames[1]).toContain('id: 6');
+
+    const resumedFrames: string[] = [];
+    const resumed = writeTerminalSseEvents(events, first.lastSequence, (frame) => {
+      resumedFrames.push(frame);
+      return true;
+    });
+    expect(resumed).toEqual({ lastSequence: 7, backpressured: false });
+    expect(resumedFrames).toHaveLength(1);
+    expect(resumedFrames[0]).toContain('id: 7');
   });
 });
