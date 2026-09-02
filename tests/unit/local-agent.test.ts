@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm, symlink, writeFile as writeTextFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -215,6 +216,46 @@ describe('LocalTerminalAgent', () => {
     expect(() => reloaded.start('user-test', {
       agent_id: 'agent-dynamic-roots-reloaded', cwd: addedRoot, shell: 'bash', cols: 80, rows: 24,
     }, 'developer')).toThrowError(expect.objectContaining({ code: 'PATH_NOT_ALLOWED' }));
+  });
+
+  it('restores bounded session history after restart without treating the dead PTY as writable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-session-state-root-'));
+    const stateDir = await mkdtemp(join(tmpdir(), 'terminal-session-state-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    cleanup.push(() => rm(stateDir, { recursive: true, force: true }));
+
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-session-state', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      stateDir,
+    });
+    cleanup.push(() => agent.shutdown());
+    const started = agent.start('user-test', {
+      agent_id: 'agent-session-state', cwd: root, shell: 'bash', cols: 80, rows: 24,
+      command: `printf '__PERSISTED_REPLAY__\\n'`,
+    }, 'developer');
+    await waitForText(agent, started.session.session_id, 0, '__PERSISTED_REPLAY__');
+    await waitUntil(() => readdirSync(stateDir).some((name) => {
+      if (!name.endsWith('.json')) return false;
+      return readFileSync(join(stateDir, name), 'utf8').includes('__PERSISTED_REPLAY__');
+    }));
+
+    const restored = new LocalTerminalAgent({
+      agentId: 'agent-session-state', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
+      stateDir,
+    });
+    cleanup.push(() => restored.shutdown());
+    const restoredSnapshot = restored.listSessionSnapshots().find((snapshot) => snapshot.session.session_id === started.session.session_id);
+    expect(restoredSnapshot?.session.status).toBe('closed');
+    const replay = restored.readEvents(started.session.session_id, 0, 256 * 1024);
+    expect(replay.events.some((event) => event.event_type === 'terminal.stdout' && typeof event.data.text === 'string' && event.data.text.includes('__PERSISTED_REPLAY__'))).toBe(true);
+    expect(replay.events.at(-1)).toMatchObject({
+      event_type: 'session.closed',
+      actor: 'system',
+      data: { reason: 'agent_restart', exit_code: null },
+    });
+    expect(() => restored.write(started.session.session_id, 'echo unsafe\r')).toThrowError(
+      expect.objectContaining({ code: 'SESSION_CLOSED' }),
+    );
   });
 
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {

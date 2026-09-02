@@ -69,6 +69,7 @@ const agent = new LocalTerminalAgent({
   closedSessionRetentionMs: intEnv('TERMINAL_CLOSED_SESSION_RETENTION_MS', 15 * 60_000),
   sweepIntervalMs: intEnv('TERMINAL_SWEEP_INTERVAL_MS', 30_000),
   workspaceRootsStatePath: process.env.AGENT_WORKSPACE_ROOTS_STATE_PATH ?? join(dirname(identityPath), 'workspace-roots.json'),
+  stateDir: process.env.AGENT_SESSION_STATE_DIR ?? join(dirname(identityPath), 'sessions'),
 });
 
 const client = new AgentGatewayClient(agent, {
