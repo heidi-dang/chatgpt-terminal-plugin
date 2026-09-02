@@ -12,6 +12,7 @@ import {
 } from '@terminal/protocol';
 import type { TerminalAgentApi } from './index.js';
 import type { DeviceIdentity } from './device-identity.js';
+import { parseGatewayUrl } from './transport-security.js';
 
 export interface GatewayClientOptions {
   url: string;
@@ -44,7 +45,9 @@ export class AgentGatewayClient {
   constructor(
     private readonly agent: TerminalAgentApi,
     private readonly options: GatewayClientOptions,
-  ) {}
+  ) {
+    parseGatewayUrl(options.url);
+  }
   async start(): Promise<void> {
     this.stopped = false;
     this.unsubscribeEvent ??= this.agent.onEvent((event) => {

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayAuthChallengeSchema, gatewayChallengePayload } from '../../packages/protocol/src/index.js';
-import { DeviceIdentity } from '../../packages/local-agent/src/device-identity.js';
+import { DeviceIdentity, enrollDevice } from '../../packages/local-agent/src/device-identity.js';
 import { DeviceRegistry } from '../../packages/mcp-server/src/device-registry.js';
 import { AgentGateway } from '../../packages/mcp-server/src/gateway.js';
 
@@ -15,6 +15,21 @@ afterEach(async () => {
 });
 
 describe('device identity and enrollment', () => {
+  it('rejects plaintext remote enrollment before sending the bootstrap token', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-enrollment-transport-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    cleanup.push(() => fetchSpy.mockRestore());
+
+    await expect(enrollDevice({
+      identity,
+      enrollmentUrl: 'http://example.com/agent/enroll',
+      enrollmentToken: 'must-not-cross-plaintext',
+      ownerId: 'owner-a',
+    })).rejects.toThrow(/https.*loopback/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
   it('persists owner-only Ed25519 identity, verifies proof, rotates key, and revokes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-device-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

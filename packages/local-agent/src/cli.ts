@@ -4,6 +4,7 @@ import { LocalTerminalAgent } from './index.js';
 import { AgentGatewayClient } from './gateway-client.js';
 import { DeviceIdentity, enrollDevice } from './device-identity.js';
 import { executionProfileSchema, lspServerDefinitionsSchema } from '@terminal/protocol';
+import { parseGatewayUrl } from './transport-security.js';
 
 function csv(value: string | undefined): string[] {
   return value?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
@@ -19,10 +20,7 @@ function intEnv(name: string, fallback: number): number {
 
 const gatewayUrl = process.env.AGENT_GATEWAY_URL;
 if (!gatewayUrl) throw new Error('AGENT_GATEWAY_URL is required.');
-const parsedGatewayUrl = new URL(gatewayUrl);
-if (parsedGatewayUrl.protocol !== 'ws:' && parsedGatewayUrl.protocol !== 'wss:') {
-  throw new Error('AGENT_GATEWAY_URL must use ws:// or wss://.');
-}
+const parsedGatewayUrl = parseGatewayUrl(gatewayUrl);
 
 const roots = csv(process.env.ALLOWED_WORKSPACE_ROOTS);
 const shells = csv(process.env.AGENT_SHELLS);

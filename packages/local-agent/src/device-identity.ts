@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { deviceEnrollmentOutputSchema, gatewayChallengePayload, type GatewayAuthChallenge } from '@terminal/protocol';
+import { parseEnrollmentUrl } from './transport-security.js';
 
 const identitySchema = z.object({
   version: z.literal(1),
@@ -67,7 +68,8 @@ export async function enrollDevice(options: {
   ownerId: string;
   displayName?: string;
 }): Promise<'enrolled' | 'rotated'> {
-  const response = await fetch(options.enrollmentUrl, {
+  const enrollmentUrl = parseEnrollmentUrl(options.enrollmentUrl);
+  const response = await fetch(enrollmentUrl, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',

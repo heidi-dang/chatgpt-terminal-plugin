@@ -20,6 +20,23 @@ class FakeSocket extends EventEmitter {
 }
 
 describe('AgentGatewayClient lifecycle', () => {
+  it('rejects plaintext WebSocket gateways outside loopback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-transport-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-transport', allowedWorkspaceRoots: [root], executionProfile: 'owner-full', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+
+    expect(() => new AgentGatewayClient(agent, {
+      url: 'ws://example.com/agent', identity: {} as never, heartbeatMs: 1_000, reconnectMaxMs: 1_000,
+      outboundHighWaterBytes: 1024 * 1024,
+    })).toThrow(/wss.*loopback/i);
+    expect(() => new AgentGatewayClient(agent, {
+      url: 'ws://127.0.0.1:8787/agent', identity: {} as never, heartbeatMs: 1_000, reconnectMaxMs: 1_000,
+      outboundHighWaterBytes: 1024 * 1024,
+    })).not.toThrow();
+  });
   it('keeps process features available across a transient gateway disconnect', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-reconnect-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
