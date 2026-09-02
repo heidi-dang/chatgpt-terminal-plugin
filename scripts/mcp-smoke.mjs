@@ -4,8 +4,9 @@ const url = process.env.TERMINAL_SMOKE_URL;
 const token = process.env.TERMINAL_SMOKE_TOKEN;
 const accessClientId = process.env.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID;
 const accessClientSecret = process.env.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET;
-if (!url || (!token && !(accessClientId && accessClientSecret))) {
-  console.error('TERMINAL_SMOKE_URL plus either TERMINAL_SMOKE_TOKEN or both Cloudflare Access service credentials are required.');
+const localDeploymentSmoke = process.env.TERMINAL_SMOKE_LOCAL === '1';
+if (!url || (!localDeploymentSmoke && !token && !(accessClientId && accessClientSecret))) {
+  console.error('TERMINAL_SMOKE_URL plus local deployment-smoke mode, a bearer token, or Cloudflare Access service credentials are required.');
   process.exit(64);
 }
 if ((accessClientId && !accessClientSecret) || (!accessClientId && accessClientSecret)) {
@@ -21,6 +22,7 @@ const baseHeaders = {
     'cf-access-client-id': accessClientId,
     'cf-access-client-secret': accessClientSecret,
   } : {}),
+  ...(localDeploymentSmoke ? { 'x-terminal-deployment-smoke': '1' } : {}),
 };
 
 const initialize = await post({

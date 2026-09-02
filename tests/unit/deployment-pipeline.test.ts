@@ -86,11 +86,13 @@ async function createFixture() {
   const deployRoot = join(root, 'deploy');
   const fakeBin = join(root, 'bin');
   const sudoLog = join(root, 'sudo.log');
+  const serverEnv = join(root, 'server.env');
   await mkdir(join(deployRoot, 'releases'), { recursive: true });
   await mkdir(fakeBin, { recursive: true });
-  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nif [[ "$1 $2 $3 $4" == "systemctl show -p ActiveState" ]]; then printf 'active\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p SubState" ]]; then printf 'running\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p MainPID" ]]; then printf '1234\\n'; exit 0; fi\nexit 0\n`);
+  await writeFile(serverEnv, 'MCP_HOST=127.0.0.1\nMCP_PORT=18791\n');
+  await writeExecutable(join(fakeBin, 'sudo'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"\nif [[ "$1 $2 $3 $4" == "systemctl show -p ActiveState" ]]; then printf 'active\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p SubState" ]]; then printf 'running\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p MainPID" ]]; then printf '1234\\n'; exit 0; fi\nif [[ "$1 $2 $3 $4" == "systemctl show -p EnvironmentFiles" ]]; then printf '%s (ignore_errors=no)\\n' "$FAKE_SERVER_ENV"; exit 0; fi\nif [[ "$1" == "awk" ]]; then shift; exec awk "$@"; fi\nexit 0\n`);
   await writeExecutable(join(fakeBin, 'curl'), `#!/usr/bin/env bash\n[[ "${'${FAKE_CURL_FAIL:-0}'}" == 1 ]] && exit 1\nexit 0\n`);
-  return { root, deployRoot, fakeBin, sudoLog };
+  return { root, deployRoot, fakeBin, sudoLog, serverEnv };
 }
 
 async function makeArtifact(root: string, revision: string) {
@@ -99,6 +101,7 @@ async function makeArtifact(root: string, revision: string) {
   await mkdir(join(stage, 'packages/local-agent/dist'), { recursive: true });
   await mkdir(join(stage, 'packages/local-agent/node_modules/node-pty'), { recursive: true });
   await mkdir(join(stage, 'packages/terminal-ui/dist'), { recursive: true });
+  await mkdir(join(stage, 'scripts'), { recursive: true });
   await writeFile(join(stage, 'REVISION'), `${revision}\n`);
   await writeFile(join(stage, 'packages/mcp-server/dist/index.js'), 'export {};\n');
   await writeFile(join(stage, 'packages/mcp-server/dist/cli.js'), 'export {};\n');
@@ -107,6 +110,7 @@ async function makeArtifact(root: string, revision: string) {
   await writeFile(join(stage, 'packages/local-agent/node_modules/node-pty/index.js'), 'export {};\n');
   await writeFile(join(stage, 'NATIVE_RUNTIME_VERIFIED'), `node_major=${process.versions.node.split('.')[0]}\n`);
   await writeFile(join(stage, 'packages/terminal-ui/dist/index.html'), '<!doctype html><title>Terminal</title>\n');
+  await writeFile(join(stage, 'scripts/mcp-smoke.mjs'), "console.log('mcp_smoke=ok tool=terminal_list_agents agent_count=0');\n");
   const archive = join(root, `${revision}.tar.gz`);
   await execFileAsync('tar', ['-C', stage, '-czf', archive, '.']);
   const { stdout } = await execFileAsync('sha256sum', [archive]);
@@ -128,6 +132,7 @@ async function runDeploy(
       ...extraEnv,
       PATH: `${fixture.fakeBin}:${process.env.PATH ?? ''}`,
       FAKE_SUDO_LOG: fixture.sudoLog,
+      FAKE_SERVER_ENV: fixture.serverEnv,
       TERMINAL_DEPLOY_ROOT: fixture.deployRoot,
       TERMINAL_SERVICE_NAME: 'terminal-test.service',
       TERMINAL_AGENT_SERVICE_NAME: 'terminal-agent-test.service',

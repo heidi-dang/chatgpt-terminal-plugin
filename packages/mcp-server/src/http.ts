@@ -31,9 +31,12 @@ export interface TerminalHttpRuntime {
 }
 
 export async function createTerminalHttpRuntime(config: ServerConfig): Promise<TerminalHttpRuntime> {
+  const allowedHosts = config.nodeEnv === 'production'
+    ? [...new Set([...config.allowedHosts, '127.0.0.1', 'localhost', '::1'])]
+    : config.allowedHosts;
   const app = createMcpExpressApp({
     host: config.host,
-    ...(config.allowedHosts.length > 0 ? { allowedHosts: config.allowedHosts } : {}),
+    ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
     ...(config.allowedOrigins.length > 0 ? { allowedOrigins: config.allowedOrigins } : {}),
     jsonLimit: '512kb',
   });
@@ -212,13 +215,32 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   }
 
   const resourceMetadataUrl = oauthMetadata ? getOAuthProtectedResourceMetadataUrl(config.publicUrl) : undefined;
-  const authMiddleware = config.authMode === 'cloudflare-access'
+  const publicAuthMiddleware = config.authMode === 'cloudflare-access'
     ? createCloudflareAccessAuthMiddleware(verifier, config.requiredScopes)
     : requireBearerAuth({
         verifier,
         requiredScopes: config.requiredScopes,
         ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
       });
+  const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+    if (config.nodeEnv === 'production' && isDirectLoopbackDeploymentSmoke(req)) {
+      req.auth = {
+        token: 'deployment-smoke',
+        clientId: 'deployment-smoke',
+        scopes: [...config.requiredScopes],
+        expiresAt: Math.floor(Date.now() / 1000) + 60,
+        resource: config.publicUrl,
+        extra: {
+          user_id: 'deployment-smoke',
+          auth_mode: 'deployment-smoke',
+          execution_profile: 'read-only',
+        },
+      };
+      next();
+      return;
+    }
+    publicAuthMiddleware(req, res, next);
+  };
 
   const mcpHandler = async (req: Request, res: Response) => {
     try {
@@ -450,6 +472,26 @@ function createCloudflareAccessAuthMiddleware(
       res.status(401).json({ error: 'invalid_cloudflare_access_assertion' });
     });
   };
+}
+
+function isDirectLoopbackDeploymentSmoke(req: Request): boolean {
+  if (req.get('x-terminal-deployment-smoke') !== '1') return false;
+  const remoteAddress = req.socket.remoteAddress ?? '';
+  const loopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+  if (!loopback) return false;
+
+  const hostHeader = req.get('host');
+  if (!hostHeader) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '[::1]') return false;
+
+  const proxyHeaders = ['cf-connecting-ip', 'cf-ray', 'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto'];
+  return proxyHeaders.every((name) => !req.get(name));
 }
 
 function requestPrincipal(req: Request): { userId: string; clientId: string } {

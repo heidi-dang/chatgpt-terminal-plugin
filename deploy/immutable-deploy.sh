@@ -93,6 +93,21 @@ if [[ -n "$agent_service" ]]; then
   [[ "$(sudo systemctl show -p SubState --value "$agent_service")" == "running" ]] || { echo "local-agent service did not enter running state" >&2; exit 1; }
   [[ "$(sudo systemctl show -p MainPID --value "$agent_service")" != "0" ]] || { echo "local-agent service has no running main process" >&2; exit 1; }
 fi
+
+server_env_file=$(sudo systemctl show -p EnvironmentFiles --value "$TERMINAL_SERVICE_NAME" | awk 'NR == 1 { print $1 }')
+[[ -n "$server_env_file" ]] || { echo "MCP service has no EnvironmentFile for deployment smoke discovery" >&2; exit 1; }
+sudo test -r "$server_env_file" || { echo "MCP service EnvironmentFile is not readable" >&2; exit 1; }
+mcp_host=$(sudo awk -F= '$1 == "MCP_HOST" { print substr($0, index($0, "=") + 1); exit }' "$server_env_file")
+mcp_port=$(sudo awk -F= '$1 == "MCP_PORT" { print substr($0, index($0, "=") + 1); exit }' "$server_env_file")
+case "$mcp_host" in
+  127.0.0.1|localhost) smoke_host=$mcp_host ;;
+  ::1) smoke_host='[::1]' ;;
+  *) echo "deployment smoke requires MCP_HOST to be loopback" >&2; exit 1 ;;
+esac
+[[ "$mcp_port" =~ ^[0-9]+$ ]] || { echo "MCP_PORT is missing or invalid for deployment smoke" >&2; exit 1; }
+[[ -f "$release_dir/scripts/mcp-smoke.mjs" ]] || { echo "deployment smoke client missing from release" >&2; exit 1; }
+TERMINAL_SMOKE_URL="http://$smoke_host:$mcp_port/mcp" TERMINAL_SMOKE_LOCAL=1 node "$release_dir/scripts/mcp-smoke.mjs"
+
 switched=0
 trap - ERR
 printf 'deployed_revision=%s\n' "$revision"

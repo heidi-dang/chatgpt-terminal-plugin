@@ -29,10 +29,11 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/release/packages"
 pnpm --config.ignore-scripts=true --filter @terminal/mcp-server deploy --prod --legacy --reporter=append-only "$stage/release/packages/mcp-server"
 HUSKY=0 pnpm --filter @terminal/local-agent deploy --prod --legacy --reporter=append-only "$stage/release/packages/local-agent"
-mkdir -p "$stage/release/packages/terminal-ui/dist" "$stage/release/packages/terminal-ui/src"
+mkdir -p "$stage/release/packages/terminal-ui/dist" "$stage/release/packages/terminal-ui/src" "$stage/release/scripts"
 cp -p packages/terminal-ui/dist/index.html "$stage/release/packages/terminal-ui/dist/index.html"
 cp -p packages/terminal-ui/src/main.ts "$stage/release/packages/terminal-ui/src/main.ts"
 cp -p packages/terminal-ui/src/styles.css "$stage/release/packages/terminal-ui/src/styles.css"
+cp -p scripts/mcp-smoke.mjs "$stage/release/scripts/mcp-smoke.mjs"
 printf '%s\n' "$revision" > "$stage/release/REVISION"
 
 (

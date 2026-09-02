@@ -66,8 +66,12 @@ describe('deployment assets', () => {
 
     expect(workflow).toContain('group: terminal-mcp-production');
     expect(workflow).toContain('TERMINAL_SMOKE_BEARER_TOKEN');
+    expect(workflow).toContain('mandatory loopback MCP smoke already passed inside the atomic deploy');
     expect(deploy).toContain('flock -n 9');
+    expect(deploy).toContain('TERMINAL_SMOKE_LOCAL=1');
+    expect(deploy).toContain('scripts/mcp-smoke.mjs');
     expect(smoke).toContain("name: 'terminal_list_agents'");
+    expect(smoke).toContain("'x-terminal-deployment-smoke': '1'");
   });
 
   it('does not advertise unsupported local-agent queue controls', async () => {
@@ -84,6 +88,7 @@ describe('deployment assets', () => {
     expect(source).toContain('HUSKY=0 pnpm --filter @terminal/local-agent deploy --prod --legacy');
     expect(source).toContain('__TERMINAL_NATIVE_PTY_OK__');
     expect(source).toContain('NATIVE_RUNTIME_VERIFIED');
+    expect(source).toContain('cp -p scripts/mcp-smoke.mjs');
   });
 
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
