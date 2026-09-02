@@ -35,6 +35,10 @@ printf '%s\n' "$revision" > "$stage/release/REVISION"
 node --input-type=module -e "await import(process.argv[1]);" "$stage/release/packages/mcp-server/dist/index.js"
 archive="$output_dir/chatgpt-terminal-mcp-${revision}.tar.gz"
 tar -C "$stage/release" -czf "$archive" .
-sha256sum "$archive" > "$archive.sha256"
+archive_basename=$(basename "$archive")
+(
+  cd "$output_dir"
+  sha256sum "$archive_basename" > "$archive_basename.sha256"
+)
 printf 'release_archive=%s\n' "$archive"
 printf 'release_sha256=%s\n' "$(cut -d' ' -f1 "$archive.sha256")"
