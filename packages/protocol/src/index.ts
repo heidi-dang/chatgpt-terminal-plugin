@@ -391,6 +391,15 @@ export const terminalTranscriptOutputSchema = z.object({
 });
 export type TerminalTranscriptOutput = z.infer<typeof terminalTranscriptOutputSchema>;
 
+// Parse the stable request envelope separately from the versioned command union.
+// This lets older agents reject newer actions without tearing down an authenticated gateway.
+export const agentRequestEnvelopeSchema = z.object({
+  type: z.literal('request'),
+  request_id: z.string().min(1),
+  action: z.string().min(1).max(256),
+});
+export type AgentRequestEnvelope = z.infer<typeof agentRequestEnvelopeSchema>;
+
 export const agentCommandSchema = z.discriminatedUnion('action', [
   z.object({
     type: z.literal('request'),

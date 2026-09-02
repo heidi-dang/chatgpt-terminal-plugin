@@ -16,6 +16,8 @@ afterEach(async () => {
 
 class FakeSocket extends EventEmitter {
   readyState = WebSocket.OPEN;
+  bufferedAmount = 0;
+  send = vi.fn();
   close = vi.fn();
 }
 
@@ -37,6 +39,39 @@ describe('AgentGatewayClient lifecycle', () => {
       outboundHighWaterBytes: 1024 * 1024,
     })).not.toThrow();
   });
+  it('rejects future agent actions without disconnecting the authenticated gateway', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-forward-compat-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const agent = new LocalTerminalAgent({
+      agentId: 'agent-forward-compat', allowedWorkspaceRoots: [root], executionProfile: 'owner-full', shells: ['bash'],
+    });
+    cleanup.push(() => agent.shutdown());
+    const client = new AgentGatewayClient(agent, {
+      url: 'ws://127.0.0.1/', identity: {} as never, heartbeatMs: 1_000, reconnectMaxMs: 1_000,
+      outboundHighWaterBytes: 1024 * 1024,
+    });
+    const socket = new FakeSocket();
+    const internal = client as unknown as {
+      socket: WebSocket; authenticated: boolean; handleMessage(raw: string): void;
+    };
+    internal.socket = socket as unknown as WebSocket;
+    internal.authenticated = true;
+
+    expect(() => internal.handleMessage(JSON.stringify({
+      type: 'request', request_id: 'future-request', action: 'semantic.future_action', input: {},
+    }))).not.toThrow();
+
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    const response = JSON.parse(String(socket.send.mock.calls[0]?.[0])) as {
+      type: string; request_id: string; ok: boolean; error?: { code?: string; message?: string };
+    };
+    expect(response).toMatchObject({
+      type: 'response', request_id: 'future-request', ok: false, error: { code: 'INVALID_ARGUMENT' },
+    });
+    expect(response.error?.message).toMatch(/unsupported|agent version/i);
+  });
+
   it('keeps process features available across a transient gateway disconnect', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-client-reconnect-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

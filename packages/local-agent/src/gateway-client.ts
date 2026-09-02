@@ -4,6 +4,7 @@ import {
   GATEWAY_MAX_PAYLOAD_BYTES,
   TerminalProtocolError,
   agentCommandSchema,
+  agentRequestEnvelopeSchema,
   gatewayAuthChallengeSchema,
   gatewayMessageSchema,
   type AgentCommand,
@@ -220,7 +221,41 @@ export class AgentGatewayClient {
   }
 
   private handleMessage(raw: string): void {
-    const message = gatewayMessageSchema.parse(JSON.parse(raw));
+    const parsed: unknown = JSON.parse(raw);
+    const requestEnvelope = agentRequestEnvelopeSchema.safeParse(parsed);
+    if (requestEnvelope.success) {
+      const parsedCommand = agentCommandSchema.safeParse(parsed);
+      if (!parsedCommand.success) {
+        this.send({
+          type: 'response',
+          request_id: requestEnvelope.data.request_id,
+          ok: false,
+          error: new TerminalProtocolError(
+            'INVALID_ARGUMENT',
+            `Agent action '${requestEnvelope.data.action}' is unsupported or invalid for this agent version.`,
+          ).toPayload(),
+        });
+        return;
+      }
+      const command = parsedCommand.data;
+      void (async () => {
+        try {
+          const result = await this.execute(command);
+          this.send({ type: 'response', request_id: command.request_id, ok: true, result });
+        } catch (error) {
+          const protocolError = normalizeProtocolError(error);
+          this.send({
+            type: 'response',
+            request_id: command.request_id,
+            ok: false,
+            error: protocolError.toPayload(),
+          });
+        }
+      })();
+      return;
+    }
+
+    const message = gatewayMessageSchema.parse(parsed);
     if (message.type === 'ack') {
       const current = this.ackedSequence.get(message.session_id) ?? 0;
       if (message.sequence > current) this.ackedSequence.set(message.session_id, message.sequence);
@@ -238,23 +273,8 @@ export class AgentGatewayClient {
       }
       return;
     }
-    if (message.type !== 'request') return;
-    const command = agentCommandSchema.parse(message);
-
-    void (async () => {
-      try {
-        const result = await this.execute(command);
-        this.send({ type: 'response', request_id: command.request_id, ok: true, result });
-      } catch (error) {
-        const protocolError = normalizeProtocolError(error);
-        this.send({
-          type: 'response',
-          request_id: command.request_id,
-          ok: false,
-          error: protocolError.toPayload(),
-        });
-      }
-    })();
+    // Valid request envelopes are handled above so version skew can return an error
+    // without allowing a schema mismatch to close the authenticated WebSocket.
   }
 
   private async execute(command: AgentCommand): Promise<unknown> {
