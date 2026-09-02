@@ -52,7 +52,7 @@ The server ACK is not permission to discard arbitrary history immediately. The a
 
 ### UI
 
-The widget tracks the most recent accepted event sequence and accepts only the next contiguous sequence. Duplicate/stale events are ignored. A forward gap, malformed frame, EventSource failure, explicit reconnect, or approaching capability expiry closes the old source and obtains a fresh capability through `terminal_stream_refresh(session_id, after)` via the MCP Apps bridge. Native EventSource retry is therefore never allowed to keep reusing an expired capability URL. If the requested cursor has already fallen behind retained history, the widget obtains `terminal_status`, advances to the authoritative server cursor, visibly marks the lost-output gap, and resumes from there.
+The widget tracks the most recent accepted event sequence and accepts only the next contiguous sequence. Duplicate/stale events are ignored. A forward gap, malformed frame, or EventSource failure closes the old source and obtains a fresh capability through `terminal_stream_refresh(session_id, after)` via the MCP Apps bridge. A healthy SSE connection is not torn down merely because the capability used to establish it has expired; expiry governs new connections, so avoiding proactive rollover prevents periodic reconnect churn. Native EventSource retry is never allowed to keep reusing an expired capability URL after a disconnect. If the requested cursor has already fallen behind retained history, the widget obtains `terminal_status`, advances to the authoritative server cursor, visibly marks the lost-output gap, and resumes from there.
 
 ## State ownership
 

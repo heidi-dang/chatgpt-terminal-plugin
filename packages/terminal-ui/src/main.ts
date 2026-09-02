@@ -515,7 +515,6 @@ export class TerminalViewer {
   private refreshing = false;
   private reconnectAttempt = 0;
   private reconnectTimer: number | undefined;
-  private refreshTimer: number | undefined;
   private readRetryTimer: number | undefined;
   private readFallbackGeneration = 0;
   private readFallbackActive = false;
@@ -612,7 +611,6 @@ export class TerminalViewer {
         closeTerminalSource(this.eventSource);
         this.eventSource = undefined;
         this.clearReconnectTimer();
-        this.clearRefreshTimer();
         this.stopReadFallback();
         this.transportMode = 'sse';
         this.lastSequence = next.cursor;
@@ -671,7 +669,6 @@ export class TerminalViewer {
     const ttl = Date.parse(meta.expires_at) - Date.now();
     if (ttl <= STREAM_REFRESH_MARGIN_MS) return this.refreshStream(true);
     this.connectTerminalStream(meta);
-    this.scheduleCapabilityRefresh(ttl);
   }
 
   private connectTerminalStream(meta: TerminalStreamMeta): void {
@@ -767,7 +764,6 @@ export class TerminalViewer {
     closeTerminalSource(this.eventSource);
     this.eventSource = undefined;
     this.clearReconnectTimer();
-    this.clearRefreshTimer();
     this.stopReadFallback();
     this.streamState = 'offline';
   }
@@ -924,16 +920,6 @@ export class TerminalViewer {
     });
   }
 
-  private scheduleCapabilityRefresh(ttl: number): void {
-    this.clearRefreshTimer();
-    if (!Number.isFinite(ttl)) return;
-    const delay = Math.max(1_000, ttl - STREAM_REFRESH_MARGIN_MS);
-    this.refreshTimer = window.setTimeout(() => {
-      this.refreshTimer = undefined;
-      this.refreshStream(true);
-    }, delay);
-  }
-
 
   private queueOutput(text: string): void {
     if (!text) return;
@@ -1008,12 +994,6 @@ export class TerminalViewer {
     if (this.reconnectTimer === undefined) return;
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
-  }
-
-  private clearRefreshTimer(): void {
-    if (this.refreshTimer === undefined) return;
-    clearTimeout(this.refreshTimer);
-    this.refreshTimer = undefined;
   }
 
   private clearReadRetryTimer(): void {

@@ -253,6 +253,37 @@ describe('terminal MCP App UI', () => {
     viewer.destroy();
   });
 
+
+  it('keeps a healthy SSE connection open after capability expiry and refreshes only after disconnect', async () => {
+    vi.useFakeTimers();
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const shortLived = initialResult();
+    shortLived._meta.terminal_stream.expires_at = new Date(Date.now() + 20_000).toISOString();
+
+    app.ontoolresult?.(shortLived);
+    await flushFrames();
+    const source = terminalSource();
+    source.emitOpen();
+    app.callServerTool.mockClear();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(source.close).not.toHaveBeenCalled();
+    expect(app.callServerTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'terminal_stream_refresh' }));
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
+
+    source.emitError();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(app.callServerTool).toHaveBeenCalledWith({
+      name: 'terminal_read',
+      arguments: { session_id: 'session-1', after: 4, max_bytes: 32768, wait_ms: 1000 },
+    });
+    viewer.destroy();
+  });
+
   it('does not yank a user-scrolled transcript back to the live tail', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
