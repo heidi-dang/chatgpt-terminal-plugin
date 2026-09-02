@@ -62,7 +62,7 @@ import {
   createProgressChunkLimiter,
 } from './output-bounds.js';
 
-export const TERMINAL_UI_URI = 'ui://terminal/v12.html';
+export const TERMINAL_UI_URI = 'ui://terminal/v13.html';
 export const TERMINAL_UI_MIME = 'text/html;profile=mcp-app';
 
 const terminalSurfaceInputSchema = z.object({});
@@ -124,7 +124,7 @@ export interface McpServerDependencies {
 }
 
 export function createTerminalMcpServer(deps: McpServerDependencies): McpServer {
-  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.12.0' });
+  const server = new McpServer({ name: 'chatgpt-terminal-plugin', version: '0.13.0' });
 
   server.registerResource(
     'Live terminal',

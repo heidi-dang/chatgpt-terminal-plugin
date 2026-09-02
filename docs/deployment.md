@@ -46,7 +46,7 @@ pnpm build
 pnpm test:e2e
 ```
 
-The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v12.html` MCP App resource. The terminal UI build also enforces a 30,000-byte single-file mobile bundle budget; override `TERMINAL_UI_MAX_BUNDLE_BYTES` only for an intentional, reviewed budget change.
+The UI must be built because the MCP server loads `packages/terminal-ui/dist/index.html` when serving the versioned `ui://terminal/v13.html` MCP App resource. The terminal UI build also enforces a 30,000-byte single-file mobile bundle budget; override `TERMINAL_UI_MAX_BUNDLE_BYTES` only for an intentional, reviewed budget change.
 
 ### Source release artifact
 
@@ -63,7 +63,7 @@ The `artifacts/` directory is ignored by Git. Record the full commit ID alongsid
 
 ### Terminal UI release model
 
-The v12 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`. Production widgets do not open a second stylesheet hot-reload stream; this keeps the single-file mobile bundle smaller and removes an always-on EventSource. CSS, HTML, and JavaScript changes are released through the versioned MCP App resource and the normal connector rescan/refresh process. The legacy `/terminal-ui/reload` endpoint may remain available for development tooling, but production UI correctness must never depend on it.
+The v13 terminal widget is static-first and watch-only. Real PTY output prefers the terminal SSE stream and falls back to bounded `terminal_read` calls through the MCP Apps bridge when a host cannot establish `EventSource`. Production widgets do not open a second stylesheet hot-reload stream; this keeps the single-file mobile bundle smaller and removes an always-on EventSource. CSS, HTML, and JavaScript changes are released through the versioned MCP App resource and the normal connector rescan/refresh process. The legacy `/terminal-ui/reload` endpoint may remain available for development tooling, but production UI correctness must never depend on it.
 
 ## Server environment
 

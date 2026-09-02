@@ -71,7 +71,7 @@ chatgpt-terminal-plugin/
 │   ├── mcp-server/      # public MCP backend, OAuth/JWT, gateway, SSE, audit
 │   ├── local-agent/     # local PTY, files, code execution, LSP, device identity
 │   ├── protocol/        # shared Zod schemas and gateway/event protocol
-│   └── terminal-ui/     # static-first MCP App Terminal UI v12
+│   └── terminal-ui/     # static-first MCP App Terminal UI v13
 ├── tests/
 │   ├── unit/            # security, lifecycle, UI, process and installer tests
 │   └── e2e/             # real MCP client -> server -> signed agent -> real PTY
@@ -323,8 +323,8 @@ The local repository can validate the MCP App bundle and bridge behavior, but th
 
 ## Status
 
-Current MCP App resource: **Terminal UI v12** (`ui://terminal/v12.html`)
+Current MCP App resource: **Terminal UI v13** (`ui://terminal/v13.html`)
 
-Current MCP server/UI runtime version: **0.12.0**
+Current MCP server/UI runtime version: **0.13.0**
 
 The project is designed as a secure remote terminal control plane for authenticated ChatGPT workflows, with actual execution delegated to explicitly enrolled local agents.

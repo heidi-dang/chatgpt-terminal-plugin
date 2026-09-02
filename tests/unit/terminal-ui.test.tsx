@@ -185,6 +185,56 @@ describe('terminal MCP App UI', () => {
     expect(source.close).toHaveBeenCalled();
   });
 
+  it('does not rescan the full transcript on every streaming paint', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    const output = document.getElementById('terminal-output') as HTMLElement;
+    const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+    if (!descriptor?.get || !descriptor.set) throw new Error('Node.textContent descriptor is unavailable.');
+    let transcriptReads = 0;
+    Object.defineProperty(output, 'textContent', {
+      configurable: true,
+      get() {
+        transcriptReads += 1;
+        return descriptor.get!.call(this) as string | null;
+      },
+      set(value: string | null) {
+        descriptor.set!.call(this, value);
+      },
+    });
+
+    const source = terminalSource();
+    source.emitOpen();
+    source.emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'frame-one\r\n' } });
+    await flushFrames();
+    source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'frame-two\r\n' } });
+    await flushFrames();
+
+    expect(transcriptReads).toBe(0);
+    viewer.destroy();
+  });
+
+  it('keeps the narrow-screen transcript tail bounded before the DOM becomes oversized', async () => {
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(max-width: 560px)' })));
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    const initial = initialResult();
+    initial.structuredContent.initial_output = `${'x'.repeat(230_000)}\n`;
+
+    app.ontoolresult?.(initial);
+    await flushFrames();
+
+    const text = document.getElementById('terminal-output')?.textContent ?? '';
+    expect(text).toContain('[Older terminal output trimmed for mobile performance]');
+    expect(text.length).toBeLessThan(170_000);
+    viewer.destroy();
+  });
+
   it('refreshes an expired stream capability before opening EventSource', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);
@@ -891,6 +941,20 @@ describe('terminal MCP App UI', () => {
     expect(output.textContent).toBe(text);
     expect(output.querySelector('.term-overflow')).toBeNull();
     expect(output.querySelector('.term-success')?.textContent).toBe('PASS');
+  });
+
+  it('allows only one Overflow animation at a time during continuous streaming', () => {
+    vi.useFakeTimers();
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+
+    appendRichTerminalText(output, 'first line\nsecond line\n', true);
+    appendRichTerminalText(output, 'third line\nfourth line\n', true);
+
+    expect(output.querySelectorAll('.term-overflow')).toHaveLength(1);
+    expect(output.textContent).toBe('first line\nsecond line\nthird line\nfourth line\n');
+    vi.runAllTimers();
+    expect(output.querySelector('.term-overflow')).toBeNull();
   });
 
   it('bypasses Overflow when reduced motion is requested', () => {
