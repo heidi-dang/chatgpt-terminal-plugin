@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { constants, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { constants, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
@@ -10,6 +10,8 @@ import { LspManager, type LspServerDefinition } from './lsp-manager.js';
 export { discoverLspServers, resolveLspServers } from './lsp-discovery.js';
 import {
   TerminalProtocolError,
+  terminalEventSchema,
+  terminalSessionSchema,
   type Agent,
   type AgentHealthTelemetry,
   type CodeCancelOutput,
@@ -42,6 +44,7 @@ export interface LocalTerminalAgentOptions {
   closedSessionRetentionMs?: number;
   sweepIntervalMs?: number;
   workspaceRootsStatePath?: string;
+  stateDir?: string;
 }
 
 export interface AgentSessionSnapshot {
@@ -51,7 +54,7 @@ export interface AgentSessionSnapshot {
 }
 
 interface ManagedSession {
-  pty: pty.IPty;
+  pty?: pty.IPty;
   metadata: TerminalSession;
   events: TerminalEvent[];
   eventSizes: number[];
@@ -61,6 +64,15 @@ interface ManagedSession {
   earliestSequence: number;
   closeRequest?: { actor: TerminalEventActor; reason: string; finalized: boolean };
   cwdRefreshTimer?: NodeJS.Timeout;
+  persistenceTimer?: NodeJS.Timeout;
+}
+
+interface PersistedSessionState {
+  version: 1;
+  session: TerminalSession;
+  events: TerminalEvent[];
+  sequence: number;
+  earliest_sequence: number;
 }
 
 export interface TerminalAgentApi {
@@ -328,6 +340,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
   private readonly executionWorkspacePolicy: WorkspacePolicy;
   private readonly codeExecutor: CodeBlockExecutor;
   private readonly lspManager: LspManager;
+  private readonly stateDir: string | undefined;
 
   constructor(private readonly options: LocalTerminalAgentOptions) {
     this.shells = unique(options.shells ?? defaultShells());
@@ -336,6 +349,8 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 30 * 60_000;
     this.maxLifetimeMs = options.maxLifetimeMs ?? 8 * 60 * 60_000;
     this.closedSessionRetentionMs = options.closedSessionRetentionMs ?? 15 * 60_000;
+    this.stateDir = options.stateDir;
+    if (this.stateDir) mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     const now = new Date().toISOString();
     this.agent = {
       agent_id: options.agentId ?? randomUUID(),
@@ -364,6 +379,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     const environment = cleanEnvironment();
     this.codeExecutor = new CodeBlockExecutor({ environment });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
+    this.restorePersistedSessions();
   }
 
   getTelemetry(): AgentHealthTelemetry {
@@ -954,8 +970,10 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     clearInterval(this.sweepTimer);
     this.stopProcessFeatures();
     for (const managed of this.sessions.values()) {
-      if (managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'closing') continue;
-      this.closeManaged(managed, 'system', 'agent_shutdown');
+      if (managed.metadata.status !== 'closed' && managed.metadata.status !== 'exited' && managed.metadata.status !== 'closing') {
+        this.closeManaged(managed, 'system', 'agent_shutdown');
+      }
+      this.persistSessionSafely(managed);
     }
     this.eventEmitter.removeAllListeners();
   }
@@ -967,6 +985,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       if (isTerminalFinal(managed.metadata.status)) {
         if (Number.isFinite(activityMs) && now - activityMs >= this.closedSessionRetentionMs) {
           this.sessions.delete(sessionId);
+          this.deletePersistedSession(managed);
         }
         continue;
       }
@@ -987,12 +1006,19 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       return;
     }
 
+    const terminal = managed.pty;
+    if (!terminal) {
+      managed.metadata.status = 'closed';
+      this.recordEvent(managed, actor, 'session.closed', { reason, exit_code: managed.metadata.exit_code });
+      return;
+    }
+
     const closeRequest = { actor, reason, finalized: false };
     managed.closeRequest = closeRequest;
     managed.metadata.status = 'closing';
     managed.metadata.last_activity_at = new Date().toISOString();
     try {
-      managed.pty.kill();
+      terminal.kill();
     } catch (error) {
       closeRequest.finalized = true;
       managed.metadata.status = 'closed';
@@ -1009,21 +1035,22 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     return managed;
   }
 
-  private requireWritableSession(sessionId: string): ManagedSession {
+  private requireWritableSession(sessionId: string): ManagedSession & { pty: pty.IPty } {
     const managed = this.requireSession(sessionId);
-    if (managed.closeRequest || managed.metadata.status === 'closing' || managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'failed') {
+    if (!managed.pty || managed.closeRequest || managed.metadata.status === 'closing' || managed.metadata.status === 'closed' || managed.metadata.status === 'exited' || managed.metadata.status === 'failed') {
       throw new TerminalProtocolError('SESSION_CLOSED', 'Terminal session is not writable.');
     }
-    return managed;
+    return managed as ManagedSession & { pty: pty.IPty };
   }
 
   private scheduleCwdRefresh(managed: ManagedSession): void {
-    if (process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
+    const terminal = managed.pty;
+    if (!terminal || process.platform !== 'linux' || managed.cwdRefreshTimer || managed.closeRequest?.finalized) return;
     managed.cwdRefreshTimer = setTimeout(() => {
       delete managed.cwdRefreshTimer;
       if (isTerminalFinal(managed.metadata.status) || managed.closeRequest?.finalized) return;
       try {
-        const cwd = readlinkSync(`/proc/${managed.pty.pid}/cwd`);
+        const cwd = readlinkSync(`/proc/${terminal.pid}/cwd`);
         if (cwd && cwd !== managed.metadata.cwd) {
           managed.metadata.cwd = cwd;
           this.recordEvent(managed, 'agent', 'cwd.changed', { cwd });
@@ -1033,6 +1060,177 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       }
     }, 25);
     managed.cwdRefreshTimer.unref();
+  }
+
+  private sessionStatePath(sessionId: string): string | undefined {
+    if (!this.stateDir) return undefined;
+    const digest = createHash('sha256').update(sessionId).digest('hex');
+    return join(this.stateDir, `${digest}.json`);
+  }
+
+  private scheduleSessionPersistence(managed: ManagedSession): void {
+    if (!this.stateDir || managed.persistenceTimer) return;
+    managed.persistenceTimer = setTimeout(() => {
+      delete managed.persistenceTimer;
+      this.persistSessionSafely(managed);
+    }, 25);
+    managed.persistenceTimer.unref();
+  }
+
+  private persistSessionSafely(managed: ManagedSession): void {
+    if (managed.persistenceTimer) {
+      clearTimeout(managed.persistenceTimer);
+      delete managed.persistenceTimer;
+    }
+    try {
+      this.persistSession(managed);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'agent.session_state_write_failed',
+        session_id: managed.metadata.session_id,
+        error: errorMsg(error),
+      }));
+    }
+  }
+
+  private persistSession(managed: ManagedSession): void {
+    const statePath = this.sessionStatePath(managed.metadata.session_id);
+    if (!statePath || !this.stateDir) return;
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    const state: PersistedSessionState = {
+      version: 1,
+      session: { ...managed.metadata },
+      events: managed.events.slice(managed.eventHead),
+      sequence: managed.sequence,
+      earliest_sequence: managed.earliestSequence,
+    };
+    const tempPath = `${statePath}.${process.pid}.tmp`;
+    writeFileSync(tempPath, `${JSON.stringify(state)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tempPath, statePath);
+  }
+
+  private deletePersistedSession(managed: ManagedSession): void {
+    if (managed.persistenceTimer) {
+      clearTimeout(managed.persistenceTimer);
+      delete managed.persistenceTimer;
+    }
+    const statePath = this.sessionStatePath(managed.metadata.session_id);
+    if (!statePath) return;
+    try {
+      unlinkSync(statePath);
+    } catch (error) {
+      if (!isFileNotFound(error)) {
+        console.error(JSON.stringify({
+          level: 'warn',
+          event: 'agent.session_state_delete_failed',
+          session_id: managed.metadata.session_id,
+          error: errorMsg(error),
+        }));
+      }
+    }
+  }
+
+  private restorePersistedSessions(): void {
+    if (!this.stateDir) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(this.stateDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map((entry) => entry.name)
+        .sort();
+    } catch (error) {
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read terminal session state directory: ${errorMsg(error)}`);
+    }
+    if (entries.length > 256) {
+      console.error(JSON.stringify({
+        level: 'warn',
+        event: 'agent.session_state_limit_reached',
+        files: entries.length,
+        loaded: 256,
+      }));
+      entries = entries.slice(0, 256);
+    }
+
+    const maxStateBytes = Math.max(1024 * 1024, this.bufferHighWaterBytes * 4 + 256 * 1024);
+    for (const name of entries) {
+      const statePath = join(this.stateDir, name);
+      try {
+        const info = statSync(statePath);
+        if (!info.isFile() || info.size > maxStateBytes) throw new Error('persisted session state exceeds the configured size bound');
+        const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
+        if (!parsed || typeof parsed !== 'object') throw new Error('persisted session state must be an object');
+        const candidate = parsed as Partial<PersistedSessionState>;
+        if (candidate.version !== 1 || !Array.isArray(candidate.events)) throw new Error('unsupported persisted session state version');
+        if (!Number.isInteger(candidate.sequence) || (candidate.sequence ?? -1) < 0) throw new Error('persisted session sequence is invalid');
+        if (!Number.isInteger(candidate.earliest_sequence) || (candidate.earliest_sequence ?? 0) < 1) throw new Error('persisted session retained boundary is invalid');
+        if (candidate.events.length > 20_000) throw new Error('persisted session contains too many retained events');
+
+        const metadata = terminalSessionSchema.parse(candidate.session);
+        if (metadata.agent_id !== this.agent.agent_id) continue;
+        const events = candidate.events.map((event) => terminalEventSchema.parse(event));
+        const sequence = candidate.sequence as number;
+        const persistedEarliest = candidate.earliest_sequence as number;
+        if (persistedEarliest > sequence + 1) throw new Error('persisted session retained boundary is ahead of its cursor');
+        if (events.length > 0 && events[0]?.sequence !== persistedEarliest) throw new Error('persisted session event boundary does not match its cursor');
+        let previousSequence = persistedEarliest - 1;
+        for (const event of events) {
+          if (event.session_id !== metadata.session_id || event.sequence !== previousSequence + 1 || event.sequence > sequence) {
+            throw new Error('persisted session event sequence is invalid');
+          }
+          previousSequence = event.sequence;
+        }
+        if (events.length > 0 && previousSequence !== sequence) throw new Error('persisted session history does not reach its advertised cursor');
+        if (events.length === 0 && sequence !== 0) throw new Error('persisted session cursor has no retained history');
+        if (this.sessions.has(metadata.session_id)) throw new Error('duplicate persisted session identifier');
+
+        const eventSizes = events.map((event) => Buffer.byteLength(JSON.stringify(event)));
+        let eventHead = 0;
+        let retainedBytes = eventSizes.reduce((total, bytes) => total + bytes, 0);
+        let earliestSequence = persistedEarliest;
+        while (retainedBytes > this.bufferHighWaterBytes && events.length - eventHead > 1) {
+          const removed = events[eventHead];
+          const removedBytes = eventSizes[eventHead];
+          if (!removed || removedBytes === undefined) break;
+          eventHead += 1;
+          retainedBytes -= removedBytes;
+          earliestSequence = removed.sequence + 1;
+        }
+
+        const activityMs = Date.parse(metadata.last_activity_at);
+        if (isTerminalFinal(metadata.status) && Number.isFinite(activityMs) && Date.now() - activityMs >= this.closedSessionRetentionMs) {
+          unlinkSync(statePath);
+          continue;
+        }
+
+        const managed: ManagedSession = {
+          metadata: { ...metadata },
+          events,
+          eventSizes,
+          eventHead,
+          sequence,
+          retainedBytes,
+          earliestSequence,
+        };
+        this.sessions.set(metadata.session_id, managed);
+        if (!isTerminalFinal(metadata.status)) {
+          managed.metadata.status = 'closed';
+          managed.metadata.exit_code = null;
+          this.recordEvent(managed, 'system', 'session.closed', {
+            reason: 'agent_restart',
+            exit_code: null,
+          });
+          this.persistSessionSafely(managed);
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: 'warn',
+          event: 'agent.session_state_invalid',
+          file: name,
+          error: errorMsg(error),
+        }));
+      }
+    }
   }
 
   private snapshot(managed: ManagedSession): AgentSessionSnapshot {
@@ -1081,6 +1279,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       managed.eventHead = 0;
     }
 
+    this.scheduleSessionPersistence(managed);
     this.eventEmitter.emit('terminal-event', event);
     return event;
   }
