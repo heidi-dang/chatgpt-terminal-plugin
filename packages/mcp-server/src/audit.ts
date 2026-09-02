@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { appendFile, chmod, mkdir, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, open, rename, rm } from 'node:fs/promises';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { finished } from 'node:stream/promises';
@@ -132,12 +132,15 @@ export class AuditLogger {
     if (path) {
       if (!this.preparedPaths.has(path)) {
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-        await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
-        await chmod(path, 0o600);
-        this.preparedPaths.add(path);
-        return;
       }
-      await appendFile(path, line, { encoding: 'utf8', mode: 0o600 });
+      const handle = await open(path, 'a', 0o600);
+      try {
+        await handle.chmod(0o600);
+        await handle.appendFile(line, { encoding: 'utf8' });
+      } finally {
+        await handle.close();
+      }
+      this.preparedPaths.add(path);
       return;
     }
     process.stdout.write(line);

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +72,27 @@ describe('security and lifecycle hardening', () => {
     const transcript = await readFile(transcriptPath, 'utf8');
     expect(transcript).not.toContain('old');
     expect(transcript).toContain('new');
+  });
+
+  it('restores owner-only permissions when an audit file is externally rotated and recreated', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-audit-rotate-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const auditPath = join(root, 'audit.jsonl');
+    const rotatedPath = join(root, 'audit.jsonl.1');
+    const logger = new AuditLogger(auditPath, undefined);
+
+    await logger.record({ action: 'terminal_status', user_id: 'user-a', authorization: 'allow' });
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o600);
+
+    await rename(auditPath, rotatedPath);
+    await writeFile(auditPath, '', { mode: 0o644 });
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o644);
+
+    await logger.record({ action: 'terminal_read', user_id: 'user-a', authorization: 'allow' });
+
+    expect((await stat(auditPath)).mode & 0o777).toBe(0o600);
+    expect(await readFile(auditPath, 'utf8')).toContain('terminal_read');
+    expect(await readFile(rotatedPath, 'utf8')).toContain('terminal_status');
   });
 
   it('leaves transcript evidence untouched when prune staging fails', async () => {
