@@ -2,6 +2,12 @@ name: Deploy Terminal MCP production
 
 on:
   workflow_dispatch:
+    inputs:
+      allow_connector_smoke_fallback:
+        description: 'Allow a trusted operator to deploy when CI smoke credentials are unavailable; the live authenticated connector must be verified immediately after deployment.'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
 
@@ -79,13 +85,17 @@ jobs:
           SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
           SSH_KEY: ${{ secrets.TERMINAL_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.TERMINAL_DEPLOY_KNOWN_HOSTS }}
+          ALLOW_CONNECTOR_SMOKE_FALLBACK: ${{ inputs.allow_connector_smoke_fallback || false }}
         run: |
           for value in DEPLOY_HOST DEPLOY_USER DEPLOY_ROOT SERVICE_NAME AGENT_SERVICE_NAME HEALTH_URL SSH_KEY KNOWN_HOSTS; do
             [[ -n "${!value}" ]] || { echo "$value is required" >&2; exit 64; }
           done
           if [[ -z "$SMOKE_TOKEN" && ( -z "$SMOKE_CF_ACCESS_CLIENT_ID" || -z "$SMOKE_CF_ACCESS_CLIENT_SECRET" ) ]]; then
-            echo "configure TERMINAL_SMOKE_BEARER_TOKEN or both Cloudflare Access smoke credentials" >&2
-            exit 64
+            if [[ "$ALLOW_CONNECTOR_SMOKE_FALLBACK" != "true" || "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+              echo "configure TERMINAL_SMOKE_BEARER_TOKEN or both Cloudflare Access smoke credentials" >&2
+              exit 64
+            fi
+            echo "::warning::CI smoke credentials are unavailable; trusted operator requested authenticated connector verification after deployment."
           fi
           if [[ -n "$DEPLOY_PORT" && ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then echo "DEPLOY_PORT must be numeric" >&2; exit 64; fi
       - name: Configure SSH trust
@@ -135,9 +145,18 @@ jobs:
           SMOKE_TOKEN: ${{ secrets.TERMINAL_SMOKE_BEARER_TOKEN }}
           SMOKE_CF_ACCESS_CLIENT_ID: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_ID }}
           SMOKE_CF_ACCESS_CLIENT_SECRET: ${{ secrets.TERMINAL_SMOKE_CF_ACCESS_CLIENT_SECRET }}
+          ALLOW_CONNECTOR_SMOKE_FALLBACK: ${{ inputs.allow_connector_smoke_fallback || false }}
         run: |
           set -euo pipefail
           [[ "$HEALTH_URL" == */health ]] || { echo "TERMINAL_HEALTH_URL must end in /health" >&2; exit 64; }
+          if [[ -z "$SMOKE_TOKEN" && ( -z "$SMOKE_CF_ACCESS_CLIENT_ID" || -z "$SMOKE_CF_ACCESS_CLIENT_SECRET" ) ]]; then
+            if [[ "$ALLOW_CONNECTOR_SMOKE_FALLBACK" == "true" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::warning::Authenticated MCP smoke handed off to the trusted live connector for this operator-dispatched deployment."
+              exit 0
+            fi
+            echo "MCP smoke credentials are required" >&2
+            exit 64
+          fi
           smoke_url="${HEALTH_URL%/health}/mcp"
           TERMINAL_SMOKE_URL="$smoke_url" \
             TERMINAL_SMOKE_TOKEN="$SMOKE_TOKEN" \
