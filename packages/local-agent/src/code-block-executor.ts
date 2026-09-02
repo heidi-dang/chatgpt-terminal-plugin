@@ -110,13 +110,19 @@ export class CodeBlockExecutor {
     onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<CodeExecuteOutput> {
     return new Promise((resolve, reject) => {
+      const hasStdin = typeof input.stdin === 'string';
       const child = spawn(command, args, {
         cwd,
         env: this.environment,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [hasStdin ? 'pipe' : 'pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
       });
+      if (hasStdin && child.stdin) {
+        child.stdin.end(input.stdin, 'utf8');
+      } else if (child.stdin) {
+        child.stdin.end();
+      }
       const active: ActiveExecution = { userId, child, cancelled: false };
       this.active.set(input.execution_id, active);
 

@@ -96,6 +96,24 @@ exec "${process.execPath}" "$@"
     await expect(access(marker)).resolves.toBeUndefined();
   });
 
+  it('passes stdin content to executing code processes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-code-stdin-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const executor = new CodeBlockExecutor({ environment: cleanEnvironment() });
+    cleanup.push(() => executor.shutdown());
+
+    const output = await executor.execute('user-a', {
+      execution_id: randomUUID(),
+      runtime: 'node',
+      code: 'import { readFileSync } from "node:fs"; const input = readFileSync(0, "utf8"); console.log("ECHO:" + input.trim());',
+      stdin: 'hello-from-stdin',
+      timeout_ms: 2_000,
+    }, root);
+
+    expect(output.exit_code).toBe(0);
+    expect(output.stdout.trim()).toBe('ECHO:hello-from-stdin');
+  });
+
   it('streams stdout and stderr chunks in real time via onChunk callback', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-code-stream-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
