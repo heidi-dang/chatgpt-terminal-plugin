@@ -57,6 +57,58 @@ describe('production MCP smoke client', () => {
     }
   }, 30_000);
 
+  it('accepts an upstream authentication barrier on the public widget MCP boundary', async () => {
+    const widgetOrigin = 'https://web-sandbox.oaiusercontent.com';
+    const server = createServer((req, res) => {
+      if (req.url === '/terminal-ui/styles.css') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/css; charset=utf-8');
+        res.setHeader('access-control-allow-origin', widgetOrigin);
+        res.end('body{}');
+        return;
+      }
+      if (req.url === '/terminal-ui/reload') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('access-control-allow-origin', widgetOrigin);
+        res.end('event: ready\ndata: {}\n\n');
+        return;
+      }
+      if (req.url === '/mcp') {
+        res.statusCode = 401;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ error: 'invalid_token', error_description: 'Missing or invalid access token' }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(0, '127.0.0.1', () => resolveListen());
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Could not allocate widget proxy test port.');
+
+    try {
+      const { stdout, stderr } = await execFileAsync(process.execPath, ['scripts/mcp-smoke.mjs'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TERMINAL_SMOKE_URL: `http://127.0.0.1:${address.port}/mcp`,
+          TERMINAL_SMOKE_WIDGET_ORIGIN: widgetOrigin,
+          TERMINAL_SMOKE_WIDGET_ONLY: '1',
+        },
+        timeout: 20_000,
+      });
+      expect(stderr).toBe('');
+      expect(stdout).toContain(`widget_smoke=ok origin=${widgetOrigin}`);
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  }, 30_000);
+
   it('executes a production MCP smoke over direct loopback without public OAuth credentials', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-mcp-local-deploy-smoke-e2e-'));
     const port = await getFreePort();
@@ -93,6 +145,7 @@ describe('production MCP smoke client', () => {
           ...process.env,
           TERMINAL_SMOKE_URL: `http://127.0.0.1:${port}/mcp`,
           TERMINAL_SMOKE_LOCAL: '1',
+          TERMINAL_SMOKE_WIDGET_ORIGIN: 'https://web-sandbox.oaiusercontent.com',
         },
         timeout: 20_000,
       });

@@ -18,9 +18,9 @@ if ((accessClientId && !accessClientSecret) || (!accessClientId && accessClientS
   console.error('Cloudflare Access smoke credentials must be supplied as a complete client ID/secret pair.');
   process.exit(64);
 }
-if (widgetOrigin) await verifyWidgetBoundary();
+const widgetBoundary = widgetOrigin ? await verifyWidgetBoundary() : undefined;
 if (widgetOnly) {
-  console.log(`widget_smoke=ok origin=${widgetOrigin ?? 'none'}`);
+  console.log(`widget_smoke=ok origin=${widgetOrigin ?? 'none'} mcp_boundary=${widgetBoundary ?? 'none'}`);
   process.exit(0);
 }
 if (!localDeploymentSmoke && !token && !(accessClientId && accessClientSecret)) {
@@ -128,9 +128,9 @@ async function verifyWidgetBoundary() {
 
   const strictMcp = await fetch(url, { headers: { Origin: widgetOrigin, accept: 'application/json' }, signal: AbortSignal.timeout(8_000) });
   const strictBody = await strictMcp.text();
-  if (strictMcp.status !== 403 || !strictBody.includes('Invalid Origin')) {
-    throw new Error(`MCP origin boundary was widened unexpectedly: HTTP ${strictMcp.status} ${strictBody.slice(0, 300)}`);
-  }
+  if (strictMcp.status === 403 && strictBody.includes('Invalid Origin')) return 'origin-rejected';
+  if (!localDeploymentSmoke && strictMcp.status === 401) return 'upstream-auth-rejected';
+  throw new Error(`MCP origin boundary was widened unexpectedly: HTTP ${strictMcp.status} ${strictBody.slice(0, 300)}`);
 }
 
 async function fetchFirstSseFrame(streamUrl, requestHeaders = {}) {
