@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { stat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { stat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -190,6 +190,48 @@ describe('device identity and enrollment', () => {
       owner_id: 'owner-b',
       public_key: identity.publicKey,
     })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('serializes concurrent registry mutations without losing persisted devices', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-concurrent-persist-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registryPath = join(root, 'devices.json');
+    const registry = await DeviceRegistry.load(registryPath);
+    const records = Array.from({ length: 8 }, (_, index) => ({
+      device_id: `device-concurrent-${index}`,
+      agent_id: `agent-concurrent-${index}`,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }));
+
+    await Promise.all(records.map((record) => registry.enrollLocalAdmin(record)));
+
+    const reloaded = await DeviceRegistry.load(registryPath);
+    for (const record of records) {
+      expect(reloaded.requireActive(record.device_id)).toMatchObject({
+        agent_id: record.agent_id, owner_id: record.owner_id, key_version: 1,
+      });
+    }
+  });
+
+  it('rolls back in-memory enrollment when registry persistence fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-device-persist-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registryPath = join(root, 'devices.json');
+    const registry = await DeviceRegistry.load(registryPath, 'enrollment-token');
+    await mkdir(`${registryPath}.tmp`);
+
+    await expect(registry.enroll({
+      device_id: identity.deviceId,
+      agent_id: identity.agentId,
+      owner_id: 'owner-a',
+      public_key: identity.publicKey,
+    }, 'enrollment-token')).rejects.toBeTruthy();
+
+    expect(registry.get(identity.deviceId)).toBeUndefined();
+    expect(() => registry.requireActive(identity.deviceId)).toThrow(/not enrolled/i);
   });
 
   it('migrates version-1 device registries to an explicit immutable agent binding', async () => {
