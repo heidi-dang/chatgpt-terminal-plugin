@@ -81,6 +81,7 @@ describe('deployment assets', () => {
     const source = await readFile(new URL('scripts/package-mcp-release.sh', root), 'utf8');
 
     expect(source).toContain('pnpm --config.ignore-scripts=true --filter @terminal/mcp-server deploy --prod --legacy');
+    expect(source).toContain('pnpm --config.ignore-scripts=true --filter @terminal/local-agent deploy --prod --legacy');
   });
 
   it('runs built service entrypoints without requiring pnpm at runtime', async () => {
