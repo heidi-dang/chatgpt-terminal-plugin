@@ -782,7 +782,47 @@ export class LocalTerminalAgent implements TerminalAgentApi {
         throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${searchPath}`);
       }
     } else {
-      await walk(resolved);
+      // Fast path: try ripgrep (rg) if available
+      let rgAvailable = false;
+      try {
+        const rgOutput = execFileSync('rg', [
+          '--json',
+          '-i',
+          '-e', pattern,
+          ...(include ? ['-g', include] : []),
+          '-m', String(maxResults),
+          resolved,
+        ], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
+        rgAvailable = true;
+        for (const line of rgOutput.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line);
+            if (data.type === 'match' && data.data) {
+              const matchedFile = data.data.path?.text ?? resolved;
+              const relFile = relative(managed.metadata.cwd, matchedFile) || matchedFile;
+              matches.push({
+                file: relFile,
+                line: data.data.line_number ?? 1,
+                text: data.data.lines?.text?.trimEnd() ?? '',
+              });
+              filesSearched += 1;
+              if (matches.length >= maxResults) {
+                truncated = true;
+                break;
+              }
+            }
+          } catch {
+            // Ignore malformed lines
+          }
+        }
+      } catch {
+        // rg not installed, exited with 1 (no matches), or timed out; fall back to JS walk
+      }
+
+      if (!rgAvailable && matches.length === 0) {
+        await walk(resolved);
+      }
     }
 
     return { pattern, matches, truncated, files_searched: filesSearched };
