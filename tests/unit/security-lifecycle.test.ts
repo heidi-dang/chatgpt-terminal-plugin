@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -72,6 +72,24 @@ describe('security and lifecycle hardening', () => {
     const transcript = await readFile(transcriptPath, 'utf8');
     expect(transcript).not.toContain('old');
     expect(transcript).toContain('new');
+  });
+
+  it('leaves transcript evidence untouched when prune staging fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-transcript-prune-fail-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const transcriptPath = join(root, 'transcript.jsonl');
+    const logger = new AuditLogger(undefined, transcriptPath);
+    const now = Date.now();
+    const original = [
+      JSON.stringify({ timestamp: new Date(now - 10 * 24 * 60 * 60_000).toISOString(), data: 'old' }),
+      JSON.stringify({ timestamp: new Date(now).toISOString(), data: 'new' }),
+      '',
+    ].join('\n');
+    await writeFile(transcriptPath, original, { mode: 0o600 });
+    await mkdir(`${transcriptPath}.prune.tmp`);
+
+    await expect(logger.pruneTranscript(7)).rejects.toBeTruthy();
+    expect(await readFile(transcriptPath, 'utf8')).toBe(original);
   });
 
   it('serializes transcript appends with retention pruning so fresh events are not lost', async () => {
