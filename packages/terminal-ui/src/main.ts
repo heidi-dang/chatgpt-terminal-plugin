@@ -93,18 +93,17 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
 
   async connect(): Promise<void> {
     if (this.listening) return;
+    this.listening = true;
+    window.addEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
     const openAi = getChatGptOpenAiCompat();
     if (openAi) {
-      this.listening = true;
       this.openAi = openAi;
-      window.addEventListener('openai:set_globals', this.handleOpenAiGlobals as EventListener);
       const initial = normalizeCompatCallToolResult(openAi.toolOutput);
       if (initial) this.ontoolresult?.(initial);
       if (typeof openAi.theme === 'string') this.onhostcontextchanged?.({ theme: openAi.theme });
       return;
     }
 
-    this.listening = true;
     window.addEventListener('message', this.handleMessage);
     try {
       const initialized = await this.request('ui/initialize', {
@@ -112,6 +111,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
         appCapabilities: {},
         protocolVersion: MCP_APPS_PROTOCOL_VERSION,
       });
+      if (this.openAi) return;
       if (isRecord(initialized.hostContext)) this.onhostcontextchanged?.(initialized.hostContext);
       this.notify('ui/notifications/initialized', {});
       this.startAutoResize();
@@ -147,7 +147,7 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     if (this.resizeFrame !== undefined) window.cancelAnimationFrame(this.resizeFrame);
     this.resizeFrame = undefined;
     for (const pending of this.pending.values()) {
-      window.clearTimeout(pending.timer);
+      clearTimeout(pending.timer);
       pending.reject(new Error('MCP App bridge closed.'));
     }
     this.pending.clear();
@@ -155,6 +155,11 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
   }
 
   private readonly handleOpenAiGlobals = (event: CustomEvent<unknown>): void => {
+    const openAi = getChatGptOpenAiCompat();
+    if (!this.openAi && openAi) {
+      this.openAi = openAi;
+      this.done(1, {});
+    }
     const detail = isRecord(event.detail) ? event.detail : undefined;
     const globals = detail && isRecord(detail.globals) ? detail.globals : undefined;
     if (!globals) return;
@@ -171,15 +176,9 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     if (message.jsonrpc !== '2.0') return;
 
     if (typeof message.id === 'number' && ('result' in message || 'error' in message)) {
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      window.clearTimeout(pending.timer);
-      if (isRecord(message.error)) {
-        pending.reject(new Error(typeof message.error.message === 'string' ? message.error.message : 'MCP App request failed.'));
-      } else {
-        pending.resolve(message.result);
-      }
+      this.done(message.id, message.result, isRecord(message.error)
+        ? new Error(typeof message.error.message === 'string' ? message.error.message : 'MCP App request failed.')
+        : undefined);
       return;
     }
 
@@ -190,6 +189,15 @@ export class ChatGptMcpBridge implements TerminalAppBridge {
     }
     this.handleNotification(message.method, isRecord(message.params) ? message.params : {});
   };
+
+  private done(id: number, result: unknown, error?: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    if (error) pending.reject(error);
+    else pending.resolve(result);
+  }
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
     if (method === 'ui/notifications/tool-result') {
@@ -490,7 +498,7 @@ type TerminalEventSource = EventSource & { t?: number };
 
 function closeTerminalSource(source?: TerminalEventSource): void {
   if (!source) return;
-  window.clearTimeout(source.t);
+  clearTimeout(source.t);
   source.close();
 }
 
@@ -685,7 +693,7 @@ export class TerminalViewer {
 
     source.onopen = () => {
       if (this.eventSource !== source) return;
-      window.clearTimeout(source.t);
+      clearTimeout(source.t);
       this.stopReadFallback();
       this.transportMode = 'sse';
       this.reconnectAttempt = 0;
@@ -1032,19 +1040,19 @@ export class TerminalViewer {
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer === undefined) return;
-    window.clearTimeout(this.reconnectTimer);
+    clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
   }
 
   private clearRefreshTimer(): void {
     if (this.refreshTimer === undefined) return;
-    window.clearTimeout(this.refreshTimer);
+    clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
   }
 
   private clearReadRetryTimer(): void {
     if (this.readRetryTimer === undefined) return;
-    window.clearTimeout(this.readRetryTimer);
+    clearTimeout(this.readRetryTimer);
     this.readRetryTimer = undefined;
   }
 }

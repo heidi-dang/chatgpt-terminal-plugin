@@ -998,6 +998,28 @@ describe('terminal MCP App UI', () => {
     await bridge.close();
   });
 
+  it('adopts window.openai injected while the parent handshake is still pending', async () => {
+    vi.useFakeTimers();
+    const post = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
+    const bridge = new ChatGptMcpBridge();
+    const connecting = bridge.connect().then(() => true, () => false);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ method: 'ui/initialize' }), '*');
+
+    const callTool = vi.fn(async () => ({ structuredContent: {} }));
+    vi.stubGlobal('openai', { callTool });
+    window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: { theme: 'dark' } } }));
+
+    const adopted = Promise.race([connecting, new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), 1))]);
+    await vi.advanceTimersByTimeAsync(1);
+    const adoptedBeforeTimeout = await adopted;
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(adoptedBeforeTimeout).toBe(true);
+    await bridge.callServerTool({ name: 'terminal_surface_status', arguments: {} });
+    expect(callTool).toHaveBeenCalledWith('terminal_surface_status', {});
+    await bridge.close();
+  });
+
   it('accepts terminal surface metadata injected after native ChatGPT boot', async () => {
     vi.stubGlobal('openai', { callTool: vi.fn(async () => ({ structuredContent: {} })) });
     const bridge = new ChatGptMcpBridge();
