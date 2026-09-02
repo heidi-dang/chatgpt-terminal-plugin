@@ -33,6 +33,8 @@ export const agentSchema = z.object({
   display_name: z.string().min(1),
   platform: z.string().min(1),
   architecture: z.string().min(1),
+  os_version: z.string().optional(),
+  node_version: z.string().optional(),
   online: z.boolean(),
   capabilities: agentCapabilitiesSchema,
   connected_at: z.string().datetime(),

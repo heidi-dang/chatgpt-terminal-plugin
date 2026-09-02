@@ -18,6 +18,8 @@ export interface LspManagerOptions {
   servers: Readonly<Record<string, LspServerDefinition>>;
   environment: Record<string, string>;
   maxProcesses?: number;
+  /** Per-user LSP process cap. Defaults to 2. */
+  maxProcessesPerUser?: number;
   requestTimeoutMs?: number;
   maxMessageBytes?: number;
   maxBufferBytes?: number;
@@ -66,6 +68,7 @@ export class LspManager {
   private readonly servers: Readonly<Record<string, LspServerDefinition>>;
   private readonly environment: Record<string, string>;
   private readonly maxProcesses: number;
+  private readonly maxProcessesPerUser: number;
   private readonly requestTimeoutMs: number;
   private readonly maxMessageBytes: number;
   private readonly maxBufferBytes: number;
@@ -77,6 +80,7 @@ export class LspManager {
     this.servers = options.servers;
     this.environment = { ...options.environment };
     this.maxProcesses = options.maxProcesses ?? DEFAULT_MAX_PROCESSES;
+    this.maxProcessesPerUser = options.maxProcessesPerUser ?? 2;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.maxMessageBytes = options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.maxBufferBytes = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
@@ -88,6 +92,10 @@ export class LspManager {
   async start(userId: string, input: LspStartInput, root: string): Promise<LspStartOutput> {
     if (this.processes.size >= this.maxProcesses) {
       throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'LSP process limit has been reached.');
+    }
+    const userCount = [...this.processes.values()].filter((p) => p.userId === userId).length;
+    if (userCount >= this.maxProcessesPerUser) {
+      throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Per-user LSP process limit has been reached.');
     }
     const definition = this.servers[input.server_id];
     if (!definition) {
@@ -220,7 +228,8 @@ export class LspManager {
       this.failProcess(managed, new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'LSP receive buffer exceeded the configured limit.'));
       return;
     }
-    managed.buffer = Buffer.concat([managed.buffer, chunk]);
+    // Fast-path: skip allocation when the buffer is empty (most LSP messages arrive in a single chunk)
+    managed.buffer = managed.buffer.length === 0 ? chunk : Buffer.concat([managed.buffer, chunk]);
     this.drainFrames(managed);
   }
 
