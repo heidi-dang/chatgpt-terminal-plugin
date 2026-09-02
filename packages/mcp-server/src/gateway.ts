@@ -549,7 +549,11 @@ export class AgentGateway {
         connection.lastSeenMs = Date.now();
         connection.agent.last_seen = new Date(connection.lastSeenMs).toISOString();
 
-        if (message.type === 'heartbeat' || message.type === 'ack') return;
+        if (message.type === 'heartbeat') {
+          if (message.telemetry) connection.agent.telemetry = { ...message.telemetry, cpu_load: [...message.telemetry.cpu_load] };
+          return;
+        }
+        if (message.type === 'ack') return;
         if (message.type === 'code.chunk') {
           this.handleCodeChunk(registeredAgentId, message);
           return;

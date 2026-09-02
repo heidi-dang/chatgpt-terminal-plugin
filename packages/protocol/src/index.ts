@@ -26,6 +26,18 @@ export const agentCapabilitiesSchema = z.object({
 });
 export type AgentCapabilities = z.infer<typeof agentCapabilitiesSchema>;
 
+
+export const agentHealthTelemetrySchema = z.object({
+  cpu_load: z.tuple([z.number().finite().nonnegative(), z.number().finite().nonnegative(), z.number().finite().nonnegative()]),
+  freemem_bytes: z.number().int().nonnegative(),
+  totalmem_bytes: z.number().int().positive(),
+  uptime_seconds: z.number().finite().nonnegative(),
+  active_sessions: z.number().int().nonnegative(),
+  active_lsp_processes: z.number().int().nonnegative(),
+  active_code_executions: z.number().int().nonnegative(),
+});
+export type AgentHealthTelemetry = z.infer<typeof agentHealthTelemetrySchema>;
+
 export const agentSchema = z.object({
   agent_id: z.string().min(1),
   execution_profile: executionProfileSchema,
@@ -33,6 +45,7 @@ export const agentSchema = z.object({
   display_name: z.string().min(1),
   platform: z.string().min(1),
   architecture: z.string().min(1),
+  telemetry: agentHealthTelemetrySchema.optional(),
   online: z.boolean(),
   capabilities: agentCapabilitiesSchema,
   connected_at: z.string().datetime(),
@@ -504,7 +517,7 @@ export const gatewayMessageSchema = z.union([
   gatewayAuthChallengeSchema,
   gatewayAuthProofSchema,
   z.object({ type: z.literal('auth.accepted'), server_time: z.string().datetime() }),
-  z.object({ type: z.literal('heartbeat'), timestamp: z.string().datetime() }),
+  z.object({ type: z.literal('heartbeat'), timestamp: z.string().datetime(), telemetry: agentHealthTelemetrySchema.optional() }),
   z.object({ type: z.literal('event'), event: terminalEventSchema }),
   z.object({ type: z.literal('ack'), session_id: z.string(), sequence: z.number().int().nonnegative() }),
   z.object({ type: z.literal('agent.register'), agent: agentSchema, device_id: z.string().min(1) }),
