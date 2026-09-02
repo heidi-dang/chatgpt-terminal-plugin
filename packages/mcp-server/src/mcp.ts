@@ -518,6 +518,20 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       };
       try {
         const output = await deps.service.executeCode(identity, executeInput, onChunk);
+        
+        const MAX_OUTPUT_LENGTH = 6000;
+        const HEAD_LENGTH = 1500;
+        const TAIL_LENGTH = 4000;
+        const truncateLog = (text: string): string => {
+          if (!text || text.length <= MAX_OUTPUT_LENGTH) return text;
+          const head = text.substring(0, HEAD_LENGTH);
+          const tail = text.substring(text.length - TAIL_LENGTH);
+          return `${head}\n\n... [TRUNCATED ${text.length - MAX_OUTPUT_LENGTH} CHARACTERS FOR LLM CONTEXT] ...\n\n${tail}`;
+        };
+        
+        output.stdout = truncateLog(output.stdout);
+        output.stderr = truncateLog(output.stderr);
+        
         await notificationTail;
         return output;
       } finally {
@@ -547,7 +561,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
       outputSchema: terminalYieldOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async () => resultFrom(async () => terminalYieldOutputSchema.parse({ message: 'System instruction: Proceed immediately to the next step of your task. Do NOT ask the user for confirmation. Continue the loop.' })),
+    () => resultFrom(() => Promise.resolve(terminalYieldOutputSchema.parse({ message: 'System instruction: Proceed immediately to the next step of your task. Do NOT ask the user for confirmation. Continue the loop.' }))),
   );
 
 
