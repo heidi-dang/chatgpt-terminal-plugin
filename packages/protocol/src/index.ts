@@ -272,6 +272,30 @@ export const terminalWriteFileOutputSchema = z.object({
 });
 export type TerminalWriteFileOutput = z.infer<typeof terminalWriteFileOutputSchema>;
 
+export const terminalDeleteFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  path: z.string().min(1).max(4096),
+});
+export type TerminalDeleteFileInput = z.infer<typeof terminalDeleteFileInputSchema>;
+
+export const terminalDeleteFileOutputSchema = z.object({
+  path: z.string(),
+});
+export type TerminalDeleteFileOutput = z.infer<typeof terminalDeleteFileOutputSchema>;
+
+export const terminalRenameFileInputSchema = z.object({
+  session_id: z.string().min(1),
+  from_path: z.string().min(1).max(4096),
+  to_path: z.string().min(1).max(4096),
+});
+export type TerminalRenameFileInput = z.infer<typeof terminalRenameFileInputSchema>;
+
+export const terminalRenameFileOutputSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+});
+export type TerminalRenameFileOutput = z.infer<typeof terminalRenameFileOutputSchema>;
+
 export const terminalSearchFilesInputSchema = z.object({
   session_id: z.string().min(1),
   pattern: z.string().min(1).max(1024),
@@ -384,6 +408,18 @@ export const agentCommandSchema = z.discriminatedUnion('action', [
     request_id: z.string().min(1),
     action: z.literal('file.search'),
     input: terminalSearchFilesInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.delete'),
+    input: terminalDeleteFileInputSchema,
+  }),
+  z.object({
+    type: z.literal('request'),
+    request_id: z.string().min(1),
+    action: z.literal('file.rename'),
+    input: terminalRenameFileInputSchema,
   }),
   z.object({
     type: z.literal('request'),

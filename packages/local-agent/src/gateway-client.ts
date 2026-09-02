@@ -245,6 +245,10 @@ export class AgentGatewayClient {
         return this.agent.writeFile(command.input.session_id, command.input.path, command.input.content, command.input.create_directories);
       case 'file.search':
         return this.agent.searchFiles(command.input.session_id, command.input.pattern, command.input.path, command.input.include, command.input.max_results, command.input.context_lines);
+      case 'file.delete':
+        return this.agent.deleteFile(command.input.session_id, command.input.path);
+      case 'file.rename':
+        return this.agent.renameFile(command.input.session_id, command.input.from_path, command.input.to_path);
       case 'code.execute':
         return this.agent.executeCode(command.user_id, command.input, command.execution_profile);
       case 'code.cancel':

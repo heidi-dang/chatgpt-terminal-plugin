@@ -124,6 +124,8 @@ describe('LocalTerminalAgent', () => {
     await writeTextFile(join(outside, 'secret.txt'), 'outside-secret\n', 'utf8');
     await symlink(outside, join(root, 'escape'), 'dir');
     await symlink(join(outside, 'secret.txt'), join(root, 'linked.txt'), 'file');
+    await writeTextFile(join(root, 'inside.txt'), 'inside-target\n', 'utf8');
+    await symlink(join(root, 'inside.txt'), join(root, 'inside-link.txt'), 'file');
 
     const agent = new LocalTerminalAgent({
       agentId: 'agent-files', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
@@ -145,6 +147,7 @@ describe('LocalTerminalAgent', () => {
       expect.objectContaining({ name: 'nested', type: 'directory' }),
       expect.objectContaining({ name: 'escape', type: 'symlink' }),
       expect.objectContaining({ name: 'linked.txt', type: 'symlink' }),
+      expect.objectContaining({ name: 'inside-link.txt', type: 'symlink' }),
     ]));
 
     const searched = await agent.searchFiles(started.session.session_id, 'needle', '.', '*.txt', 20, 1);
@@ -157,6 +160,24 @@ describe('LocalTerminalAgent', () => {
     await expect(agent.writeFile(started.session.session_id, 'escape/new.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     await expect(agent.writeFile(started.session.session_id, join(outside, 'absolute.txt'), 'blocked', true)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
     await expect(agent.writeFile(started.session.session_id, 'linked.txt', 'blocked', false)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+
+    // Test renameFile
+    const renamed = await agent.renameFile(started.session.session_id, 'nested/new.txt', 'nested/moved.txt');
+    expect(renamed).toMatchObject({ from: 'nested/new.txt', to: 'nested/moved.txt' });
+    const movedRead = await agent.readFile(started.session.session_id, 'nested/moved.txt', 1024);
+    expect(movedRead.content).toContain('alpha');
+
+    // Test deleteFile
+    const deleted = await agent.deleteFile(started.session.session_id, 'nested/moved.txt');
+    expect(deleted.path).toBe('nested/moved.txt');
+    await expect(agent.readFile(started.session.session_id, 'nested/moved.txt', 1024)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+
+    // Reject deleting symlinks or paths outside workspace
+    await expect(agent.deleteFile(started.session.session_id, 'escape')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.renameFile(started.session.session_id, 'linked.txt', 'linked-dest.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.deleteFile(started.session.session_id, 'inside-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    await expect(agent.renameFile(started.session.session_id, 'inside-link.txt', 'renamed-link.txt')).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    expect((await agent.readFile(started.session.session_id, 'inside.txt', 1024)).content).toBe('inside-target\n');
   });
 
   it('does not expose agent control-plane secrets to spawned PTYs', async () => {

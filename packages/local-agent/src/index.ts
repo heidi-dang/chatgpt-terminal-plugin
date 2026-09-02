@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { constants, readlinkSync, realpathSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import * as pty from 'node-pty';
 import { CodeBlockExecutor } from './code-block-executor.js';
@@ -74,6 +74,8 @@ export interface TerminalAgentApi {
   readFile(sessionId: string, path: string, maxBytes: number): Promise<{ path: string; content: string; size: number; truncated: boolean }>;
   listFiles(sessionId: string, path: string, maxEntries: number): Promise<{ path: string; entries: Array<{ name: string; type: string; size: number; modified_at: string }>; truncated: boolean }>;
   writeFile(sessionId: string, path: string, content: string, createDirectories: boolean): Promise<{ path: string; bytes_written: number }>;
+  deleteFile(sessionId: string, filePath: string): Promise<{ path: string }>;
+  renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }>;
   searchFiles(sessionId: string, pattern: string, path: string, include: string | undefined, maxResults: number, contextLines: number): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }>;
   executeCode(userId: string, input: CodeExecuteInput, requestedProfile: ExecutionProfile): Promise<CodeExecuteOutput>;
   cancelCode(userId: string, executionId: string, requestedProfile: ExecutionProfile): CodeCancelOutput;
@@ -585,6 +587,77 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       if (error instanceof TerminalProtocolError) throw error;
       if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Parent directory not found: ${filePath}`);
       throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot write file: ${errorMsg(error)}`);
+    }
+  }
+
+  async deleteFile(sessionId: string, filePath: string): Promise<{ path: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File deletes are not permitted under the read-only execution profile.');
+    }
+
+    const requested = isAbsolute(filePath) ? filePath : resolve(managed.metadata.cwd, filePath);
+    // Resolve only the parent/allowed ancestor so lstat observes the requested
+    // directory entry itself instead of following a final-component symlink.
+    const resolved = this.workspacePolicy.resolveWritablePath(requested);
+    try {
+      const info = await lstat(resolved);
+      if (info.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to delete a symbolic link.');
+      }
+      if (!info.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Delete target is not a regular file.');
+      }
+      await unlink(resolved);
+      return { path: relative(managed.metadata.cwd, resolved) || resolved };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `File not found: ${filePath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot delete file: ${errorMsg(error)}`);
+    }
+  }
+
+  async renameFile(sessionId: string, fromPath: string, toPath: string): Promise<{ from: string; to: string }> {
+    const managed = this.requireSession(sessionId);
+    if (managed.metadata.execution_profile === 'read-only') {
+      throw new TerminalProtocolError('PERMISSION_DENIED', 'File renames are not permitted under the read-only execution profile.');
+    }
+
+    const requestedFrom = isAbsolute(fromPath) ? fromPath : resolve(managed.metadata.cwd, fromPath);
+    const requestedTo = isAbsolute(toPath) ? toPath : resolve(managed.metadata.cwd, toPath);
+    // Do not canonicalize the source entry itself: doing so follows a symlink
+    // before lstat and can rename its target. Canonicalize only its parent.
+    const resolvedFrom = this.workspacePolicy.resolveWritablePath(requestedFrom);
+    const resolvedTo = this.workspacePolicy.resolveWritablePath(requestedTo);
+    try {
+      const sourceInfo = await lstat(resolvedFrom);
+      if (sourceInfo.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to rename a symbolic link.');
+      }
+      if (!sourceInfo.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Rename source is not a regular file.');
+      }
+
+      const destinationInfo = await lstat(resolvedTo).catch((error: unknown) => {
+        if (isFileNotFound(error)) return null;
+        throw error;
+      });
+      if (destinationInfo?.isSymbolicLink()) {
+        throw new TerminalProtocolError('PATH_NOT_ALLOWED', 'Refusing to replace a symbolic link.');
+      }
+      if (destinationInfo && !destinationInfo.isFile()) {
+        throw new TerminalProtocolError('INVALID_ARGUMENT', 'Rename destination is not a regular file.');
+      }
+
+      await rename(resolvedFrom, resolvedTo);
+      return {
+        from: relative(managed.metadata.cwd, resolvedFrom) || resolvedFrom,
+        to: relative(managed.metadata.cwd, resolvedTo) || resolvedTo,
+      };
+    } catch (error) {
+      if (error instanceof TerminalProtocolError) throw error;
+      if (isFileNotFound(error)) throw new TerminalProtocolError('FILE_NOT_FOUND', `Source file not found: ${fromPath}`);
+      throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot rename file: ${errorMsg(error)}`);
     }
   }
 
