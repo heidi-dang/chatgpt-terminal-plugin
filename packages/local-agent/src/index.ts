@@ -7,6 +7,7 @@ import os from 'node:os';
 import * as pty from 'node-pty';
 import { CodeBlockExecutor } from './code-block-executor.js';
 import { LspManager, type LspServerDefinition } from './lsp-manager.js';
+import { discoverFilesWithRipgrep } from './ripgrep-discovery.js';
 export { discoverLspServers, resolveLspServers } from './lsp-discovery.js';
 import {
   TerminalProtocolError,
@@ -169,6 +170,43 @@ async function readFileContent(filePath: string, maxBytes: number): Promise<stri
   } catch {
     return null;
   }
+}
+
+type SearchMatch = {
+  file: string;
+  line: number;
+  text: string;
+  context_before?: string[];
+  context_after?: string[];
+};
+
+async function searchSingleTextFile(
+  filePath: string,
+  displayPath: string,
+  regex: RegExp,
+  contextLines: number,
+  maxResults: number,
+  matches: SearchMatch[],
+): Promise<boolean> {
+  const content = await readFileContent(filePath, 512 * 1024);
+  if (content === null) return false;
+  const lines = content.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineText = lines[index] ?? '';
+    if (!regex.test(lineText)) continue;
+    const match: SearchMatch = {
+      file: displayPath,
+      line: index + 1,
+      text: lineText.slice(0, 500),
+    };
+    if (contextLines > 0) {
+      match.context_before = lines.slice(Math.max(0, index - contextLines), index).map((line) => line.slice(0, 500));
+      match.context_after = lines.slice(index + 1, index + 1 + contextLines).map((line) => line.slice(0, 500));
+    }
+    matches.push(match);
+    if (matches.length >= maxResults) return true;
+  }
+  return false;
 }
 
 export function restrictiveExecutionProfile(localProfile: ExecutionProfile, requestedProfile: ExecutionProfile): ExecutionProfile {
@@ -802,7 +840,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     include: string | undefined,
     maxResults: number,
     contextLines: number,
-  ): Promise<{ pattern: string; matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }>; truncated: boolean; files_searched: number }> {
+  ): Promise<{ pattern: string; matches: SearchMatch[]; truncated: boolean; files_searched: number }> {
     const managed = this.requireSession(sessionId);
     const resolved = this.resolveFilePath(managed, searchPath);
     const info = await stat(resolved).catch(() => null);
@@ -815,10 +853,22 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       throw new TerminalProtocolError('INVALID_ARGUMENT', `Invalid regex pattern: ${pattern}`);
     }
 
-    const matches: Array<{ file: string; line: number; text: string; context_before?: string[]; context_after?: string[] }> = [];
+    const matches: SearchMatch[] = [];
     let filesSearched = 0;
     let truncated = false;
     const maxFilesSearched = 10_000;
+
+    const searchFile = async (entryPath: string): Promise<void> => {
+      filesSearched += 1;
+      if (await searchSingleTextFile(
+        entryPath,
+        relative(managed.metadata.cwd, entryPath) || entryPath,
+        regex,
+        contextLines,
+        maxResults,
+        matches,
+      )) truncated = true;
+    };
 
     const walk = async (dir: string): Promise<void> => {
       if (truncated) return;
@@ -826,82 +876,63 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       try {
         dirents = await readdir(dir, { withFileTypes: true });
       } catch {
-        return; // skip unreadable directories
+        return;
       }
       for (const dirent of dirents) {
         if (truncated) return;
         const entryPath = resolve(dir, dirent.name);
-        // Skip hidden dirs, node_modules, .git
         if (dirent.name.startsWith('.') || dirent.name === 'node_modules') continue;
         if (dirent.isDirectory()) {
           await walk(entryPath);
-        } else if (dirent.isFile()) {
-          if (filesSearched >= maxFilesSearched) {
-            truncated = true;
-            return;
-          }
-          // Apply include filter (simple glob: *.ts, *.js etc)
-          if (include && !matchGlob(dirent.name, include)) continue;
-          filesSearched += 1;
-          try {
-            const content = await readFileContent(entryPath, 512 * 1024); // max 512KB per file
-            if (content === null) continue; // binary or too large
-            const lines = content.split('\n');
-            for (let i = 0; i < lines.length; i += 1) {
-              const lineText = lines[i] ?? '';
-              if (regex.test(lineText)) {
-                const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                  file: relative(managed.metadata.cwd, entryPath) || entryPath,
-                  line: i + 1,
-                  text: lineText.slice(0, 500),
-                };
-                if (contextLines > 0) {
-                  match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                  match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-                }
-                matches.push(match);
-                if (matches.length >= maxResults) {
-                  truncated = true;
-                  return;
-                }
-              }
-            }
-          } catch {
-            // skip unreadable files
-          }
+          continue;
         }
+        if (!dirent.isFile() || (include && !matchGlob(dirent.name, include))) continue;
+        if (filesSearched >= maxFilesSearched) {
+          truncated = true;
+          return;
+        }
+        await searchFile(entryPath);
       }
     };
 
     if (info.isFile()) {
-      // Search single file
       filesSearched = 1;
-      try {
-        const content = await readFileContent(resolved, 512 * 1024);
-        if (content !== null) {
-          const lines = content.split('\n');
-          for (let i = 0; i < lines.length; i += 1) {
-            const lineText = lines[i] ?? '';
-            if (regex.test(lineText)) {
-              const match: { file: string; line: number; text: string; context_before?: string[]; context_after?: string[] } = {
-                file: relative(managed.metadata.cwd, resolved) || resolved,
-                line: i + 1,
-                text: lineText.slice(0, 500),
-              };
-              if (contextLines > 0) {
-                match.context_before = lines.slice(Math.max(0, i - contextLines), i).map(l => l.slice(0, 500));
-                match.context_after = lines.slice(i + 1, i + 1 + contextLines).map(l => l.slice(0, 500));
-              }
-              matches.push(match);
-              if (matches.length >= maxResults) { truncated = true; break; }
-            }
-          }
-        }
-      } catch {
-        throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read file: ${searchPath}`);
-      }
+      truncated = await searchSingleTextFile(
+        resolved,
+        relative(managed.metadata.cwd, resolved) || resolved,
+        regex,
+        contextLines,
+        maxResults,
+        matches,
+      );
     } else {
-      await walk(resolved);
+      const accelerated = await discoverFilesWithRipgrep(
+        resolved,
+        (entryPath) => !include || matchGlob(basename(entryPath), include),
+        maxFilesSearched,
+      );
+      if (!accelerated) {
+        await walk(resolved);
+      } else {
+        for (const discoveredPath of accelerated.files) {
+          if (truncated) break;
+          if (filesSearched >= maxFilesSearched) {
+            truncated = true;
+            break;
+          }
+          const fileInfo = await lstat(discoveredPath).catch(() => null);
+          if (!fileInfo?.isFile()) continue;
+          let entryPath: string;
+          try {
+            entryPath = this.workspacePolicy.resolveExistingPath(discoveredPath);
+          } catch {
+            continue;
+          }
+          if (!isPathWithin(resolved, entryPath)) continue;
+          await searchFile(entryPath);
+        }
+        if (accelerated.truncated) truncated = true;
+      }
     }
 
     return { pattern, matches, truncated, files_searched: filesSearched };
