@@ -132,6 +132,8 @@ const terminalExecuteCodeBlockMcpOutputSchema = codeExecuteOutputSchema.extend({
 
 const terminalStartViewOutputSchema = terminalStartOutputSchema.extend({
   surface_id: z.string().uuid(),
+  surface_open: z.boolean(),
+  surface_active: z.boolean(),
   agent_id: z.string(),
   agent_name: z.string(),
   cwd: z.string(),
@@ -307,6 +309,8 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         const output = terminalStartViewOutputSchema.parse({
           ...started,
           surface_id: turn.surface_id,
+          surface_open: turn.surface_open,
+          surface_active: turn.surface_active,
           agent_id: record.session.agent_id,
           agent_name: agent?.display_name ?? record.session.agent_id,
           cwd: record.session.cwd,

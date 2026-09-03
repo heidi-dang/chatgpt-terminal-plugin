@@ -294,6 +294,25 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
+  it('renews an active PTY lease from an authenticated stream session without MCP-session identity', async () => {
+    vi.useFakeTimers();
+    const closed: string[] = [];
+    const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 5_000, undefined, 20_000);
+
+    await registry.begin(identity);
+    await registry.activate(identity, 'session-stream');
+    await vi.advanceTimersByTimeAsync(4_000);
+    registry.touchSession('user-a', 'session-stream');
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(closed).toEqual([]);
+    expect(registry.current(identity).session_id).toBe('session-stream');
+    registry.touchSession('different-user', 'session-stream');
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(closed).toEqual(['session-stream']);
+    registry.dispose();
+  });
+
   it('expires an abandoned surface even when no PTY was started', async () => {
     vi.useFakeTimers();
     const registry = new TerminalTurnRegistry(async () => undefined, 1_000, undefined, 5_000);

@@ -326,6 +326,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     try {
       const payload = streamTokens.verify(token, sessionId);
       const record = gateway.getSessionForUser(payload.sub, sessionId);
+      turnRegistry.touchSession(payload.sub, sessionId);
       const headerCursor = req.get('last-event-id');
       const queryCursor = typeof req.query.after === 'string' ? req.query.after : undefined;
       const parsedCursor = Number.parseInt(headerCursor ?? queryCursor ?? '0', 10);
@@ -342,6 +343,14 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('x-accel-buffering', 'no');
       res.flushHeaders();
       terminalStreamClients.add(res);
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'terminal.sse_connected',
+        terminal_session_id: sessionId,
+        user_id: payload.sub,
+        after: cursor,
+        active_streams: terminalStreamClients.size,
+      }));
 
       let lastSequence = cursor;
       let replaying = true;
@@ -385,7 +394,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       }
 
       const keepAlive = setInterval(() => {
-        if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n');
+        if (!res.writableEnded && !res.destroyed) {
+          turnRegistry.touchSession(payload.sub, sessionId);
+          res.write(': keepalive\n\n');
+        }
       }, 15_000);
       keepAlive.unref();
       const expiryTimer = setTimeout(() => res.end(), Math.max(1, payload.exp * 1000 - Date.now()));
@@ -398,6 +410,13 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearTimeout(expiryTimer);
         unsubscribe();
         terminalStreamClients.delete(res);
+        console.log(JSON.stringify({
+          level: 'info',
+          event: 'terminal.sse_disconnected',
+          terminal_session_id: sessionId,
+          user_id: payload.sub,
+          active_streams: terminalStreamClients.size,
+        }));
         if (!res.writableEnded && !res.destroyed) res.end();
       };
       res.once('close', cleanup);

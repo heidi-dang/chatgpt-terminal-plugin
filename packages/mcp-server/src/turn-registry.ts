@@ -182,6 +182,18 @@ export class TerminalTurnRegistry {
     return stateFromRecord(record);
   }
 
+  touchSession(userId: string, sessionId: string): TerminalTurnState {
+    for (const [key, record] of this.records.entries()) {
+      if (record.identity.userId !== userId || record.sessionId !== sessionId) continue;
+      this.renewSurface(record);
+      this.renewActive(record);
+      this.scheduleExpiry(key, record);
+      void this.persist().catch((error) => logPersistenceFailure(error));
+      return stateFromRecord(record);
+    }
+    return closedState(null);
+  }
+
   async clearActive(identity: RequestIdentity): Promise<TerminalTurnState> {
     const key = turnKey(identity);
     const record = this.records.get(key);

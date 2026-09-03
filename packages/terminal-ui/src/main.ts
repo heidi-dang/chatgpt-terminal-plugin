@@ -77,7 +77,7 @@ const MOBILE_OUTPUT_TRIM_TARGET = 160_000;
 const STREAM_REFRESH_MARGIN_MS = 15_000;
 const SSE_CONNECT_TIMEOUT_MS = 2_000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 15_000;
-const SURFACE_POLL_INTERVAL_MS = 500;
+const SURFACE_POLL_INTERVAL_MS = 2_000;
 
 export class ChatGptMcpBridge implements TerminalAppBridge {
   ontoolresult: ((result: CallToolResult) => void) | undefined;
@@ -300,6 +300,12 @@ export function parseStreamMeta(result: CallToolResult | null): TerminalStreamMe
   return typeof terminalStream.url === 'string' && typeof terminalStream.expires_at === 'string'
     ? { url: terminalStream.url, expires_at: terminalStream.expires_at }
     : null;
+}
+
+export function parseSurfaceId(result: CallToolResult | null): string | null {
+  if (!result) return null;
+  const value = structuredPayload(result);
+  return value && typeof value.surface_id === 'string' ? value.surface_id : null;
 }
 
 function parseSurfaceState(result: CallToolResult | null): TerminalSurfaceState | null {
@@ -589,11 +595,12 @@ export class TerminalViewer {
 
   applyToolResult(result: CallToolResult): void {
     const surface = parseSurfaceState(result);
-    if (!this.surfaceId && surface?.surface_id) {
-      this.surfaceId = surface.surface_id;
+    const resultSurfaceId = surface?.surface_id ?? parseSurfaceId(result);
+    if (!this.surfaceId && resultSurfaceId) {
+      this.surfaceId = resultSurfaceId;
       if (this.bridgeReady) this.startSurfaceSync();
     }
-    if (surface?.surface_id && this.surfaceId && surface.surface_id !== this.surfaceId) return;
+    if (resultSurfaceId && this.surfaceId && resultSurfaceId !== this.surfaceId) return;
     if (surface && !surface.surface_open) {
       this.stopSurfaceSync();
       this.finishStream();
@@ -609,7 +616,6 @@ export class TerminalViewer {
     let sessionChanged = false;
     if (next) {
       const previousSession = this.viewState?.session_id;
-      const resultSurfaceId = surface?.surface_id;
       const canSwitch = previousSession === undefined || previousSession === next.session_id || (Boolean(resultSurfaceId) && resultSurfaceId === this.surfaceId);
       if (!canSwitch) return;
       this.viewState = mergeViewState(this.viewState, next);
