@@ -118,8 +118,11 @@ describe('MCP transport session isolation', () => {
       expect(aSurfaceAfterB).toEqual(expect.objectContaining({ surface_open: true, surface_active: true, session_id: sessionIdA }));
       expect(bSurfaceAfterA).toEqual(expect.objectContaining({ surface_open: true, surface_active: true, session_id: sessionIdB }));
 
-      await clientA.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceIdA } });
+      const aYield = structured(await clientA.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceIdA } }));
+      expect(aYield).toEqual(expect.objectContaining({ surface_open: true, surface_active: true, session_id: sessionIdA }));
+      const aStatusWhileWaiting = structured(await clientA.callTool({ name: 'terminal_status', arguments: { session_id: sessionIdA } }));
       const bStatus = structured(await clientB.callTool({ name: 'terminal_status', arguments: { session_id: sessionIdB } }));
+      expect(aStatusWhileWaiting.status).toBe('running');
       expect(bStatus.status).toBe('running');
 
       await clientB.callTool({
@@ -127,10 +130,12 @@ describe('MCP transport session isolation', () => {
       });
       expect(await readUntil(clientB, sessionIdB, Number(startedB.cursor ?? 0), '__B_STILL_ALIVE__')).toContain('__B_STILL_ALIVE__');
 
+      await clientA.callTool({ name: 'terminal_close', arguments: { session_id: sessionIdA } });
       await waitUntil(async () => {
         const aStatus = structured(await clientA!.callTool({ name: 'terminal_status', arguments: { session_id: sessionIdA } }));
         return aStatus.status === 'closed';
       });
+      await clientB.callTool({ name: 'terminal_close', arguments: { session_id: sessionIdB } });
       await clientB.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceIdB } });
     } finally {
       await clientA?.close().catch(() => undefined);

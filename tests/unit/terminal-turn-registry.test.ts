@@ -140,9 +140,11 @@ describe('TerminalTurnRegistry', () => {
     expect(registry.current(conversationB).session_id).toBe('session-b');
 
     await registry.end(conversationA);
-    expect(closed).toEqual(['session-a']);
-    expect(registry.current(conversationA)).toEqual(expect.objectContaining({ surface_id: surfaceA.surface_id, surface_open: true, surface_active: false, session_id: null }));
+    expect(closed).toEqual([]);
+    expect(registry.current(conversationA)).toEqual(expect.objectContaining({ surface_id: surfaceA.surface_id, surface_open: true, surface_active: true, session_id: 'session-a' }));
     expect(registry.current(conversationB)).toEqual(expect.objectContaining({ surface_open: true, session_id: 'session-b' }));
+    await registry.clearActive(conversationA);
+    expect(closed).toEqual(['session-a']);
     registry.dispose();
   });
 
@@ -206,6 +208,8 @@ describe('TerminalTurnRegistry', () => {
       expect(secondProcess.current(beforeRestart).surface_open).toBe(false);
       expect(closed).toEqual([]);
       await secondProcess.end(afterRestart);
+      expect(closed).toEqual([]);
+      await secondProcess.clearActive(afterRestart);
       secondProcess.dispose();
       expect(closed).toEqual(['session-after-restart']);
     } finally {
@@ -238,16 +242,17 @@ describe('TerminalTurnRegistry', () => {
     registry.dispose();
   });
 
-  it('closes the active PTY when the assistant turn ends but keeps the surface open', async () => {
+  it('keeps the active PTY attached when the assistant turn yields for user input', async () => {
     const closed: string[] = [];
     const registry = new TerminalTurnRegistry(async (_identity, sessionId) => { closed.push(sessionId); }, 60_000);
 
     const surface = await registry.begin(identity);
     await registry.activate(identity, 'session-1');
-    await registry.end(identity);
+    const yielded = await registry.end(identity);
 
-    expect(closed).toEqual(['session-1']);
-    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, surface_active: false, session_id: null }));
+    expect(closed).toEqual([]);
+    expect(yielded).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, surface_active: true, session_id: 'session-1' }));
+    expect(registry.current(identity)).toEqual(expect.objectContaining({ surface_id: surface.surface_id, surface_open: true, surface_active: true, session_id: 'session-1' }));
     registry.dispose();
   });
 
@@ -322,7 +327,7 @@ describe('TerminalTurnRegistry', () => {
 
     await registry.begin(identity);
     await registry.activate(identity, 'session-gone');
-    await expect(registry.end(identity)).resolves.toEqual(expect.objectContaining({ surface_open: true, surface_active: false, session_id: null }));
+    await expect(registry.clearActive(identity)).resolves.toEqual(expect.objectContaining({ surface_open: true, surface_active: false, session_id: null }));
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
     registry.dispose();
@@ -336,7 +341,7 @@ describe('TerminalTurnRegistry', () => {
 
     await registry.begin(identity);
     await registry.activate(identity, 'session-failed');
-    await registry.end(identity);
+    await registry.clearActive(identity);
     expect(errorSpy).toHaveBeenCalledOnce();
     expect(String(errorSpy.mock.calls[0]?.[0])).toContain('terminal.turn_cleanup_failed');
     errorSpy.mockRestore();

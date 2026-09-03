@@ -126,10 +126,15 @@ describe('MCP deployment restart recovery', () => {
       const output = await readUntil(secondClient, sessionId, Number(started.cursor ?? 0), '__RESTART_RECOVERED__');
       expect(output).toContain('__RESTART_RECOVERED__');
 
-      const closed = structured(await secondClient.callTool({
+      const yielded = structured(await secondClient.callTool({
         name: 'terminal_turn_close',
         arguments: { surface_id: surfaceId },
       }));
+      expect(yielded).toEqual(expect.objectContaining({ surface_id: surfaceId, surface_open: true, surface_active: true, session_id: sessionId }));
+      const waitingStatus = structured(await secondClient.callTool({ name: 'terminal_status', arguments: { session_id: sessionId } }));
+      expect(waitingStatus.status).toBe('running');
+      await secondClient.callTool({ name: 'terminal_close', arguments: { session_id: sessionId } });
+      const closed = structured(await secondClient.callTool({ name: 'terminal_turn_close', arguments: { surface_id: surfaceId } }));
       expect(closed).toEqual(expect.objectContaining({ surface_id: surfaceId, surface_open: true, surface_active: false, session_id: null }));
     } finally {
       await firstClient?.close().catch(() => undefined);

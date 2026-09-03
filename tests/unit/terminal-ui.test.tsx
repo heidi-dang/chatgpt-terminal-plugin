@@ -185,6 +185,25 @@ describe('terminal MCP App UI', () => {
     expect(source.close).toHaveBeenCalled();
   });
 
+  it('keeps a healthy SSE connection when terminal_start reattaches the same PTY', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    const source = terminalSource();
+    source.emitOpen();
+    const reattached = initialResult();
+    reattached._meta.terminal_stream.url = 'https://terminal.example/events?token=reattached';
+    app.ontoolresult?.(reattached);
+
+    expect(source.close).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances.some((candidate) => candidate.url.includes('token=reattached'))).toBe(false);
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
+    viewer.destroy();
+  });
+
   it('does not rescan the full transcript on every streaming paint', async () => {
     const app = createFakeApp();
     const viewer = new TerminalViewer(app);

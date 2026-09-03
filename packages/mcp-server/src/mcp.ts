@@ -229,7 +229,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_turn_close',
     {
       title: 'Close terminal turn',
-      description: 'Required final Terminal action before the assistant finishes a terminal-using turn. Kills only the active PTY while keeping the conversation Live Terminal surface open for reuse. Pass surface_id when available so the same surface can recover safely after an MCP restart.',
+      description: 'Required final Terminal action before the assistant yields a terminal-using turn back to the user. Keeps the active PTY and Live Terminal stream attached so the widget remains live while waiting for the next user action. When the terminal task is actually complete, call terminal_close for the active session first, then terminal_turn_close. Pass surface_id when available for restart recovery.',
       inputSchema: terminalSurfaceCloseInputSchema,
       outputSchema: terminalSurfaceOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -246,7 +246,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_start',
     {
       title: 'Start terminal session',
-      description: "Start a fresh PTY and attach it to the conversation's existing Live Terminal surface. If another PTY is active, it is killed first. After terminal_surface has rendered the widget once, later assistant turns must call terminal_start directly so the existing widget switches to the new stream instead of rendering another UI. Pass surface_id when available for restart recovery.",
+      description: "Attach a PTY to the conversation's existing Live Terminal surface. Across later assistant turns, a compatible active PTY is reused so its SSE stream stays live; an incompatible request (different agent/cwd/shell or an explicit command) replaces it with a fresh PTY. After terminal_surface has rendered the widget once, call terminal_start directly rather than rendering another UI. Pass surface_id when available for restart recovery.",
       inputSchema: terminalStartViewInputSchema,
       outputSchema: terminalStartViewOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -263,9 +263,40 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
         if (surfaceId && currentSurface.surface_id !== surfaceId) {
           throw new TerminalProtocolError('INVALID_ARGUMENT', 'terminal_start surface_id does not match the active Live Terminal surface.');
         }
-        await deps.turnRegistry.clearActive(identity);
-        const started = await deps.service.start(identity, startInput);
-        const turn = await deps.turnRegistry.activate(identity, started.session_id);
+        let started;
+        let turn: TerminalTurnState;
+        const activeSessionId = currentSurface.session_id;
+        if (activeSessionId) {
+          const status = await deps.service.status(identity, activeSessionId);
+          const reusable = isReusableTerminalStatus(status.status)
+            && status.agent_id === startInput.agent_id
+            && startInput.command === undefined
+            && (startInput.cwd === undefined || startInput.cwd === status.cwd)
+            && (startInput.shell === undefined || startInput.shell === status.shell);
+          if (reusable) {
+            deps.turnRegistry.touch(identity, activeSessionId);
+            const read = await deps.service.read(identity, {
+              session_id: activeSessionId,
+              after: 0,
+              max_bytes: deps.config.maxReadBytes,
+              wait_ms: 0,
+            });
+            started = {
+              session_id: activeSessionId,
+              status: status.status,
+              cursor: read.next_cursor,
+              initial_output: read.output,
+            };
+            turn = deps.turnRegistry.current(identity);
+          } else {
+            await deps.turnRegistry.clearActive(identity);
+            started = await deps.service.start(identity, startInput);
+            turn = await deps.turnRegistry.activate(identity, started.session_id);
+          }
+        } else {
+          started = await deps.service.start(identity, startInput);
+          turn = await deps.turnRegistry.activate(identity, started.session_id);
+        }
         const record = deps.gateway.getSessionForUser(identity.userId, started.session_id);
         if (!record.session) throw new TerminalProtocolError('SESSION_NOT_FOUND', 'Terminal session metadata was not found.');
         const agent = deps.gateway.listAgents(identity.userId).find((candidate) => candidate.agent_id === record.session!.agent_id);
@@ -387,7 +418,7 @@ export function createTerminalMcpServer(deps: McpServerDependencies): McpServer 
     'terminal_close',
     {
       title: 'Close terminal session',
-      description: 'Terminate and dispose a persistent PTY terminal session.',
+      description: 'Terminate and dispose a persistent PTY terminal session. Use this when the terminal task is actually complete; ordinary assistant turn boundaries should use terminal_turn_close so the Live Terminal remains active while waiting for the user.',
       inputSchema: terminalSessionIdInputSchema,
       outputSchema: terminalMutationOutputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -886,6 +917,10 @@ async function terminalSurfaceView(
   }
 }
 
+
+function isReusableTerminalStatus(status: string): boolean {
+  return status === 'creating' || status === 'running' || status === 'waiting' || status === 'disconnected';
+}
 
 function identityWithTerminalActivity(
   deps: McpServerDependencies,

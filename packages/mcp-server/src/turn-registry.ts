@@ -225,7 +225,14 @@ export class TerminalTurnRegistry {
   }
 
   async end(identity: RequestIdentity): Promise<TerminalTurnState> {
-    return this.clearActive(identity);
+    const key = turnKey(identity);
+    const record = this.records.get(key);
+    if (!record) return closedState(null);
+    this.renewSurface(record);
+    if (record.sessionId) this.renewActive(record);
+    this.scheduleExpiry(key, record);
+    await this.persist();
+    return stateFromRecord(record);
   }
 
   dispose(): void {

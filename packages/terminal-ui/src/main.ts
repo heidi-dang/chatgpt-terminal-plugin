@@ -606,6 +606,7 @@ export class TerminalViewer {
     }
 
     const next = parseViewState(result);
+    let sessionChanged = false;
     if (next) {
       const previousSession = this.viewState?.session_id;
       const resultSurfaceId = surface?.surface_id;
@@ -613,6 +614,7 @@ export class TerminalViewer {
       if (!canSwitch) return;
       this.viewState = mergeViewState(this.viewState, next);
       if (previousSession !== next.session_id) {
+        sessionChanged = true;
         this.refreshId += 1;
         this.refreshing = false;
         closeTerminalSource(this.eventSource);
@@ -631,7 +633,7 @@ export class TerminalViewer {
     }
 
     const meta = parseStreamMeta(result);
-    if (meta) this.useStream(meta);
+    if (meta && (sessionChanged || !this.eventSource || this.streamState !== 'live')) this.useStream(meta);
     if (this.viewState && isFinalStatus(this.viewState.status)) this.finishStream();
   }
 
