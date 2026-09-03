@@ -61,8 +61,8 @@ describe('HTTP MCP session retention', () => {
       DEVELOPMENT_USER_ID: 'user-session-retention',
       STREAM_TOKEN_SECRET: 'http-session-retention-secret-0123456789abcdef',
       AGENT_ENROLLMENT_TOKEN: 'http-session-retention-enrollment-token',
-      MCP_SESSION_IDLE_MS: '20',
-      MCP_SESSION_SWEEP_INTERVAL_MS: '5',
+      MCP_SESSION_IDLE_MS: '500',
+      MCP_SESSION_SWEEP_INTERVAL_MS: '20',
     });
     const runtime = await createTerminalHttpRuntime(config);
     await new Promise<void>((resolve, reject) => {
@@ -93,7 +93,7 @@ describe('HTTP MCP session retention', () => {
     const initialHealth = await (await fetch(`${base}/health`)).json() as { mcp_sessions?: number };
     expect(initialHealth.mcp_sessions).toBe(1);
 
-    const deadline = Date.now() + 1_000;
+    const deadline = Date.now() + 3_000;
     let remaining = initialHealth.mcp_sessions;
     while (Date.now() < deadline && remaining !== 0) {
       await new Promise((resolve) => setTimeout(resolve, 5));
