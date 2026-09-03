@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   TerminalProtocolError,
@@ -93,6 +93,7 @@ interface SemanticWorkspace {
   documents: Map<string, OpenDocument>;
   diagnostics: Map<string, { diagnostics: unknown[]; version?: number }>;
   previews: Map<string, StoredPreview>;
+  workspaceSymbolsPrimed: boolean;
 }
 
 interface MemoryStore {
@@ -115,7 +116,10 @@ const MAX_SEMANTIC_OUTPUT_BYTES = 64 * 1024;
 const MAX_PREVIEWS_PER_WORKSPACE = 64;
 const DEFAULT_PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_PROJECT_FILES = 5_000;
-const SKIPPED_PROJECT_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.venv', 'venv', 'target', 'vendor']);
+const MAX_PROJECT_PRIME_ENTRIES = 2_000;
+const MAX_PROJECT_PRIME_DOCUMENTS = 32;
+const SKIPPED_PROJECT_DIRS = new Set(['.git', '.worktrees', 'node_modules', 'dist', 'build', 'coverage', '.next', '.venv', 'venv', 'target', 'vendor']);
+const SOURCE_LANGUAGE_IDS = new Set(['typescript', 'typescriptreact', 'javascript', 'javascriptreact', 'python', 'go', 'rust', 'c', 'cpp', 'java', 'kotlin', 'shellscript']);
 
 const CLIENT_CAPABILITIES = {
   workspace: {
@@ -164,6 +168,7 @@ export class SemanticLspManager {
       documents: new Map(),
       diagnostics: new Map(),
       previews: new Map(),
+      workspaceSymbolsPrimed: false,
     };
     this.workspaces.set(semanticId, workspace);
     this.semanticByLsp.set(started.lsp_id, semanticId);
@@ -215,12 +220,14 @@ export class SemanticLspManager {
 
   async findSymbols(userId: string, semanticId: string, query: string): Promise<SemanticWorkspaceSymbolsOutput> {
     const workspace = this.requireOwned(userId, semanticId);
-    const response = await this.lsp.request(userId, {
+    await this.primeWorkspaceForSymbols(workspace);
+    const typescriptSymbols = await this.findTypeScriptWorkspaceSymbols(workspace, query);
+    const source = typescriptSymbols ?? (await this.lsp.request(userId, {
       lsp_id: workspace.lspId,
       method: 'workspace/symbol',
       params: { query },
-    });
-    const bounded = boundArray(response.result);
+    })).result;
+    const bounded = boundArray(source);
     return { semantic_id: semanticId, query, symbols: bounded.items, truncated: bounded.truncated };
   }
 
@@ -529,6 +536,134 @@ export class SemanticLspManager {
     return matches[0].symbol;
   }
 
+  private async primeWorkspaceForSymbols(workspace: SemanticWorkspace): Promise<void> {
+    if (workspace.workspaceSymbolsPrimed) return;
+
+    const preferred = preferredLanguageIdsForServer(workspace.serverId);
+    if (this.supportsTypeScriptTsserverRequest(workspace)) {
+      await this.primeTypeScriptProjects(workspace, preferred);
+      workspace.workspaceSymbolsPrimed = true;
+      return;
+    }
+
+    if (workspace.documents.size === 0) {
+      const source = await this.findFirstWorkspaceSource(workspace, preferred);
+      if (source) await this.syncDocument(workspace, source);
+    }
+    workspace.workspaceSymbolsPrimed = true;
+  }
+
+  private supportsTypeScriptTsserverRequest(workspace: SemanticWorkspace): boolean {
+    const normalized = workspace.serverId.toLowerCase();
+    if (!normalized.includes('typescript') && !normalized.includes('tsserver')) return false;
+    const executeCommandProvider = asRecord(workspace.capabilities.executeCommandProvider);
+    return Array.isArray(executeCommandProvider?.commands)
+      && executeCommandProvider.commands.includes('typescript.tsserverRequest');
+  }
+
+  private async primeTypeScriptProjects(workspace: SemanticWorkspace, preferred: ReadonlySet<string>): Promise<void> {
+    const queue = [workspace.root];
+    const configDirectories = new Set<string>();
+    const sourceFiles: string[] = [];
+    let entriesSeen = 0;
+
+    while (queue.length > 0 && entriesSeen < MAX_PROJECT_PRIME_ENTRIES) {
+      const current = queue.shift()!;
+      let entries;
+      try {
+        entries = (await readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entriesSeen >= MAX_PROJECT_PRIME_ENTRIES) break;
+        entriesSeen += 1;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_PROJECT_DIRS.has(entry.name)) queue.push(join(current, entry.name));
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const absolutePath = join(current, entry.name);
+        if (entry.name === 'tsconfig.json' || entry.name === 'jsconfig.json') configDirectories.add(current);
+        if (preferred.has(languageIdForPath(absolutePath))) sourceFiles.push(absolutePath);
+      }
+    }
+
+    const representatives = selectProjectRepresentatives(workspace.root, configDirectories, sourceFiles);
+    if (representatives.length === 0 && sourceFiles[0]) representatives.push(sourceFiles[0]);
+    for (const source of representatives.slice(0, MAX_PROJECT_PRIME_DOCUMENTS)) {
+      await this.syncDocument(workspace, source);
+    }
+  }
+
+  private async findFirstWorkspaceSource(workspace: SemanticWorkspace, preferred: ReadonlySet<string>): Promise<string | undefined> {
+    const queue = [workspace.root];
+    let entriesSeen = 0;
+    let fallback: string | undefined;
+    while (queue.length > 0 && entriesSeen < MAX_PROJECT_PRIME_ENTRIES) {
+      const current = queue.shift()!;
+      let entries;
+      try {
+        entries = (await readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entriesSeen >= MAX_PROJECT_PRIME_ENTRIES) break;
+        entriesSeen += 1;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_PROJECT_DIRS.has(entry.name)) queue.push(join(current, entry.name));
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const absolutePath = join(current, entry.name);
+        const languageId = languageIdForPath(absolutePath);
+        if (preferred.has(languageId)) return absolutePath;
+        if (!fallback && preferred.size === 0 && SOURCE_LANGUAGE_IDS.has(languageId)) fallback = absolutePath;
+      }
+    }
+    return fallback;
+  }
+
+  private async findTypeScriptWorkspaceSymbols(workspace: SemanticWorkspace, query: string): Promise<unknown[] | undefined> {
+    if (!this.supportsTypeScriptTsserverRequest(workspace)) return undefined;
+    try {
+      const response = await this.lsp.request(workspace.userId, {
+        lsp_id: workspace.lspId,
+        method: 'workspace/executeCommand',
+        params: {
+          command: 'typescript.tsserverRequest',
+          arguments: ['navto', { searchValue: query, maxResultCount: MAX_SEMANTIC_RESULTS }, {}],
+        },
+      });
+      const tsserverResponse = asRecord(response.result);
+      if (tsserverResponse?.success !== true || !Array.isArray(tsserverResponse.body)) return undefined;
+      const symbols: unknown[] = [];
+      for (const raw of tsserverResponse.body) {
+        const symbol = this.normalizeTsserverNavtoSymbol(workspace, raw);
+        if (symbol) symbols.push(symbol);
+      }
+      return symbols;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private normalizeTsserverNavtoSymbol(workspace: SemanticWorkspace, raw: unknown): Record<string, unknown> | undefined {
+    const item = asRecord(raw);
+    if (!item || typeof item.name !== 'string' || typeof item.file !== 'string') return undefined;
+    const absolutePath = resolve(item.file);
+    if (!isWithin(workspace.root, absolutePath)) return undefined;
+    const start = tsserverPosition(item.start);
+    const end = tsserverPosition(item.end);
+    if (!start || !end) return undefined;
+    return {
+      name: item.name,
+      kind: tsserverSymbolKind(item.kind),
+      location: { uri: pathToFileURL(absolutePath).href, range: { start, end } },
+    };
+  }
+
   private async syncDocument(workspace: SemanticWorkspace, filePath: string): Promise<OpenDocument> {
     const absolutePath = await this.resolveWorkspaceFile(workspace, filePath);
     const content = await readFile(absolutePath, 'utf8');
@@ -797,6 +932,79 @@ function revisionDigest(entries: Array<[string, string]>): string {
 
 function digestText(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function selectProjectRepresentatives(root: string, configDirectories: ReadonlySet<string>, sourceFiles: readonly string[]): string[] {
+  if (configDirectories.size === 0) return [];
+  const configs = [...configDirectories].sort((a, b) => pathDepth(b, root) - pathDepth(a, root) || a.localeCompare(b));
+  const representativeByConfig = new Map<string, string>();
+  for (const source of sourceFiles) {
+    const config = configs.find((candidate) => isPathWithinDirectory(candidate, source));
+    if (config && !representativeByConfig.has(config)) representativeByConfig.set(config, source);
+  }
+  return configs.flatMap((config) => representativeByConfig.has(config) ? [representativeByConfig.get(config)!] : []);
+}
+
+function pathDepth(candidate: string, root: string): number {
+  const delta = relative(root, candidate);
+  return delta ? delta.split(sep).length : 0;
+}
+
+function isPathWithinDirectory(directory: string, candidate: string): boolean {
+  const delta = relative(directory, candidate);
+  return delta !== '' && !delta.startsWith(`..${sep}`) && delta !== '..' && !isAbsolute(delta);
+}
+
+function tsserverPosition(value: unknown): LspPosition | undefined {
+  const position = asRecord(value);
+  const line = typeof position?.line === 'number' ? position.line : Number.NaN;
+  const offset = typeof position?.offset === 'number' ? position.offset : Number.NaN;
+  if (!Number.isInteger(line) || line < 1 || !Number.isInteger(offset) || offset < 1) return undefined;
+  return { line: line - 1, character: offset - 1 };
+}
+
+function tsserverSymbolKind(value: unknown): number {
+  switch (typeof value === 'string' ? value.toLowerCase() : '') {
+    case 'module': case 'external module name': return 2;
+    case 'class': case 'classname': return 5;
+    case 'method': case 'memberfunctionelement': return 6;
+    case 'property': case 'membervariableelement': case 'getter': case 'setter': return 7;
+    case 'field': return 8;
+    case 'constructor': case 'constructsignatureelement': return 9;
+    case 'enum': return 10;
+    case 'interface': return 11;
+    case 'function': case 'functionelement': case 'localfunctionelement': return 12;
+    case 'variable': case 'const': case 'let': case 'varelement': case 'localvariableelement': return 13;
+    case 'constant': return 14;
+    case 'string': return 15;
+    case 'number': return 16;
+    case 'boolean': return 17;
+    case 'array': return 18;
+    case 'object': return 19;
+    case 'key': return 20;
+    case 'null': return 21;
+    case 'enum member': case 'enummemberelement': return 22;
+    case 'struct': return 23;
+    case 'event': return 24;
+    case 'operator': return 25;
+    case 'type parameter': case 'typeparameter': return 26;
+    default: return 13;
+  }
+}
+
+function preferredLanguageIdsForServer(serverId: string): ReadonlySet<string> {
+  const normalized = serverId.toLowerCase();
+  if (normalized.includes('typescript') || normalized.includes('tsserver')) {
+    return new Set(['typescript', 'typescriptreact', 'javascript', 'javascriptreact']);
+  }
+  if (normalized.includes('python') || normalized.includes('pyright') || normalized.includes('pylsp')) return new Set(['python']);
+  if (normalized.includes('gopls') || normalized === 'go') return new Set(['go']);
+  if (normalized.includes('rust')) return new Set(['rust']);
+  if (normalized.includes('clang') || normalized.includes('ccls')) return new Set(['c', 'cpp']);
+  if (normalized.includes('java')) return new Set(['java']);
+  if (normalized.includes('kotlin')) return new Set(['kotlin']);
+  if (normalized.includes('bash') || normalized.includes('shell')) return new Set(['shellscript']);
+  return new Set();
 }
 
 function languageIdForPath(filePath: string): string {

@@ -54,6 +54,18 @@ describe('deployment assets', () => {
     expect(environment).toContain('TERMINAL_SURFACE_RETENTION_MS=2592000000');
   });
 
+  it('keeps remote workstation agents on an atomically replaceable current release pointer', async () => {
+    const unit = await readFile(new URL('deploy/systemd/chatgpt-terminal-agent.service.example', root), 'utf8');
+    const installer = await readFile(new URL('scripts/install-local-agent-service.sh', root), 'utf8');
+    const deployment = await readFile(new URL('docs/deployment.md', root), 'utf8');
+
+    expect(unit).toContain('WorkingDirectory=%h/.local/share/chatgpt-terminal-plugin/current');
+    expect(installer).toContain('ln -s');
+    expect(installer).toContain('mv -Tf');
+    expect(installer).toContain('systemctl --user restart');
+    expect(deployment).toContain('scripts/install-local-agent-service.sh');
+  });
+
   it('keeps enrollment credentials out of the shipped systemd unit', async () => {
     const unit = await readFile(new URL('deploy/systemd/chatgpt-terminal-agent.service.example', root), 'utf8');
 

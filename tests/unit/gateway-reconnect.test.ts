@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { gatewayAuthChallengeSchema } from '../../packages/protocol/src/index.js';
 import { DeviceIdentity } from '../../packages/local-agent/src/device-identity.js';
 import { DeviceRegistry } from '../../packages/mcp-server/src/device-registry.js';
@@ -15,6 +15,42 @@ afterEach(async () => {
 });
 
 describe('gateway reconnect request ownership', () => {
+  it('rejects semantic dispatch before writing to an agent that did not advertise semantic support', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-capability-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const identity = await DeviceIdentity.loadOrCreate(join(root, 'device.json'));
+    const registry = await DeviceRegistry.load(join(root, 'devices.json'), 'enrollment-token');
+    await registry.enroll({
+      device_id: identity.deviceId, agent_id: identity.agentId, owner_id: 'owner-a', public_key: identity.publicKey,
+    }, 'enrollment-token');
+    const gateway = new AgentGateway({
+      requestTimeoutMs: 50, maxRetainedBytesPerSession: 1024 * 1024, closedSessionRetentionMs: 60_000,
+      sessionSweepIntervalMs: 10_000, deviceRegistry: registry, authChallengeTtlMs: 5_000,
+    });
+    cleanup.push(() => gateway.closeAll());
+    const server = createServer();
+    server.on('upgrade', (request, socket, head) => gateway.handleUpgrade(request, socket, head));
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Unable to allocate gateway capability-test port.');
+
+    const legacy = await connectRegistered(address.port, identity);
+    cleanup.push(() => legacy.close());
+    const internal = gateway as unknown as { agents: Map<string, { socket: WebSocket }> };
+    await waitUntil(() => internal.agents.has(identity.agentId));
+    const sendSpy = vi.spyOn(internal.agents.get(identity.agentId)!.socket, 'send');
+
+    await expect(gateway.openSemantic('owner-a', {
+      agent_id: identity.agentId, server_id: 'typescript', root: '/workspace',
+    }, 'read-only')).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', retryable: false,
+    });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
   it('does not reject a replacement-socket request when the superseded socket closes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-gateway-reconnect-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

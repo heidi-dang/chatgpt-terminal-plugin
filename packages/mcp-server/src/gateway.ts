@@ -415,7 +415,7 @@ export class AgentGateway {
   }
 
   async openSemantic(userId: string, input: TerminalSemanticOpenArgs, executionProfile: ExecutionProfile): Promise<SemanticOpenOutput> {
-    const connection = this.requireAgent(userId, input.agent_id);
+    const connection = this.requireSemanticAgent(userId, input.agent_id);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.open', user_id: userId,
       execution_profile: executionProfile, input: { server_id: input.server_id, root: input.root },
@@ -428,7 +428,7 @@ export class AgentGateway {
     input: SemanticQueryInput,
     executionProfile: ExecutionProfile,
   ): Promise<SemanticQueryOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.query', user_id: userId,
       execution_profile: executionProfile, input,
@@ -436,7 +436,7 @@ export class AgentGateway {
   }
 
   async previewSemanticEdit(userId: string, agentId: string, input: SemanticPreviewEditInput, executionProfile: ExecutionProfile): Promise<SemanticPreviewEditOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.preview_edit', user_id: userId,
       execution_profile: executionProfile, input,
@@ -444,7 +444,7 @@ export class AgentGateway {
   }
 
   async applySemanticEdit(userId: string, agentId: string, input: SemanticApplyEditInput, executionProfile: ExecutionProfile): Promise<SemanticApplyEditOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.apply_edit', user_id: userId,
       execution_profile: executionProfile, input,
@@ -452,7 +452,7 @@ export class AgentGateway {
   }
 
   async projectSemanticOverview(userId: string, agentId: string, input: SemanticProjectOverviewInput, executionProfile: ExecutionProfile): Promise<SemanticProjectOverviewOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.project_overview', user_id: userId,
       execution_profile: executionProfile, input,
@@ -460,7 +460,7 @@ export class AgentGateway {
   }
 
   async readSemanticMemory(userId: string, agentId: string, input: SemanticMemoryReadInput, executionProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.memory.read', user_id: userId,
       execution_profile: executionProfile, input,
@@ -468,7 +468,7 @@ export class AgentGateway {
   }
 
   async writeSemanticMemory(userId: string, agentId: string, input: SemanticMemoryWriteInput, executionProfile: ExecutionProfile): Promise<SemanticMemoryOutput> {
-    const connection = this.requireAgent(userId, agentId);
+    const connection = this.requireSemanticAgent(userId, agentId);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.memory.write', user_id: userId,
       execution_profile: executionProfile, input,
@@ -476,7 +476,7 @@ export class AgentGateway {
   }
 
   async closeSemantic(userId: string, input: TerminalSemanticCloseArgs, executionProfile: ExecutionProfile): Promise<SemanticCloseOutput> {
-    const connection = this.requireAgent(userId, input.agent_id);
+    const connection = this.requireSemanticAgent(userId, input.agent_id);
     return this.request(connection, {
       type: 'request', request_id: randomUUID(), action: 'semantic.close', user_id: userId,
       execution_profile: executionProfile, input: { semantic_id: input.semantic_id },
@@ -851,6 +851,17 @@ export class AgentGateway {
     }
     if (connection.ownerId !== userId) {
       throw new TerminalProtocolError('PERMISSION_DENIED', 'Agent is not owned by the authenticated user.');
+    }
+    return connection;
+  }
+
+  private requireSemanticAgent(userId: string, agentId: string): AgentConnection {
+    const connection = this.requireAgent(userId, agentId);
+    if (!connection.agent.capabilities.semantic) {
+      throw new TerminalProtocolError(
+        'INVALID_ARGUMENT',
+        'Semantic code intelligence is not supported by the connected agent. Update the local agent and reconnect it.',
+      );
     }
     return connection;
   }
