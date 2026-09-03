@@ -29,6 +29,8 @@ describe('server configuration invariants', () => {
     expect(config.allowedHosts).toEqual(['terminal.example.com']);
     expect(config.defaultExecutionProfile).toBe('developer');
     expect(config.shutdownGraceMs).toBe(2_000);
+    expect(config.mcpSessionIdleMs).toBe(30 * 60_000);
+    expect(config.mcpSessionSweepIntervalMs).toBe(30_000);
     expect(config.terminalTurnStatePath).toBe('/var/lib/chatgpt-terminal/terminal-turns.json');
     expect(config.terminalSurfaceRetentionMs).toBe(30 * 24 * 60 * 60_000);
   });
@@ -85,6 +87,13 @@ describe('server configuration invariants', () => {
       .toThrow(/production.*session quota.*user/i);
     expect(() => loadConfig(productionEnv({ TERMINAL_MAX_SESSIONS_PER_AGENT: '0' })))
       .toThrow(/production.*session quota.*agent/i);
+  });
+
+  it('keeps MCP session sweeping no slower than the configured idle expiry', () => {
+    expect(() => loadConfig(productionEnv({
+      MCP_SESSION_IDLE_MS: '1000',
+      MCP_SESSION_SWEEP_INTERVAL_MS: '2000',
+    }))).toThrow(/MCP_SESSION_SWEEP_INTERVAL_MS.*less than or equal/i);
   });
 
   it('keeps surface retention longer than the active PTY lease', () => {

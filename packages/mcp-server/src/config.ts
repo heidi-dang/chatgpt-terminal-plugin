@@ -45,6 +45,8 @@ const configSchema = z.object({
   MCP_PORT: positiveInt(8787, 65_535),
   MCP_PUBLIC_URL: z.string().url(),
   MCP_SHUTDOWN_GRACE_MS: positiveInt(2_000, 10_000),
+  MCP_SESSION_IDLE_MS: positiveInt(30 * 60_000, 24 * 60 * 60_000),
+  MCP_SESSION_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
   AGENT_GATEWAY_PATH: z.string().regex(/^\//).default('/agent'),
   AGENT_ENROLLMENT_PATH: z.string().regex(/^\//).default('/agent/enroll'),
   AGENT_DEVICE_REGISTRY_PATH: optionalString,
@@ -152,6 +154,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error('TERMINAL_SURFACE_RETENTION_MS must be greater than or equal to TERMINAL_TURN_LEASE_MS.');
   }
 
+  if (parsed.MCP_SESSION_SWEEP_INTERVAL_MS > parsed.MCP_SESSION_IDLE_MS) {
+    throw new Error('MCP_SESSION_SWEEP_INTERVAL_MS must be less than or equal to MCP_SESSION_IDLE_MS.');
+  }
+
   if (parsed.MCP_EXTENSION_ROOT && !isAbsolute(parsed.MCP_EXTENSION_ROOT)) {
     throw new Error('MCP_EXTENSION_ROOT must be an absolute administrator-controlled path.');
   }
@@ -169,6 +175,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     port: parsed.MCP_PORT,
     publicUrl,
     shutdownGraceMs: parsed.MCP_SHUTDOWN_GRACE_MS,
+    mcpSessionIdleMs: parsed.MCP_SESSION_IDLE_MS,
+    mcpSessionSweepIntervalMs: parsed.MCP_SESSION_SWEEP_INTERVAL_MS,
     agentGatewayPath: parsed.AGENT_GATEWAY_PATH,
     agentEnrollmentPath: parsed.AGENT_ENROLLMENT_PATH,
     deviceRegistryPath: parsed.AGENT_DEVICE_REGISTRY_PATH,

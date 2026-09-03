@@ -21,6 +21,8 @@ interface McpSession {
   server: McpServer;
   userId: string;
   clientId: string;
+  lastActivityAt: number;
+  activeRequests: number;
 }
 
 export interface TerminalHttpRuntime {
@@ -98,6 +100,22 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
+  const mcpSessionSweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, session] of sessions) {
+      if (session.activeRequests > 0 || now - session.lastActivityAt < config.mcpSessionIdleMs) continue;
+      sessions.delete(sessionId);
+      void session.server.close().catch((error) => {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'mcp.session_expiry_failed',
+          session_id: sessionId,
+          error: errorMessage(error),
+        }));
+      });
+    }
+  }, config.mcpSessionSweepIntervalMs);
+  mcpSessionSweepTimer.unref();
   const uiReloadClients = new Set<Response>();
   const terminalStreamClients = new Set<Response>();
   let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
@@ -287,19 +305,33 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         const transport = new NodeStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sessionId) => {
-            sessions.set(sessionId, { transport, server: mcpServer, ...principal });
+            sessions.set(sessionId, createdSession);
           },
         });
+        const createdSession: McpSession = {
+          transport,
+          server: mcpServer,
+          ...principal,
+          lastActivityAt: Date.now(),
+          activeRequests: 0,
+        };
         transport.onclose = () => {
           const sessionId = transport.sessionId;
           if (sessionId) sessions.delete(sessionId);
           void mcpServer.close();
         };
         await mcpServer.connect(transport);
-        session = { transport, server: mcpServer, ...principal };
+        session = createdSession;
       }
 
-      await session.transport.handleRequest(req, res, req.body);
+      session.lastActivityAt = Date.now();
+      session.activeRequests += 1;
+      try {
+        await session.transport.handleRequest(req, res, req.body);
+      } finally {
+        session.activeRequests = Math.max(0, session.activeRequests - 1);
+        session.lastActivityAt = Date.now();
+      }
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'mcp.request_failed', error: errorMessage(error) }));
       if (!res.headersSent) res.status(500).json({ error: 'internal_server_error' });
@@ -461,6 +493,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         const forceCloseTimer = setTimeout(() => httpServer.closeAllConnections(), config.shutdownGraceMs);
         forceCloseTimer.unref();
         clearInterval(transcriptRetentionTimer);
+        clearInterval(mcpSessionSweepTimer);
         stopUiWatcher();
         for (const client of uiReloadClients) client.end();
         uiReloadClients.clear();

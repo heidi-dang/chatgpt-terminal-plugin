@@ -6,6 +6,9 @@ MCP_PORT=8787
 MCP_PUBLIC_URL=https://terminal.example.com/mcp
 # Bounds graceful HTTP shutdown during immutable deploys so a stale keep-alive/SSE cannot create a long 502 window.
 MCP_SHUTDOWN_GRACE_MS=2000
+# Reclaim abandoned MCP transports while active conversations renew on each authenticated request.
+MCP_SESSION_IDLE_MS=1800000
+MCP_SESSION_SWEEP_INTERVAL_MS=30000
 
 AGENT_GATEWAY_PATH=/agent
 AGENT_ENROLLMENT_PATH=/agent/enroll
