@@ -155,6 +155,38 @@ describe('Serena-style semantic LSP layer', () => {
     ]);
   });
 
+  it('does not populate the diagnostics cache from unsolicited workspace-wide notifications', async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, 'sample.ts'), 'export const broken = true;\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'sample.ts');
+    await waitUntil(async () => (await fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts')).diagnostics.length === 1);
+
+    await fixture.semantic.findSymbols('user-a', opened.semantic_id, 'diagnostic-flood');
+
+    const internal = fixture.semantic as unknown as {
+      workspaces: Map<string, { diagnostics: Map<string, unknown> }>;
+    };
+    expect(internal.workspaces.get(opened.semantic_id)?.diagnostics.size).toBe(1);
+  });
+
+  it('removes cleared diagnostics instead of retaining empty cache entries', async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, 'sample.ts'), 'export const broken = true;\n', 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'sample.ts');
+    await waitUntil(async () => (await fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts')).diagnostics.length === 1);
+
+    await fixture.semantic.findSymbols('user-a', opened.semantic_id, 'diagnostic-clear');
+
+    const internal = fixture.semantic as unknown as {
+      workspaces: Map<string, { diagnostics: Map<string, unknown> }>;
+    };
+    expect(internal.workspaces.get(opened.semantic_id)?.diagnostics.size).toBe(0);
+    await expect(fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts'))
+      .resolves.toMatchObject({ diagnostics: [] });
+  });
+
   it('previews and applies a language-server rename across workspace files', async () => {
     const fixture = await createFixture();
     const first = join(fixture.root, 'sample.ts');
@@ -348,6 +380,21 @@ function handle(message) {
     }
   }
   if (message.method === 'workspace/symbol') {
+    if (message.params?.query === 'diagnostic-flood') {
+      for (let i = 0; i < 128; i += 1) {
+        send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
+          uri: rootUri + '/unsolicited-' + i + '.ts',
+          diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: 'unsolicited' }]
+        } });
+      }
+      return send({ jsonrpc: '2.0', id: message.id, result: [] });
+    }
+    if (message.params?.query === 'diagnostic-clear') {
+      send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
+        uri: rootUri + '/sample.ts', diagnostics: []
+      } });
+      return send({ jsonrpc: '2.0', id: message.id, result: [] });
+    }
     if (message.params?.query === 'huge') {
       return send({ jsonrpc: '2.0', id: message.id, result: [0, 1, 2].map(i => ({ name: 'x'.repeat(40000) + i, kind: 12, location: location(i, 0) })) });
     }

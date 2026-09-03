@@ -60,7 +60,7 @@ The widget tracks the most recent accepted event sequence and accepts only the n
 - Device private key: local machine only.
 - Device public identity and immutable device→agent→owner binding: server device registry.
 - Live agent connections and terminal routing: server process memory.
-- Bounded terminal event history: agent and server process memory. Final session metadata/history remains available only for `TERMINAL_CLOSED_SESSION_RETENTION_MS`, then both sides release it.
+- Bounded terminal event history: agent and server process memory. Final session metadata/history remains available only for `TERMINAL_CLOSED_SESSION_RETENTION_MS`, then both sides release it. Server-side agent/session records that remain disconnected are evicted after the same window; a later agent reconnect can re-register and rebuild resumable session state from its retained snapshot.
 - Audit metadata/transcript: optional append-only local files with redaction and transcript retention pruning.
 - Authenticated user identity: either origin-validated OAuth JWT, or a Cloudflare Access assertion produced after Managed OAuth; both are signature/issuer/audience validated at the MCP origin.
 

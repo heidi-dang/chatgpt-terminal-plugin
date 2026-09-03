@@ -56,7 +56,7 @@ When either limit shortens a response, `truncated` is `true`. Raw language-serve
 
 ## Diagnostics
 
-The LSP transport exposes server notifications to the semantic manager. Only `textDocument/publishDiagnostics` notifications whose file URI resolves inside the semantic workspace are cached for semantic diagnostics queries. Notification-listener failures cannot terminate the LSP transport.
+The LSP transport exposes server notifications to the semantic manager. A `textDocument/publishDiagnostics` notification is cached only when it targets a document already synchronized by the semantic workspace; unsolicited workspace-wide diagnostics are ignored even when their URI is inside the authorized root. An empty diagnostics publication removes the existing cache entry. Notification-listener failures cannot terminate the LSP transport.
 
 ## Server-to-client requests
 

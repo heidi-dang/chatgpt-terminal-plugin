@@ -107,6 +107,7 @@ export interface SessionRecord {
   totalEvents: number;
   totalOutputBytes: number;
   commandCount: number;
+  disconnectedAtMs?: number;
 }
 
 export interface AgentGatewayOptions {
@@ -752,11 +753,13 @@ export class AgentGateway {
       if (!registeredAgentId) return;
       const current = this.agents.get(registeredAgentId);
       if (current?.socket === socket) {
+        const disconnectedAtMs = Date.now();
         current.agent.online = false;
-        current.lastSeenMs = Date.now();
+        current.lastSeenMs = disconnectedAtMs;
         for (const record of this.sessions.values()) {
           if (record.agentId === registeredAgentId && record.session && this.isSessionActive(record.session)) {
             record.session.status = 'disconnected';
+            record.disconnectedAtMs = disconnectedAtMs;
           }
         }
       }
@@ -893,6 +896,8 @@ export class AgentGateway {
     if (ownerId !== undefined) record.ownerId = ownerId;
     record.agentId = snapshot.session.agent_id;
     record.session = { ...snapshot.session };
+    if (snapshot.session.status === 'disconnected') record.disconnectedAtMs ??= Date.now();
+    else delete record.disconnectedAtMs;
     this.sessions.set(sessionId, record);
   }
 
@@ -1027,9 +1032,18 @@ export class AgentGateway {
   private sweepRetainedSessions(): void {
     const now = Date.now();
     for (const [sessionId, record] of this.sessions) {
-      if (!record.session || !this.isFinalSessionRetentionExpired(record.session, now)) continue;
+      if (!record.session) continue;
+      const disconnectedExpired = record.session.status === 'disconnected'
+        && record.disconnectedAtMs !== undefined
+        && now - record.disconnectedAtMs >= this.options.closedSessionRetentionMs;
+      if (!disconnectedExpired && !this.isFinalSessionRetentionExpired(record.session, now)) continue;
       this.sessions.delete(sessionId);
       this.eventEmitter.removeAllListeners(`session:${sessionId}`);
+    }
+    for (const [agentId, connection] of this.agents) {
+      if (connection.socket.readyState === WebSocket.OPEN) continue;
+      if (now - connection.lastSeenMs < this.options.closedSessionRetentionMs) continue;
+      this.agents.delete(agentId);
     }
   }
 

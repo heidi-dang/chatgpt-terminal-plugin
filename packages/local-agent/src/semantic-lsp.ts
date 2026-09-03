@@ -740,7 +740,15 @@ export class SemanticLspManager {
     const params = asRecord(notification.params);
     const uri = typeof params?.uri === 'string' ? params.uri : undefined;
     if (!workspace || !uri || !this.isWorkspaceFileUri(workspace, uri)) return;
+    let absolutePath: string;
+    try { absolutePath = fileURLToPath(uri); } catch { return; }
+    const document = workspace.documents.get(absolutePath);
+    if (!document || document.uri !== uri) return;
     const diagnostics = Array.isArray(params?.diagnostics) ? params.diagnostics : [];
+    if (diagnostics.length === 0) {
+      workspace.diagnostics.delete(uri);
+      return;
+    }
     const version = typeof params?.version === 'number' && Number.isInteger(params.version) ? params.version : undefined;
     workspace.diagnostics.set(uri, { diagnostics, ...(version === undefined ? {} : { version }) });
   }
