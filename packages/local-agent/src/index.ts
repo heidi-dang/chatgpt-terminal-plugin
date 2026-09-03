@@ -1391,18 +1391,13 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     } catch (error) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', `Cannot read terminal session state directory: ${errorMsg(error)}`);
     }
-    if (entries.length > 256) {
-      console.error(JSON.stringify({
-        level: 'warn',
-        event: 'agent.session_state_limit_reached',
-        files: entries.length,
-        loaded: 256,
-      }));
-      entries = entries.slice(0, 256);
-    }
-
+    const maxRestoredSessions = 256;
+    let restoredSessions = 0;
+    let scannedStateFiles = 0;
     const maxStateBytes = Math.max(1024 * 1024, this.bufferHighWaterBytes * 4 + 256 * 1024);
     for (const name of entries) {
+      if (restoredSessions >= maxRestoredSessions) break;
+      scannedStateFiles += 1;
       const statePath = join(this.stateDir, name);
       try {
         const info = statSync(statePath);
@@ -1465,6 +1460,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
           outputBufferBytes: 0,
         };
         this.sessions.set(metadata.session_id, managed);
+        restoredSessions += 1;
         if (!isTerminalFinal(metadata.status)) {
           managed.metadata.status = 'closed';
           managed.metadata.exit_code = null;
@@ -1482,6 +1478,15 @@ export class LocalTerminalAgent implements TerminalAgentApi {
           error: errorMsg(error),
         }));
       }
+    }
+    if (scannedStateFiles < entries.length) {
+      console.error(JSON.stringify({
+        level: 'warn',
+        event: 'agent.session_state_limit_reached',
+        files: entries.length,
+        restored: restoredSessions,
+        limit: maxRestoredSessions,
+      }));
     }
   }
 
