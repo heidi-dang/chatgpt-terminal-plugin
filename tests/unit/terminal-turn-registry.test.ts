@@ -217,6 +217,45 @@ describe('TerminalTurnRegistry', () => {
     }
   });
 
+  it('refuses exact-surface recovery from a different ChatGPT conversation identity', async () => {
+    const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const conversationA: RequestIdentity = { ...identity, mcpSessionId: 'mcp-a', chatgptSessionId: 'chat-a' };
+    const conversationB: RequestIdentity = { ...identity, mcpSessionId: 'mcp-b', chatgptSessionId: 'chat-b' };
+
+    const surfaceA = await registry.begin(conversationA);
+    await registry.activate(conversationA, 'session-a');
+
+    await expect(registry.recover(conversationB, surfaceA.surface_id!)).resolves.toEqual(expect.objectContaining({ surface_open: false }));
+    expect(registry.current(conversationA)).toEqual(expect.objectContaining({
+      surface_id: surfaceA.surface_id,
+      surface_open: true,
+      surface_active: true,
+      session_id: 'session-a',
+    }));
+    expect(registry.current(conversationB).surface_open).toBe(false);
+    registry.dispose();
+  });
+
+  it('allows exact-surface recovery after an MCP restart when the ChatGPT conversation identity is stable', async () => {
+    const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
+    const beforeRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-before', chatgptSessionId: 'chat-stable' };
+    const afterRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-after', chatgptSessionId: 'chat-stable' };
+
+    const surface = await registry.begin(beforeRestart);
+    await registry.activate(beforeRestart, 'session-before');
+    const recovered = await registry.recover(afterRestart, surface.surface_id!);
+
+    expect(recovered).toEqual(expect.objectContaining({
+      surface_id: surface.surface_id,
+      surface_open: true,
+      surface_active: true,
+      session_id: 'session-before',
+    }));
+    expect(registry.current(beforeRestart).surface_open).toBe(false);
+    expect(registry.current(afterRestart).session_id).toBe('session-before');
+    registry.dispose();
+  });
+
   it('requires the exact surface capability for modern MCP-session restart recovery', async () => {
     const registry = new TerminalTurnRegistry(async () => undefined, 60_000);
     const beforeRestart: RequestIdentity = { ...identity, mcpSessionId: 'mcp-before' };

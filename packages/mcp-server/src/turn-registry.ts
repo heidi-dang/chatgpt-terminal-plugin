@@ -447,7 +447,9 @@ function turnKey(identity: RequestIdentity): string {
 }
 
 function samePrincipal(left: RequestIdentity, right: RequestIdentity): boolean {
-  return left.userId === right.userId && left.clientId === right.clientId;
+  if (left.userId !== right.userId || left.clientId !== right.clientId) return false;
+  if (left.chatgptSessionId && right.chatgptSessionId) return left.chatgptSessionId === right.chatgptSessionId;
+  return true;
 }
 
 function isPersistedTurnState(value: unknown): value is PersistedTurnState {
