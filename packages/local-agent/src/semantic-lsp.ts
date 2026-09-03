@@ -105,6 +105,9 @@ interface MemoryStore {
 interface SemanticLspManagerOptions {
   memoryDir?: string;
   previewTtlMs?: number;
+  maxMemoriesPerWorkspace?: number;
+  maxSourceBytes?: number;
+  maxOpenDocuments?: number;
 }
 
 interface LspPosition { line: number; character: number }
@@ -118,6 +121,9 @@ const DEFAULT_PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_PROJECT_FILES = 5_000;
 const MAX_PROJECT_PRIME_ENTRIES = 2_000;
 const MAX_PROJECT_PRIME_DOCUMENTS = 32;
+const DEFAULT_MAX_MEMORIES_PER_WORKSPACE = 256;
+const DEFAULT_MAX_SOURCE_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_OPEN_DOCUMENTS = 256;
 const SKIPPED_PROJECT_DIRS = new Set(['.git', '.worktrees', 'node_modules', 'dist', 'build', 'coverage', '.next', '.venv', 'venv', 'target', 'vendor']);
 const SOURCE_LANGUAGE_IDS = new Set(['typescript', 'typescriptreact', 'javascript', 'javascriptreact', 'python', 'go', 'rust', 'c', 'cpp', 'java', 'kotlin', 'shellscript']);
 
@@ -145,10 +151,16 @@ export class SemanticLspManager {
   private readonly removeNotificationListener: () => void;
   private readonly memoryCache = new Map<string, MemoryStore>();
   private readonly previewTtlMs: number;
+  private readonly maxMemoriesPerWorkspace: number;
+  private readonly maxSourceBytes: number;
+  private readonly maxOpenDocuments: number;
   private stopped = false;
 
   constructor(private readonly lsp: LspManager, private readonly options: SemanticLspManagerOptions = {}) {
     this.previewTtlMs = options.previewTtlMs ?? DEFAULT_PREVIEW_TTL_MS;
+    this.maxMemoriesPerWorkspace = Math.max(1, options.maxMemoriesPerWorkspace ?? DEFAULT_MAX_MEMORIES_PER_WORKSPACE);
+    this.maxSourceBytes = Math.max(1, options.maxSourceBytes ?? DEFAULT_MAX_SOURCE_BYTES);
+    this.maxOpenDocuments = Math.max(1, options.maxOpenDocuments ?? DEFAULT_MAX_OPEN_DOCUMENTS);
     this.removeNotificationListener = this.lsp.onNotification((notification) => this.handleNotification(notification));
   }
 
@@ -469,6 +481,9 @@ export class SemanticLspManager {
     validateMemoryName(name);
     if (Buffer.byteLength(content) > 65_536) throw new TerminalProtocolError('FILE_TOO_LARGE', 'Semantic project memory exceeds 64 KiB.');
     const store = await this.loadMemoryStore(workspace.root);
+    if (!(name in store.memories) && Object.keys(store.memories).length >= this.maxMemoriesPerWorkspace) {
+      throw new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Semantic project memory limit has been reached.');
+    }
     const updatedAt = new Date().toISOString();
     store.memories[name] = { content, updated_at: updatedAt };
     await this.persistMemoryStore(workspace.root, store);
@@ -666,12 +681,19 @@ export class SemanticLspManager {
 
   private async syncDocument(workspace: SemanticWorkspace, filePath: string): Promise<OpenDocument> {
     const absolutePath = await this.resolveWorkspaceFile(workspace, filePath);
+    const info = await stat(absolutePath);
+    if (info.size > this.maxSourceBytes) {
+      throw new TerminalProtocolError('FILE_TOO_LARGE', `Semantic source file exceeds ${this.maxSourceBytes} bytes.`);
+    }
     const content = await readFile(absolutePath, 'utf8');
     const digest = digestText(content);
     const existing = workspace.documents.get(absolutePath);
     if (existing?.digest === digest) return existing;
 
     if (!existing) {
+      if (workspace.documents.size >= this.maxOpenDocuments) {
+        throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Semantic open-document limit has been reached.');
+      }
       const document: OpenDocument = {
         absolutePath,
         uri: pathToFileURL(absolutePath).href,
@@ -771,10 +793,16 @@ export class SemanticLspManager {
       try {
         const parsed = JSON.parse(await readFile(path, 'utf8')) as MemoryStore;
         if (parsed?.version === 1 && parsed.root === root && parsed.memories && typeof parsed.memories === 'object') {
+          if (Object.keys(parsed.memories).length > this.maxMemoriesPerWorkspace) {
+            throw new TerminalProtocolError('OUTPUT_LIMIT_REACHED', 'Persisted semantic project memory exceeds the configured entry limit.');
+          }
           this.memoryCache.set(key, parsed);
           return parsed;
         }
-      } catch { /* absent or invalid store starts empty */ }
+      } catch (error) {
+        if (error instanceof TerminalProtocolError) throw error;
+        // Absent or invalid store starts empty.
+      }
     }
     const empty: MemoryStore = { version: 1, root, memories: {} };
     this.memoryCache.set(key, empty);

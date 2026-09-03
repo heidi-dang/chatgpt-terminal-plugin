@@ -90,6 +90,10 @@ const agent = new LocalTerminalAgent({
     : {}),
   workspaceRootsStatePath: process.env.AGENT_WORKSPACE_ROOTS_STATE_PATH ?? join(dirname(identityPath), 'workspace-roots.json'),
   stateDir: process.env.AGENT_SESSION_STATE_DIR ?? join(dirname(identityPath), 'sessions'),
+  maxConcurrentCodeExecutions: intEnv('TERMINAL_MAX_CODE_EXECUTIONS', 4),
+  semanticMaxMemoriesPerWorkspace: intEnv('TERMINAL_SEMANTIC_MAX_MEMORIES', 256),
+  semanticMaxSourceBytes: intEnv('TERMINAL_SEMANTIC_MAX_SOURCE_BYTES', 4 * 1024 * 1024),
+  semanticMaxOpenDocuments: intEnv('TERMINAL_SEMANTIC_MAX_OPEN_DOCUMENTS', 256),
 });
 
 const client = new AgentGatewayClient(agent, {

@@ -100,6 +100,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   const verifier = createTokenVerifier(config);
   const oauthMetadata = createOAuthMetadata(config);
   const sessions = new Map<string, McpSession>();
+  let mcpInitializingSessions = 0;
   const mcpSessionSweepTimer = setInterval(() => {
     const now = Date.now();
     for (const [sessionId, session] of sessions) {
@@ -118,6 +119,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   mcpSessionSweepTimer.unref();
   const uiReloadClients = new Set<Response>();
   const terminalStreamClients = new Set<Response>();
+  const terminalStreamCounts = new Map<string, number>();
   let terminalUiStyleVersion = (await readTerminalUiStyles()).version;
   const stopUiWatcher = watchTerminalUiStyles((version) => {
     if (version === terminalUiStyleVersion) return;
@@ -127,7 +129,11 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       if (!client.writableEnded && !client.destroyed) client.write(payload);
     }
   });
-  const enrollmentRateLimiter = createRateLimiter(config.requestsPerMinute, (req) => `enrollment:${clientAddress(req)}`);
+  const enrollmentRateLimiter = createRateLimiter(
+    config.requestsPerMinute,
+    (req) => `enrollment:${clientAddress(req)}`,
+    config.rateLimitMaxBuckets,
+  );
 
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -163,6 +169,10 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   });
 
   app.get('/terminal-ui/reload', (req, res) => {
+    if (uiReloadClients.size >= config.maxUiReloadClients) {
+      res.status(503).json({ error: 'ui_reload_capacity_reached' });
+      return;
+    }
     res.status(200);
     res.setHeader('content-type', 'text/event-stream; charset=utf-8');
     res.setHeader('cache-control', 'no-cache, no-store');
@@ -278,6 +288,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
   };
 
   const mcpHandler = async (req: Request, res: Response) => {
+    let reservedInitialization = false;
     try {
       const principal = requestPrincipal(req);
       const sessionIdHeader = req.get('mcp-session-id');
@@ -300,6 +311,16 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
           });
           return;
         }
+        if (sessions.size + mcpInitializingSessions >= config.maxMcpSessions) {
+          res.status(503).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'MCP session capacity has been reached.' },
+            id: null,
+          });
+          return;
+        }
+        mcpInitializingSessions += 1;
+        reservedInitialization = true;
 
         const mcpServer = createTerminalMcpServer({ config, gateway, service, streamTokens, turnRegistry, audit });
         const transport = new NodeStreamableHTTPServerTransport({
@@ -335,6 +356,8 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'mcp.request_failed', error: errorMessage(error) }));
       if (!res.headersSent) res.status(500).json({ error: 'internal_server_error' });
+    } finally {
+      if (reservedInitialization) mcpInitializingSessions = Math.max(0, mcpInitializingSessions - 1);
     }
   };
 
@@ -366,6 +389,12 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       if (cursor < record.earliestSequence - 1 || cursor > record.latestSequence) {
         throw new TerminalProtocolError('INVALID_CURSOR', 'SSE cursor is outside the retained terminal event range.');
       }
+      const activeStreamsForSession = terminalStreamCounts.get(sessionId) ?? 0;
+      if (activeStreamsForSession >= config.maxTerminalStreamsPerSession) {
+        res.setHeader('retry-after', '1');
+        res.status(429).json({ error: 'terminal_stream_capacity_reached' });
+        return;
+      }
 
       res.status(200);
       res.setHeader('content-type', 'text/event-stream; charset=utf-8');
@@ -375,6 +404,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
       res.setHeader('x-accel-buffering', 'no');
       res.flushHeaders();
       terminalStreamClients.add(res);
+      terminalStreamCounts.set(sessionId, activeStreamsForSession + 1);
       console.log(JSON.stringify({
         level: 'info',
         event: 'terminal.sse_connected',
@@ -442,6 +472,9 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         clearTimeout(expiryTimer);
         unsubscribe();
         terminalStreamClients.delete(res);
+        const remainingStreams = Math.max(0, (terminalStreamCounts.get(sessionId) ?? 1) - 1);
+        if (remainingStreams === 0) terminalStreamCounts.delete(sessionId);
+        else terminalStreamCounts.set(sessionId, remainingStreams);
         console.log(JSON.stringify({
           level: 'info',
           event: 'terminal.sse_disconnected',
@@ -499,6 +532,7 @@ export async function createTerminalHttpRuntime(config: ServerConfig): Promise<T
         uiReloadClients.clear();
         for (const client of terminalStreamClients) client.end();
         terminalStreamClients.clear();
+        terminalStreamCounts.clear();
         httpServer.closeIdleConnections();
         turnRegistry.dispose();
         gateway.closeAll();
@@ -655,7 +689,11 @@ export function pruneRateLimitBuckets(buckets: Map<string, RateLimitBucket>, min
   }
 }
 
-function createRateLimiter(limit: number, keyForRequest: (req: Request) => string = clientAddress) {
+function createRateLimiter(
+  limit: number,
+  keyForRequest: (req: Request) => string = clientAddress,
+  maxBuckets = 10_000,
+) {
   const buckets = new Map<string, RateLimitBucket>();
   let lastPrunedMinute = -1;
   return (req: Request, res: Response, next: NextFunction) => {
@@ -666,6 +704,11 @@ function createRateLimiter(limit: number, keyForRequest: (req: Request) => strin
       lastPrunedMinute = minute;
     }
     const existing = buckets.get(key);
+    if (!existing && buckets.size >= maxBuckets) {
+      res.setHeader('retry-after', '60');
+      res.status(429).json({ error: 'rate_limit_capacity_reached' });
+      return;
+    }
     const bucket = existing?.minute === minute ? existing : { minute, count: 0 };
     bucket.count += 1;
     buckets.set(key, bucket);

@@ -22,6 +22,11 @@ TERMINAL_SWEEP_INTERVAL_MS=30000
 TERMINAL_TERMINATION_GRACE_MS=750
 TERMINAL_OUTPUT_FLUSH_INTERVAL_MS=8
 TERMINAL_OUTPUT_FLUSH_BYTES=32768
+# Bound autonomous process and semantic-analysis populations on long-lived agents.
+TERMINAL_MAX_CODE_EXECUTIONS=4
+TERMINAL_SEMANTIC_MAX_MEMORIES=256
+TERMINAL_SEMANTIC_MAX_SOURCE_BYTES=4194304
+TERMINAL_SEMANTIC_MAX_OPEN_DOCUMENTS=256
 
 # Optional durable terminal event replay. Disabled unless DIR is set. Command input is redacted by default.
 # TERMINAL_EVENT_JOURNAL_DIR=/home/your-user/.local/state/chatgpt-terminal-plugin/events

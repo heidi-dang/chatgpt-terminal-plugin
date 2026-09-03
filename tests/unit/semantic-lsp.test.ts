@@ -279,6 +279,35 @@ describe('Serena-style semantic LSP layer', () => {
     expect(overview.memories).toContain('architecture');
   });
 
+  it('bounds named semantic memories per workspace root', async () => {
+    const fixture = await createFixture({ maxMemoriesPerWorkspace: 2 });
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    await fixture.semantic.writeMemory('user-a', opened.semantic_id, 'one', '1');
+    await fixture.semantic.writeMemory('user-a', opened.semantic_id, 'two', '2');
+    await expect(fixture.semantic.writeMemory('user-a', opened.semantic_id, 'three', '3'))
+      .rejects.toMatchObject({ code: 'OUTPUT_LIMIT_REACHED' });
+  });
+
+  it('rejects semantic source files above the configured byte ceiling', async () => {
+    const fixture = await createFixture({ maxSourceBytes: 64 });
+    await writeFile(join(fixture.root, 'oversized.ts'), `export const value = '${'x'.repeat(128)}';\n`, 'utf8');
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    await expect(fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'oversized.ts'))
+      .rejects.toMatchObject({ code: 'FILE_TOO_LARGE' });
+  });
+
+  it('bounds simultaneously opened semantic documents per workspace', async () => {
+    const fixture = await createFixture({ maxOpenDocuments: 2 });
+    for (const name of ['one.ts', 'two.ts', 'three.ts']) {
+      await writeFile(join(fixture.root, name), `export const ${name.replace('.ts', '')} = 1;\n`, 'utf8');
+    }
+    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
+    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'one.ts');
+    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'two.ts');
+    await expect(fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'three.ts'))
+      .rejects.toMatchObject({ code: 'SESSION_LIMIT_REACHED' });
+  });
+
   it('isolates semantic sessions by user and stops the underlying LSP process', async () => {
     const fixture = await createFixture();
     const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
@@ -293,7 +322,7 @@ describe('Serena-style semantic LSP layer', () => {
 
 type LogEntry = { method: string; hasId: boolean; params?: unknown };
 
-async function createFixture(): Promise<{
+async function createFixture(options: { maxMemoriesPerWorkspace?: number; maxSourceBytes?: number; maxOpenDocuments?: number } = {}): Promise<{
   root: string;
   logPath: string;
   lsp: LspManager;
@@ -313,7 +342,7 @@ async function createFixture(): Promise<{
     requestTimeoutMs: 2_000,
   });
   cleanup.push(() => lsp.stopAll());
-  const semantic = new SemanticLspManager(lsp, { memoryDir: join(root, '.semantic-memory') });
+  const semantic = new SemanticLspManager(lsp, { memoryDir: join(root, '.semantic-memory'), ...options } as never);
   cleanup.push(() => semantic.stopAll());
   return { root, logPath, lsp, semantic };
 }
