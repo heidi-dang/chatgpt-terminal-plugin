@@ -45,6 +45,12 @@ describe('terminal UI static-first contract', () => {
     expect(css).not.toContain('safe-area-inset-bottom');
   });
 
+  it('never forces a short-host terminal card taller than the available dynamic viewport', async () => {
+    const css = await readFile(join(root, 'packages/terminal-ui/src/styles.css'), 'utf8');
+    expect(css).not.toContain('.terminal-shell { height:calc(100dvh - 8px);min-height:280px; }');
+    expect(css).toContain('.terminal-shell { height:calc(100dvh - 8px);min-height:min(280px,calc(100dvh - 8px)); }');
+  });
+
   it('reports widget size changes in the ChatGPT openai compatibility path', async () => {
     const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
     expect(runtime).toMatch(/if \(openAi\) \{[\s\S]*?this\.startAutoResize\(\);[\s\S]*?return;/);

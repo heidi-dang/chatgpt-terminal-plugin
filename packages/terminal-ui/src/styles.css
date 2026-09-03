@@ -172,7 +172,7 @@ body { background: transparent; color: var(--text); overflow: hidden; }
   .terminal-footer span:first-child { max-width:28%; }
 }
 @media (max-height:560px) {
-  .terminal-shell { height:calc(100dvh - 8px);min-height:280px; }
+  .terminal-shell { height:calc(100dvh - 8px);min-height:min(280px,calc(100dvh - 8px)); }
   .terminal-header { padding-block:9px 8px; }
   .terminal-frame { padding-block:7px 6px; }
   .terminal-footer { min-height:27px;padding-block:5px; }
