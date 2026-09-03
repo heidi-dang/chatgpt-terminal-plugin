@@ -94,6 +94,16 @@ describe('deployment assets', () => {
     expect(smoke).toContain("'x-terminal-deployment-smoke': '1'");
   });
 
+  it('enforces dependency audit and diff hygiene in pull-request and production verification', async () => {
+    const quality = await readFile(new URL('.github/workflows/quality.yml', root), 'utf8');
+    const production = await readFile(new URL('.github/workflows/deploy-production.yml', root), 'utf8');
+
+    for (const workflow of [quality, production]) {
+      expect(workflow).toContain('pnpm audit --audit-level=high');
+      expect(workflow).toContain('git diff --check');
+    }
+  });
+
   it('does not advertise unsupported local-agent queue controls', async () => {
     const source = await readFile(new URL('deploy/local-agent-environment.example', root), 'utf8');
 
