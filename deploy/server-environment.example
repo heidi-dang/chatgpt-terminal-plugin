@@ -9,6 +9,10 @@ MCP_SHUTDOWN_GRACE_MS=2000
 # Reclaim abandoned MCP transports while active conversations renew on each authenticated request.
 MCP_SESSION_IDLE_MS=1800000
 MCP_SESSION_SWEEP_INTERVAL_MS=30000
+# Hard caps prevent authenticated/unauthenticated connection bursts from exhausting process memory or descriptors before idle cleanup.
+MCP_MAX_SESSIONS=256
+MCP_MAX_UI_RELOAD_CLIENTS=128
+MCP_MAX_TERMINAL_STREAMS_PER_SESSION=4
 
 AGENT_GATEWAY_PATH=/agent
 AGENT_ENROLLMENT_PATH=/agent/enroll
@@ -61,6 +65,7 @@ TERMINAL_CLOSED_SESSION_RETENTION_MS=900000
 TERMINAL_SWEEP_INTERVAL_MS=30000
 AGENT_REQUEST_TIMEOUT_MS=15000
 REQUESTS_PER_MINUTE=120
+RATE_LIMIT_MAX_BUCKETS=10000
 
 # Optional trusted server extensions. Leave MCP_EXTENSION_ROOT empty to omit terminal_reload_agent entirely.
 # When enabled, use an absolute administrator-controlled directory outside every terminal/CI/user-writable workspace.

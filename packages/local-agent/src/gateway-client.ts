@@ -264,7 +264,9 @@ export class AgentGatewayClient {
       return;
     }
     if (message.type === 'agent.resume.ack') {
-      for (const snapshot of this.agent.listSessionSnapshots()) {
+      const snapshots = this.agent.listSessionSnapshots();
+      this.pruneReplayState(snapshots.map((snapshot) => snapshot.session.session_id));
+      for (const snapshot of snapshots) {
         const sessionId = snapshot.session.session_id;
         const sequence = message.sequences[sessionId] ?? snapshot.earliestCursor;
         this.ackedSequence.set(sessionId, sequence);
@@ -465,9 +467,17 @@ export class AgentGatewayClient {
   private startHeartbeat(): void {
     this.clearHeartbeat();
     this.heartbeat = setInterval(() => {
+      this.pruneReplayState(this.agent.listSessionSnapshots().map((snapshot) => snapshot.session.session_id));
       this.send({ type: 'heartbeat', timestamp: new Date().toISOString(), telemetry: this.agent.getTelemetry() });
     }, this.options.heartbeatMs);
     this.heartbeat.unref();
+  }
+
+  private pruneReplayState(sessionIds: readonly string[]): void {
+    const live = new Set(sessionIds);
+    for (const sessionId of this.ackedSequence.keys()) if (!live.has(sessionId)) this.ackedSequence.delete(sessionId);
+    for (const sessionId of this.sentSequence.keys()) if (!live.has(sessionId)) this.sentSequence.delete(sessionId);
+    for (const sessionId of this.backpressuredSessions) if (!live.has(sessionId)) this.backpressuredSessions.delete(sessionId);
   }
 
   private clearHeartbeat(): void {

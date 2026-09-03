@@ -75,6 +75,10 @@ export interface LocalTerminalAgentOptions {
   eventJournalIncludeInput?: boolean;
   workspaceRootsStatePath?: string;
   stateDir?: string;
+  maxConcurrentCodeExecutions?: number;
+  semanticMaxMemoriesPerWorkspace?: number;
+  semanticMaxSourceBytes?: number;
+  semanticMaxOpenDocuments?: number;
 }
 
 export interface AgentSessionSnapshot {
@@ -271,7 +275,7 @@ export class WorkspacePolicy {
     roots: string[],
     private readonly profile: ExecutionProfile,
   ) {
-    this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
+    this.roots = normalizeWorkspaceRoots(roots);
   }
 
   getRoots(): string[] {
@@ -280,7 +284,7 @@ export class WorkspacePolicy {
 
   addRoot(root: string): void {
     const canonical = canonicalWorkspacePath(root);
-    this.roots = unique([...this.roots, canonical]);
+    this.roots = normalizeWorkspaceRoots([...this.roots, canonical]);
   }
 
   removeRoot(root: string): void {
@@ -289,7 +293,7 @@ export class WorkspacePolicy {
   }
 
   setRoots(roots: string[]): void {
-    this.roots = unique(roots.map((root) => canonicalWorkspacePath(root)));
+    this.roots = normalizeWorkspaceRoots(roots);
   }
 
   resolveCwd(requested?: string): string {
@@ -357,6 +361,16 @@ export class WorkspacePolicy {
   }
 }
 
+const MAX_WORKSPACE_ROOTS = 256;
+
+function normalizeWorkspaceRoots(roots: string[]): string[] {
+  const normalized = unique(roots.map((root) => canonicalWorkspacePath(root)));
+  if (normalized.length > MAX_WORKSPACE_ROOTS) {
+    throw new TerminalProtocolError('SESSION_LIMIT_REACHED', `Workspace root limit of ${MAX_WORKSPACE_ROOTS} has been reached.`);
+  }
+  return normalized;
+}
+
 function canonicalWorkspacePath(path: string): string {
   try {
     return realpathSync(resolve(path));
@@ -378,7 +392,7 @@ function loadWorkspaceRoots(statePath: string | undefined, fallback: string[]): 
       throw new Error('workspace root state must contain a roots array');
     }
     const roots = (parsed as { roots: unknown[] }).roots;
-    if (!roots.every((root) => typeof root === 'string' && root.length > 0 && root.length <= 4096) || roots.length > 256) {
+    if (!roots.every((root) => typeof root === 'string' && root.length > 0 && root.length <= 4096) || roots.length > MAX_WORKSPACE_ROOTS) {
       throw new Error('workspace root state contains invalid roots');
     }
     return roots as string[];
@@ -493,10 +507,16 @@ export class LocalTerminalAgent implements TerminalAgentApi {
     // Code and LSP execution are intentionally workspace-contained even for owner-full.
     this.executionWorkspacePolicy = new WorkspacePolicy(workspaceRoots, 'developer');
     const environment = cleanEnvironment();
-    this.codeExecutor = new CodeBlockExecutor({ environment });
+    this.codeExecutor = new CodeBlockExecutor({
+      environment,
+      ...(options.maxConcurrentCodeExecutions === undefined ? {} : { maxConcurrentExecutions: options.maxConcurrentCodeExecutions }),
+    });
     this.lspManager = new LspManager({ servers: options.lspServers ?? {}, environment });
     this.semanticManager = new SemanticLspManager(this.lspManager, {
       ...(this.stateDir ? { memoryDir: join(this.stateDir, 'semantic-memory') } : {}),
+      ...(options.semanticMaxMemoriesPerWorkspace === undefined ? {} : { maxMemoriesPerWorkspace: options.semanticMaxMemoriesPerWorkspace }),
+      ...(options.semanticMaxSourceBytes === undefined ? {} : { maxSourceBytes: options.semanticMaxSourceBytes }),
+      ...(options.semanticMaxOpenDocuments === undefined ? {} : { maxOpenDocuments: options.semanticMaxOpenDocuments }),
     });
     this.restorePersistedSessions();
   }
@@ -1167,6 +1187,7 @@ export class LocalTerminalAgent implements TerminalAgentApi {
       if (isTerminalFinal(managed.metadata.status)) {
         if (Number.isFinite(activityMs) && now - activityMs >= this.closedSessionRetentionMs) {
           if (managed.outputFlushTimer) clearTimeout(managed.outputFlushTimer);
+          this.eventJournal?.release(sessionId);
           this.sessions.delete(sessionId);
           this.deletePersistedSession(managed);
         }
