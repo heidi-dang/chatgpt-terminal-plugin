@@ -77,13 +77,16 @@ describe('immutable production deployment', () => {
     expect(log.match(/systemctl restart terminal-test\.service/g)?.length).toBe(2);
   });
 
-  it('removes current on a failed first deployment instead of leaving an unhealthy target', async () => {
+  it('stops newly started services when a failed first deployment has no release to roll back to', async () => {
     const fixture = await createFixture();
     const revision = 'd'.repeat(40);
     const artifact = await makeArtifact(fixture.root, revision);
     await expect(runDeploy(fixture, artifact, revision, { FAKE_CURL_FAIL: '1' })).rejects.toMatchObject({ code: 1 });
 
     await expect(readlink(join(fixture.deployRoot, 'current'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const log = await readFile(fixture.sudoLog, 'utf8');
+    expect(log).toContain('systemctl stop terminal-test.service');
+    expect(log).toContain('systemctl stop terminal-agent-test.service');
   });
 });
 

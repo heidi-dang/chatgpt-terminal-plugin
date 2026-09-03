@@ -50,6 +50,8 @@ rollback() {
       sudo systemctl restart "$TERMINAL_SERVICE_NAME" || true
       [[ -z "$agent_service" ]] || sudo systemctl restart "$agent_service" || true
     else
+      sudo systemctl stop "$TERMINAL_SERVICE_NAME" || true
+      [[ -z "$agent_service" ]] || sudo systemctl stop "$agent_service" || true
       rm -f "$current"
     fi
   fi
