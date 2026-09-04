@@ -19,7 +19,6 @@ export interface CodeBlockExecutorOptions {
   maxStderrBytes?: number;
   maxCombinedOutputBytes?: number;
   killGraceMs?: number;
-  maxConcurrentExecutions?: number;
 }
 
 type ExecutionTermination = 'cancelled' | 'shutdown';
@@ -43,7 +42,6 @@ const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_STREAM_LIMIT = 256 * 1024;
 const DEFAULT_COMBINED_LIMIT = 384 * 1024;
 const DEFAULT_KILL_GRACE_MS = 1_000;
-const DEFAULT_MAX_CONCURRENT_EXECUTIONS = 4;
 
 export class CodeBlockExecutor {
   private readonly executions = new Map<string, ExecutionState>();
@@ -55,7 +53,6 @@ export class CodeBlockExecutor {
   private readonly maxStderrBytes: number;
   private readonly maxCombinedOutputBytes: number;
   private readonly killGraceMs: number;
-  private readonly maxConcurrentExecutions: number;
 
   constructor(options: CodeBlockExecutorOptions) {
     this.environment = { ...options.environment };
@@ -65,7 +62,6 @@ export class CodeBlockExecutor {
     this.maxStderrBytes = options.maxStderrBytes ?? DEFAULT_STREAM_LIMIT;
     this.maxCombinedOutputBytes = options.maxCombinedOutputBytes ?? DEFAULT_COMBINED_LIMIT;
     this.killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
-    this.maxConcurrentExecutions = Math.max(1, options.maxConcurrentExecutions ?? DEFAULT_MAX_CONCURRENT_EXECUTIONS);
   }
 
   async execute(
@@ -79,9 +75,6 @@ export class CodeBlockExecutor {
     }
     if (this.executions.has(input.execution_id)) {
       throw new TerminalProtocolError('INVALID_ARGUMENT', 'Execution identifier is already active.');
-    }
-    if (this.executions.size >= this.maxConcurrentExecutions) {
-      throw new TerminalProtocolError('SESSION_LIMIT_REACHED', 'Concurrent code execution limit has been reached.');
     }
 
     const invocation = runtimeInvocation(input.runtime, this.environment);

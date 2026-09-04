@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ChatGptMcpBridge,
+  TerminalOutputRenderer,
   TerminalViewer,
   appendRichTerminalText,
   classifySequence,
@@ -250,6 +251,7 @@ describe('terminal MCP App UI', () => {
 
     const text = document.getElementById('terminal-output')?.textContent ?? '';
     expect(text).toContain('[Older terminal output trimmed for mobile performance]');
+    expect(text).toMatch(/\d[\d,]* characters omitted/);
     expect(text.length).toBeLessThan(170_000);
     viewer.destroy();
   });
@@ -346,6 +348,75 @@ describe('terminal MCP App UI', () => {
     source.emit({ sequence: 6, event_type: 'terminal.stdout', data: { text: 'while-following\r\n' } });
     await flushFrames();
     expect(output.scrollTop).toBe(1000);
+    viewer.destroy();
+  });
+
+  it('replaces carriage-return progress lines even when chunks arrive separately', () => {
+    const output = document.getElementById('terminal-output')!;
+    output.textContent = '';
+    const renderer = new TerminalOutputRenderer(output);
+
+    renderer.append('Downloading 10%');
+    renderer.append('\rDownloading 20%');
+    renderer.append('\rDownloading 100%\r\nDone\r\n');
+
+    expect(output.textContent).toBe('Downloading 100%\nDone\n');
+    expect(renderer.text).toBe('Downloading 100%\nDone\n');
+  });
+
+  it('exposes an accessible jump-to-live control when the reader leaves the tail', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+
+    const output = document.getElementById('terminal-output') as HTMLElement;
+    const jump = document.getElementById('terminal-jump-to-live') as HTMLButtonElement;
+    Object.defineProperties(output, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    output.scrollTop = 100;
+    output.dispatchEvent(new Event('scroll'));
+    expect(jump.hidden).toBe(false);
+    expect(jump.getAttribute('aria-controls')).toBe('terminal-output');
+
+    output.scrollTop = 100;
+    terminalSource().emit({ sequence: 5, event_type: 'terminal.stdout', data: { text: 'new output\r\n' } });
+    await flushFrames();
+    expect(jump.textContent).toContain('New output');
+    expect(document.getElementById('terminal-live-announcement')?.textContent).toContain('new terminal output');
+
+    jump.click();
+    expect(output.scrollTop).toBe(1000);
+    expect(jump.hidden).toBe(true);
+    viewer.destroy();
+  });
+
+  it('keeps connection state user-facing and transport diagnostics secondary', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.ontoolresult?.(initialResult());
+    await flushFrames();
+    expect(document.getElementById('terminal-status')?.textContent).toBe('Connecting');
+
+    terminalSource().emitOpen();
+    expect(document.getElementById('terminal-status')?.textContent).toBe('Live');
+    expect(document.getElementById('terminal-stream-state')?.textContent).toBe('SSE LIVE');
+    expect(document.getElementById('terminal-status')?.getAttribute('title')).toContain('SSE transport');
+    viewer.destroy();
+  });
+
+  it('applies host light and dark theme changes without changing terminal content', async () => {
+    const app = createFakeApp();
+    const viewer = new TerminalViewer(app);
+    viewer.bind();
+    app.onhostcontextchanged?.({ theme: 'light' });
+    expect(document.documentElement.dataset.theme).toBe('light');
+    app.onhostcontextchanged?.({ theme: 'dark' });
+    expect(document.documentElement.dataset.theme).toBe('dark');
     viewer.destroy();
   });
 

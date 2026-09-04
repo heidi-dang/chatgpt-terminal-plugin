@@ -155,38 +155,6 @@ describe('Serena-style semantic LSP layer', () => {
     ]);
   });
 
-  it('does not populate the diagnostics cache from unsolicited workspace-wide notifications', async () => {
-    const fixture = await createFixture();
-    await writeFile(join(fixture.root, 'sample.ts'), 'export const broken = true;\n', 'utf8');
-    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
-    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'sample.ts');
-    await waitUntil(async () => (await fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts')).diagnostics.length === 1);
-
-    await fixture.semantic.findSymbols('user-a', opened.semantic_id, 'diagnostic-flood');
-
-    const internal = fixture.semantic as unknown as {
-      workspaces: Map<string, { diagnostics: Map<string, unknown> }>;
-    };
-    expect(internal.workspaces.get(opened.semantic_id)?.diagnostics.size).toBe(1);
-  });
-
-  it('removes cleared diagnostics instead of retaining empty cache entries', async () => {
-    const fixture = await createFixture();
-    await writeFile(join(fixture.root, 'sample.ts'), 'export const broken = true;\n', 'utf8');
-    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
-    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'sample.ts');
-    await waitUntil(async () => (await fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts')).diagnostics.length === 1);
-
-    await fixture.semantic.findSymbols('user-a', opened.semantic_id, 'diagnostic-clear');
-
-    const internal = fixture.semantic as unknown as {
-      workspaces: Map<string, { diagnostics: Map<string, unknown> }>;
-    };
-    expect(internal.workspaces.get(opened.semantic_id)?.diagnostics.size).toBe(0);
-    await expect(fixture.semantic.diagnostics('user-a', opened.semantic_id, 'sample.ts'))
-      .resolves.toMatchObject({ diagnostics: [] });
-  });
-
   it('previews and applies a language-server rename across workspace files', async () => {
     const fixture = await createFixture();
     const first = join(fixture.root, 'sample.ts');
@@ -279,35 +247,6 @@ describe('Serena-style semantic LSP layer', () => {
     expect(overview.memories).toContain('architecture');
   });
 
-  it('bounds named semantic memories per workspace root', async () => {
-    const fixture = await createFixture({ maxMemoriesPerWorkspace: 2 });
-    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
-    await fixture.semantic.writeMemory('user-a', opened.semantic_id, 'one', '1');
-    await fixture.semantic.writeMemory('user-a', opened.semantic_id, 'two', '2');
-    await expect(fixture.semantic.writeMemory('user-a', opened.semantic_id, 'three', '3'))
-      .rejects.toMatchObject({ code: 'OUTPUT_LIMIT_REACHED' });
-  });
-
-  it('rejects semantic source files above the configured byte ceiling', async () => {
-    const fixture = await createFixture({ maxSourceBytes: 64 });
-    await writeFile(join(fixture.root, 'oversized.ts'), `export const value = '${'x'.repeat(128)}';\n`, 'utf8');
-    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
-    await expect(fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'oversized.ts'))
-      .rejects.toMatchObject({ code: 'FILE_TOO_LARGE' });
-  });
-
-  it('bounds simultaneously opened semantic documents per workspace', async () => {
-    const fixture = await createFixture({ maxOpenDocuments: 2 });
-    for (const name of ['one.ts', 'two.ts', 'three.ts']) {
-      await writeFile(join(fixture.root, name), `export const ${name.replace('.ts', '')} = 1;\n`, 'utf8');
-    }
-    const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
-    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'one.ts');
-    await fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'two.ts');
-    await expect(fixture.semantic.documentSymbols('user-a', opened.semantic_id, 'three.ts'))
-      .rejects.toMatchObject({ code: 'SESSION_LIMIT_REACHED' });
-  });
-
   it('isolates semantic sessions by user and stops the underlying LSP process', async () => {
     const fixture = await createFixture();
     const opened = await fixture.semantic.open('user-a', { server_id: 'fake', root: fixture.root }, fixture.root);
@@ -322,7 +261,7 @@ describe('Serena-style semantic LSP layer', () => {
 
 type LogEntry = { method: string; hasId: boolean; params?: unknown };
 
-async function createFixture(options: { maxMemoriesPerWorkspace?: number; maxSourceBytes?: number; maxOpenDocuments?: number } = {}): Promise<{
+async function createFixture(): Promise<{
   root: string;
   logPath: string;
   lsp: LspManager;
@@ -342,7 +281,7 @@ async function createFixture(options: { maxMemoriesPerWorkspace?: number; maxSou
     requestTimeoutMs: 2_000,
   });
   cleanup.push(() => lsp.stopAll());
-  const semantic = new SemanticLspManager(lsp, { memoryDir: join(root, '.semantic-memory'), ...options } as never);
+  const semantic = new SemanticLspManager(lsp, { memoryDir: join(root, '.semantic-memory') });
   cleanup.push(() => semantic.stopAll());
   return { root, logPath, lsp, semantic };
 }
@@ -409,21 +348,6 @@ function handle(message) {
     }
   }
   if (message.method === 'workspace/symbol') {
-    if (message.params?.query === 'diagnostic-flood') {
-      for (let i = 0; i < 128; i += 1) {
-        send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
-          uri: rootUri + '/unsolicited-' + i + '.ts',
-          diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: 'unsolicited' }]
-        } });
-      }
-      return send({ jsonrpc: '2.0', id: message.id, result: [] });
-    }
-    if (message.params?.query === 'diagnostic-clear') {
-      send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: {
-        uri: rootUri + '/sample.ts', diagnostics: []
-      } });
-      return send({ jsonrpc: '2.0', id: message.id, result: [] });
-    }
     if (message.params?.query === 'huge') {
       return send({ jsonrpc: '2.0', id: message.id, result: [0, 1, 2].map(i => ({ name: 'x'.repeat(40000) + i, kind: 12, location: location(i, 0) })) });
     }

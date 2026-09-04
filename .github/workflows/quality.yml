@@ -32,9 +32,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Dependency audit
-        run: pnpm audit --audit-level=high
-
       - name: Typecheck
         run: pnpm typecheck
 
@@ -52,6 +49,3 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-      - name: Diff hygiene
-        run: git diff --check

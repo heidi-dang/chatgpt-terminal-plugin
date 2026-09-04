@@ -29,8 +29,6 @@ describe('server configuration invariants', () => {
     expect(config.allowedHosts).toEqual(['terminal.example.com']);
     expect(config.defaultExecutionProfile).toBe('developer');
     expect(config.shutdownGraceMs).toBe(2_000);
-    expect(config.mcpSessionIdleMs).toBe(30 * 60_000);
-    expect(config.mcpSessionSweepIntervalMs).toBe(30_000);
     expect(config.terminalTurnStatePath).toBe('/var/lib/chatgpt-terminal/terminal-turns.json');
     expect(config.terminalSurfaceRetentionMs).toBe(30 * 24 * 60 * 60_000);
   });
@@ -89,13 +87,6 @@ describe('server configuration invariants', () => {
       .toThrow(/production.*session quota.*agent/i);
   });
 
-  it('keeps MCP session sweeping no slower than the configured idle expiry', () => {
-    expect(() => loadConfig(productionEnv({
-      MCP_SESSION_IDLE_MS: '1000',
-      MCP_SESSION_SWEEP_INTERVAL_MS: '2000',
-    }))).toThrow(/MCP_SESSION_SWEEP_INTERVAL_MS.*less than or equal/i);
-  });
-
   it('keeps surface retention longer than the active PTY lease', () => {
     expect(() => loadConfig(productionEnv({
       TERMINAL_TURN_LEASE_MS: '120000',
@@ -106,25 +97,6 @@ describe('server configuration invariants', () => {
       TERMINAL_SURFACE_RETENTION_MS: '2592000000',
     }));
     expect(config.terminalSurfaceRetentionMs).toBe(2_592_000_000);
-  });
-
-  it('exposes bounded HTTP population controls with production-safe defaults and overrides', () => {
-    const defaults = loadConfig(productionEnv());
-    expect(defaults.maxMcpSessions).toBe(256);
-    expect(defaults.maxUiReloadClients).toBe(128);
-    expect(defaults.maxTerminalStreamsPerSession).toBe(4);
-    expect(defaults.rateLimitMaxBuckets).toBe(10_000);
-
-    const tuned = loadConfig(productionEnv({
-      MCP_MAX_SESSIONS: '32',
-      MCP_MAX_UI_RELOAD_CLIENTS: '24',
-      MCP_MAX_TERMINAL_STREAMS_PER_SESSION: '3',
-      RATE_LIMIT_MAX_BUCKETS: '2048',
-    }));
-    expect(tuned.maxMcpSessions).toBe(32);
-    expect(tuned.maxUiReloadClients).toBe(24);
-    expect(tuned.maxTerminalStreamsPerSession).toBe(3);
-    expect(tuned.rateLimitMaxBuckets).toBe(2048);
   });
 
   it('requires an absolute persisted turn-state path when one is explicitly configured', () => {

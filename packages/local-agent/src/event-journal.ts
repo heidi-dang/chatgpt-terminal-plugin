@@ -123,13 +123,6 @@ export class SessionEventJournal {
     }
   }
 
-  release(sessionId: string): void {
-    const writer = this.writers.get(sessionId);
-    if (!writer) return;
-    try { closeSync(writer.fd); } catch { /* already closed */ }
-    this.writers.delete(sessionId);
-  }
-
   close(): void {
     if (this.closed) return;
     this.closed = true;

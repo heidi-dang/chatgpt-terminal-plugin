@@ -16,7 +16,11 @@ describe('terminal UI static-first contract', () => {
   });
 
   it('uses a lightweight vanilla runtime instead of React/xterm boot dependencies', async () => {
-    const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
+    const runtime = await Promise.all([
+      readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8'),
+      readFile(join(root, 'packages/terminal-ui/src/bridge.ts'), 'utf8'),
+      readFile(join(root, 'packages/terminal-ui/src/stream-controller.ts'), 'utf8'),
+    ]).then((parts) => parts.join('\n'));
     expect(runtime).not.toMatch(/react|react-dom|@xterm\/xterm|@xterm\/addon-fit/i);
     expect(runtime).not.toMatch(/@modelcontextprotocol\/ext-apps/);
     expect(runtime).toContain("'ui/initialize'");
@@ -52,8 +56,18 @@ describe('terminal UI static-first contract', () => {
   });
 
   it('reports widget size changes in the ChatGPT openai compatibility path', async () => {
-    const runtime = await readFile(join(root, 'packages/terminal-ui/src/main.ts'), 'utf8');
+    const runtime = await readFile(join(root, 'packages/terminal-ui/src/bridge.ts'), 'utf8');
     expect(runtime).toMatch(/if \(openAi\) \{[\s\S]*?this\.startAutoResize\(\);[\s\S]*?return;/);
+  });
+
+  it('ships accessible output navigation in the static shell', async () => {
+    const html = await readFile(join(root, 'packages/terminal-ui/index.html'), 'utf8');
+    const css = await readFile(join(root, 'packages/terminal-ui/src/styles.css'), 'utf8');
+    expect(html).toContain('id="terminal-jump-to-live"');
+    expect(html).toContain('aria-controls="terminal-output"');
+    expect(html).toContain('role="log"');
+    expect(css).toContain(':focus-visible');
+    expect(css).toContain('color-scheme: dark light');
   });
 
   it('boots the app runtime whenever the static terminal shell exists', async () => {

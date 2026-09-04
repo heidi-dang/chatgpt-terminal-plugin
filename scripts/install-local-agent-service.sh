@@ -11,14 +11,6 @@ ENV_FILE="$HOME/.config/chatgpt-terminal-plugin/agent.env"
 UNIT_SOURCE="$ROOT_DIR/deploy/systemd/chatgpt-terminal-agent.service.example"
 RESTART=1
 TMP_LINK=''
-UNIT_BACKUP=''
-PREVIOUS_CURRENT_TARGET=''
-PREVIOUS_CURRENT_PRESENT=0
-PREVIOUS_UNIT_PRESENT=0
-PREVIOUS_ENABLED=0
-MUTATION_STARTED=0
-INSTALL_COMMITTED=0
-SERVICE_NAME='chatgpt-terminal-agent.service'
 
 usage() {
   cat <<'USAGE'
@@ -40,37 +32,9 @@ die() {
 }
 
 cleanup() {
-  rc=$?
-  trap - EXIT
-  set +e
-
-  if ((MUTATION_STARTED && !INSTALL_COMMITTED)); then
-    if ((PREVIOUS_CURRENT_PRESENT)); then
-      rollback_link="$INSTALL_ROOT/.current.rollback.$$"
-      ln -s -- "$PREVIOUS_CURRENT_TARGET" "$rollback_link"
-      mv -Tf -- "$rollback_link" "$CURRENT_LINK"
-    else
-      rm -f -- "$CURRENT_LINK"
-    fi
-
-    if ((PREVIOUS_UNIT_PRESENT)); then
-      install -m 0644 -- "$UNIT_BACKUP" "$UNIT_PATH"
-    else
-      rm -f -- "$UNIT_PATH"
-    fi
-
-    systemctl --user daemon-reload || true
-    if ((PREVIOUS_ENABLED)); then
-      systemctl --user enable "$SERVICE_NAME" >/dev/null 2>&1 || true
-      ((RESTART)) && systemctl --user restart "$SERVICE_NAME" || true
-    else
-      systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
-    fi
+  if [[ -n "$TMP_LINK" ]]; then
+    rm -f -- "$TMP_LINK"
   fi
-
-  [[ -z "$TMP_LINK" ]] || rm -f -- "$TMP_LINK"
-  [[ -z "$UNIT_BACKUP" ]] || rm -f -- "$UNIT_BACKUP"
-  exit "$rc"
 }
 trap cleanup EXIT
 
@@ -99,25 +63,6 @@ command -v systemctl >/dev/null 2>&1 || die 'systemctl is required for the user 
 
 mkdir -p -- "$INSTALL_ROOT" "$UNIT_DIR"
 
-if [[ -L "$CURRENT_LINK" ]]; then
-  PREVIOUS_CURRENT_TARGET=$(readlink -- "$CURRENT_LINK")
-  PREVIOUS_CURRENT_PRESENT=1
-elif [[ -e "$CURRENT_LINK" ]]; then
-  die "$CURRENT_LINK must be a symlink or absent."
-fi
-if [[ -f "$UNIT_PATH" ]]; then
-  UNIT_BACKUP=$(mktemp "$INSTALL_ROOT/.agent-unit-backup.XXXXXX")
-  cp -p -- "$UNIT_PATH" "$UNIT_BACKUP"
-  PREVIOUS_UNIT_PRESENT=1
-elif [[ -e "$UNIT_PATH" ]]; then
-  die "$UNIT_PATH must be a regular file or absent."
-fi
-if systemctl --user is-enabled --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
-  PREVIOUS_ENABLED=1
-fi
-
-MUTATION_STARTED=1
-
 # Keep systemd bound to one durable path. Only this symlink changes between verified
 # checkouts/releases, so a timestamped checkout is never baked into the service unit.
 TMP_LINK="$INSTALL_ROOT/.current.$$"
@@ -127,13 +72,13 @@ TMP_LINK=''
 
 install -m 0644 -- "$UNIT_SOURCE" "$UNIT_PATH"
 systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME" >/dev/null
+systemctl --user enable chatgpt-terminal-agent.service >/dev/null
 
 if ((RESTART)); then
   # Agent restart intentionally replaces its gateway connection/PTY ownership; callers
   # should run the updater between Terminal turns, not during an active user PTY.
-  systemctl --user restart "$SERVICE_NAME"
-  systemctl --user is-active --quiet "$SERVICE_NAME" || \
+  systemctl --user restart chatgpt-terminal-agent.service
+  systemctl --user is-active --quiet chatgpt-terminal-agent.service || \
     die 'chatgpt-terminal-agent.service did not become active.'
   printf 'Updated local-agent service to %s and restarted it successfully.\n' "$ROOT_DIR"
 else

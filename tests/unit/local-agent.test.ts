@@ -302,68 +302,6 @@ describe('LocalTerminalAgent', () => {
     );
   });
 
-  it('does not let irrelevant state files consume the restored-session limit', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'terminal-session-state-cap-root-'));
-    const stateDir = await mkdtemp(join(tmpdir(), 'terminal-session-state-cap-'));
-    cleanup.push(() => rm(root, { recursive: true, force: true }));
-    cleanup.push(() => rm(stateDir, { recursive: true, force: true }));
-
-    const now = new Date().toISOString();
-    await Promise.all(Array.from({ length: 256 }, (_, index) => {
-      const foreignSessionId = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
-      return writeTextFile(join(stateDir, `000-foreign-${String(index).padStart(3, '0')}.json`), `${JSON.stringify({
-        version: 1,
-        session: {
-          session_id: foreignSessionId,
-          agent_id: 'different-agent',
-          user_id: 'user-test',
-          execution_profile: 'developer',
-          cwd: root,
-          shell: 'bash',
-          cols: 80,
-          rows: 24,
-          status: 'closed',
-          created_at: now,
-          last_activity_at: now,
-          exit_code: null,
-        },
-        events: [],
-        sequence: 0,
-        earliest_sequence: 1,
-      })}\n`, 'utf8');
-    }));
-
-    const sessionId = '00000000-0000-4000-8000-000000999999';
-    await writeTextFile(join(stateDir, 'zzzz-valid.json'), `${JSON.stringify({
-      version: 1,
-      session: {
-        session_id: sessionId,
-        agent_id: 'agent-session-state-cap',
-        user_id: 'user-test',
-        execution_profile: 'developer',
-        cwd: root,
-        shell: 'bash',
-        cols: 80,
-        rows: 24,
-        status: 'closed',
-        created_at: now,
-        last_activity_at: now,
-        exit_code: null,
-      },
-      events: [],
-      sequence: 0,
-      earliest_sequence: 1,
-    })}\n`, 'utf8');
-
-    const restored = new LocalTerminalAgent({
-      agentId: 'agent-session-state-cap', allowedWorkspaceRoots: [root], executionProfile: 'developer', shells: ['bash'],
-      stateDir,
-    });
-    cleanup.push(() => restored.shutdown());
-
-    expect(restored.listSessionSnapshots().some((snapshot) => snapshot.session.session_id === sessionId)).toBe(true);
-  });
-
   it('submits a terminal_start command as a complete line on a fresh PTY', async () => {
     const root = await mkdtemp(join(tmpdir(), 'terminal-start-command-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

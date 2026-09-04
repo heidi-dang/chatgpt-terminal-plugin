@@ -45,11 +45,6 @@ const configSchema = z.object({
   MCP_PORT: positiveInt(8787, 65_535),
   MCP_PUBLIC_URL: z.string().url(),
   MCP_SHUTDOWN_GRACE_MS: positiveInt(2_000, 10_000),
-  MCP_SESSION_IDLE_MS: positiveInt(30 * 60_000, 24 * 60 * 60_000),
-  MCP_SESSION_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
-  MCP_MAX_SESSIONS: positiveInt(256, 100_000),
-  MCP_MAX_UI_RELOAD_CLIENTS: positiveInt(128, 10_000),
-  MCP_MAX_TERMINAL_STREAMS_PER_SESSION: positiveInt(4, 1_000),
   AGENT_GATEWAY_PATH: z.string().regex(/^\//).default('/agent'),
   AGENT_ENROLLMENT_PATH: z.string().regex(/^\//).default('/agent/enroll'),
   AGENT_DEVICE_REGISTRY_PATH: optionalString,
@@ -88,7 +83,6 @@ const configSchema = z.object({
   TERMINAL_SWEEP_INTERVAL_MS: positiveInt(30_000, 10 * 60_000),
   AGENT_REQUEST_TIMEOUT_MS: positiveInt(15_000, 120_000),
   REQUESTS_PER_MINUTE: positiveInt(120, 10_000),
-  RATE_LIMIT_MAX_BUCKETS: positiveInt(10_000, 1_000_000),
   MCP_EXTENSION_ROOT: optionalString,
   MCP_EXTENSION_MAX_BYTES: positiveInt(262_144, 4 * 1024 * 1024),
   AUDIT_LOG_PATH: optionalString,
@@ -158,10 +152,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error('TERMINAL_SURFACE_RETENTION_MS must be greater than or equal to TERMINAL_TURN_LEASE_MS.');
   }
 
-  if (parsed.MCP_SESSION_SWEEP_INTERVAL_MS > parsed.MCP_SESSION_IDLE_MS) {
-    throw new Error('MCP_SESSION_SWEEP_INTERVAL_MS must be less than or equal to MCP_SESSION_IDLE_MS.');
-  }
-
   if (parsed.MCP_EXTENSION_ROOT && !isAbsolute(parsed.MCP_EXTENSION_ROOT)) {
     throw new Error('MCP_EXTENSION_ROOT must be an absolute administrator-controlled path.');
   }
@@ -179,11 +169,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     port: parsed.MCP_PORT,
     publicUrl,
     shutdownGraceMs: parsed.MCP_SHUTDOWN_GRACE_MS,
-    mcpSessionIdleMs: parsed.MCP_SESSION_IDLE_MS,
-    mcpSessionSweepIntervalMs: parsed.MCP_SESSION_SWEEP_INTERVAL_MS,
-    maxMcpSessions: parsed.MCP_MAX_SESSIONS,
-    maxUiReloadClients: parsed.MCP_MAX_UI_RELOAD_CLIENTS,
-    maxTerminalStreamsPerSession: parsed.MCP_MAX_TERMINAL_STREAMS_PER_SESSION,
     agentGatewayPath: parsed.AGENT_GATEWAY_PATH,
     agentEnrollmentPath: parsed.AGENT_ENROLLMENT_PATH,
     deviceRegistryPath: parsed.AGENT_DEVICE_REGISTRY_PATH,
@@ -230,7 +215,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     terminalSweepIntervalMs: parsed.TERMINAL_SWEEP_INTERVAL_MS,
     agentRequestTimeoutMs: parsed.AGENT_REQUEST_TIMEOUT_MS,
     requestsPerMinute: parsed.REQUESTS_PER_MINUTE,
-    rateLimitMaxBuckets: parsed.RATE_LIMIT_MAX_BUCKETS,
     extensionRoot: parsed.MCP_EXTENSION_ROOT,
     extensionMaxBytes: parsed.MCP_EXTENSION_MAX_BYTES,
     auditLogPath: parsed.AUDIT_LOG_PATH,

@@ -124,7 +124,7 @@ Each accepted terminal event receives:
 
 The agent limits the number of sent-but-unacknowledged events with `AGENT_MAX_INFLIGHT_EVENTS`. Local output history is bounded by `TERMINAL_BUFFER_HIGH_WATER_BYTES`. Control messages also use a bounded queue.
 
-If the gateway is temporarily unavailable, PTY output continues to accumulate only up to the configured local retention limit. On reconnect the server cursor and agent `earliestCursor` determine the replay boundary. This prevents indefinite buffering while preserving resumability within retained history and explicitly invalidating cursors that reference evicted output. If an agent never reconnects, its offline gateway record and server-side `disconnected` session records are evicted after `TERMINAL_CLOSED_SESSION_RETENTION_MS`; a later reconnect starts from the agent's retained snapshot instead of depending on those stale server records.
+If the gateway is temporarily unavailable, PTY output continues to accumulate only up to the configured local retention limit. On reconnect the server cursor and agent `earliestCursor` determine the replay boundary. This prevents indefinite buffering while preserving resumability within retained history and explicitly invalidating cursors that reference evicted output.
 
 ## MCP terminal operations
 
